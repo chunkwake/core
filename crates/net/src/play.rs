@@ -2770,6 +2770,57 @@ fn is_randomizable_container(block: &str) -> bool {
         || matches!(block, "minecraft:dispenser" | "minecraft:dropper")
 }
 
+/// `minecraft:block_entity_data`: NBT с `id` → тип и данные без `id`.
+fn block_entity_data_nbt(text: &str) -> Option<(String, Compound)> {
+    let mut c = crate::play::commands::snbt::parse_value(text)?
+        .as_compound()?
+        .clone();
+    let id = c.get("id").and_then(Tag::as_str)?;
+    let id = if id.contains(':') {
+        id.to_owned()
+    } else {
+        format!("minecraft:{id}")
+    };
+    c.remove("id");
+    Some((id, c))
+}
+
+/// `BaseContainerBlockEntity.applyImplicitComponents`: имя, замок и добыча.
+/// Возвращает содержимое `minecraft:container` для второго шага.
+fn apply_container_components(
+    e: &chunkwake_protocol::components::Extra,
+    block: &str,
+    nbt: &mut Compound,
+) -> Option<Vec<Slot>> {
+    if block == "minecraft:lectern" {
+        return None;
+    }
+    if let Some(name) = &e.custom_name {
+        nbt.insert(
+            "CustomName".into(),
+            crate::stack_nbt::json_to_tag(&crate::stack_nbt::text_json(name)),
+        );
+    }
+    if let Some(lock) = &e.lock
+        && let Some(Tag::Compound(c)) = crate::play::commands::snbt::parse_value(lock)
+    {
+        nbt.insert("lock".into(), Tag::Compound(c));
+    }
+    if is_randomizable_container(block)
+        && let Some(loot) = &e.container_loot
+        && let Some(c) =
+            crate::play::commands::snbt::parse_value(loot).and_then(|t| t.as_compound().cloned())
+    {
+        if let Some(table) = c.get("loot_table").and_then(Tag::as_str) {
+            nbt.insert("LootTable".into(), Tag::String(table.to_owned()));
+        }
+        if let Some(seed) = c.get("seed").and_then(Tag::as_i64).filter(|&s| s != 0) {
+            nbt.insert("LootTableSeed".into(), Tag::Long(seed));
+        }
+    }
+    (!e.container.is_empty()).then(|| e.container.clone())
+}
+
 /// Ключ перевода названия контейнера по умолчанию (`getDefaultName`).
 fn container_name_key(block: &str) -> &'static str {
     match block {
@@ -2922,8 +2973,8 @@ mod game_events;
 mod item_frames;
 mod jukebox;
 mod kinds;
-mod lock;
 mod leashes;
+mod lock;
 mod maps;
 mod minecarts;
 mod minerals;
@@ -18599,51 +18650,25 @@ impl PlayPlan {
                                 if let Some(id) = container_entity(&name) {
                                     let mut nbt = Compound::new();
                                     let mut contents = None;
-                                    if name != "minecraft:lectern"
-                                        && let Some(extra) = hand_slot
-                                            .and_then(|i| state.inv.slots[i])
-                                            .map(|s| s.extra)
+                                    if let Some(extra) = hand_slot
+                                        .and_then(|i| state.inv.slots[i])
+                                        .map(|s| s.extra)
                                     {
                                         let e = chunkwake_protocol::components::get(extra);
-                                        if let Some(name) = &e.custom_name {
-                                            nbt.insert(
-                                                "CustomName".into(),
-                                                crate::stack_nbt::json_to_tag(
-                                                    &crate::stack_nbt::text_json(name),
-                                                ),
-                                            );
-                                        }
-                                        if let Some(lock) = &e.lock
-                                            && let Some(Tag::Compound(c)) =
-                                                crate::play::commands::snbt::parse_value(lock)
+                                        // `BlockItem.updateCustomBlockEntityTag`:
+                                        // `block_entity_data` грузится до неявных
+                                        // компонентов, которые затем перекрывают поля.
+                                        if let Some(data) = &e.block_entity_data
+                                            && let Some((bed_id, data)) =
+                                                block_entity_data_nbt(data)
+                                            && bed_id == id
                                         {
-                                            nbt.insert("lock".into(), Tag::Compound(c));
-                                        }
-                                        if is_randomizable_container(&name)
-                                            && let Some(loot) = &e.container_loot
-                                            && let Some(c) =
-                                                crate::play::commands::snbt::parse_value(loot)
-                                                    .and_then(|t| t.as_compound().cloned())
-                                        {
-                                            if let Some(table) =
-                                                c.get("loot_table").and_then(Tag::as_str)
-                                            {
-                                                nbt.insert(
-                                                    "LootTable".into(),
-                                                    Tag::String(table.to_owned()),
-                                                );
-                                            }
-                                            if let Some(seed) = c
-                                                .get("seed")
-                                                .and_then(Tag::as_i64)
-                                                .filter(|&s| s != 0)
-                                            {
-                                                nbt.insert("LootTableSeed".into(), Tag::Long(seed));
+                                            for (key, value) in data {
+                                                nbt.insert(key, value);
                                             }
                                         }
-                                        if !e.container.is_empty() {
-                                            contents = Some(e.container.clone());
-                                        }
+                                        contents =
+                                            apply_container_components(&e, &name, &mut nbt);
                                     }
                                     self.set_block_entity(
                                         target,
@@ -18651,6 +18676,43 @@ impl PlayPlan {
                                     );
                                     if let Some(contents) = contents {
                                         self.set_container_slots(target, &contents);
+                                    }
+                                }
+                                // `JukeboxBlock.setPlacedBy`: `block_entity_data`
+                                // с `RecordItem` включает `has_record`, а тики
+                                // продолжают сохранённую песню без события 1010.
+                                if self.state_name(place) == jukebox::JUKEBOX
+                                    && let Some(extra) = hand_slot
+                                        .and_then(|i| state.inv.slots[i])
+                                        .map(|s| s.extra)
+                                    && let Some((bed_id, data)) = chunkwake_protocol::components::get(extra)
+                                        .block_entity_data
+                                        .as_deref()
+                                        .and_then(block_entity_data_nbt)
+                                    && bed_id == jukebox::JUKEBOX
+                                {
+                                    let record = data.contains_key("RecordItem");
+                                    let ticks = data
+                                        .get("ticks_since_song_started")
+                                        .and_then(Tag::as_i64)
+                                        .is_some();
+                                    self.set_block_entity(
+                                        target,
+                                        Some(BlockEntity {
+                                            id: jukebox::JUKEBOX.into(),
+                                            nbt: data,
+                                        }),
+                                    );
+                                    if record
+                                        && let Some(next) = self
+                                            .survival
+                                            .placement
+                                            .with_prop(place, "has_record", "true")
+                                    {
+                                        self.set_block(target, next);
+                                    }
+                                    if ticks {
+                                        self.adopt_jukebox(target);
                                     }
                                 }
                                 if banners::banner_color(self.state_name(place)).is_some() {
@@ -19646,22 +19708,15 @@ impl PlayPlan {
             .nbt
             .get("lock")
             .map(crate::play::commands::snbt::format_tag);
-        let container_loot = be
-            .nbt
-            .get("LootTable")
-            .and_then(Tag::as_str)
-            .map(|table| {
-                let mut c = Compound::from([(
-                    "loot_table".into(),
-                    Tag::String(table.to_owned()),
-                )]);
-                if let Some(seed) = be.nbt.get("LootTableSeed").and_then(Tag::as_i64)
-                    && seed != 0
-                {
-                    c.insert("seed".into(), Tag::Long(seed));
-                }
-                crate::play::commands::snbt::format_tag(&Tag::Compound(c))
-            });
+        let container_loot = be.nbt.get("LootTable").and_then(Tag::as_str).map(|table| {
+            let mut c = Compound::from([("loot_table".into(), Tag::String(table.to_owned()))]);
+            if let Some(seed) = be.nbt.get("LootTableSeed").and_then(Tag::as_i64)
+                && seed != 0
+            {
+                c.insert("seed".into(), Tag::Long(seed));
+            }
+            crate::play::commands::snbt::format_tag(&Tag::Compound(c))
+        });
         if slots.iter().all(Option::is_none)
             && name.is_none()
             && lock.is_none()
@@ -28652,10 +28707,10 @@ mod tests {
     use super::{
         CHEST_SINGLE, CUSTOM_FIRST, ChestState, ClientLoading, DimSpec, Dimension,
         DynamicFactoryFn, DynamicGen, FastMap, GameModeChange, LOAD_GATED_PACKETS,
-        acknowledge_player_save, add_banner_pattern, apply_inventory_open_reply, chunks_around,
-        container_entity, create_dynamic_world, derived_seed, dominant_axis, dynamic_world_args,
-        game_mode_change, in_view, lectern_page_request, update_container_viewers,
-        within_pick_range,
+        acknowledge_player_save, add_banner_pattern, apply_inventory_open_reply,
+        block_entity_data_nbt, chunks_around, container_entity, create_dynamic_world, derived_seed,
+        dominant_axis, dynamic_world_args, game_mode_change, in_view, lectern_page_request,
+        update_container_viewers, within_pick_range,
     };
     use crate::survival::PlayerState;
     use uuid::Uuid;
@@ -29122,6 +29177,19 @@ mod tests {
             assert_eq!(container_entity(name), Some("minecraft:chest"));
         }
         assert!(!base.same_family(ChestState { copper: 0, ..base }));
+    }
+
+    /// `TypedEntityData` отделяет тип от данных (`stripId`).
+    #[test]
+    fn block_entity_data_splits_type_and_payload() {
+        let (id, data) = block_entity_data_nbt(
+            r#"{id:"minecraft:jukebox",RecordItem:{id:"minecraft:music_disc_cat",count:1b}}"#,
+        )
+        .unwrap();
+        assert_eq!(id, "minecraft:jukebox");
+        assert!(!data.contains_key("id"));
+        assert!(data.contains_key("RecordItem"));
+        assert!(block_entity_data_nbt(r#"{RecordItem:{}}"#).is_none());
     }
 
     /// `DaylightDetectorBlock.updateSignalStrength`: сигнал — небесный свет,

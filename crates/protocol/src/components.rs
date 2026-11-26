@@ -67,6 +67,9 @@ pub struct Extra {
     /// `minecraft:container_loot`: `SeededContainerLoot` в SNBT
     /// (`{loot_table: "...", seed: N}`).
     pub container_loot: Option<String>,
+    /// `minecraft:block_entity_data`: NBT блок-сущности в SNBT вместе с
+    /// `id` (`{id: "minecraft:jukebox", RecordItem: {...}}`).
+    pub block_entity_data: Option<String>,
     /// `minecraft:hide_tooltip`: skryt podskazku.
     pub hide_tooltip: bool,
     /// `minecraft:enchantment_glint_override`: prinuditelnyy blesk.
@@ -169,6 +172,7 @@ impl Extra {
             && self.rarity.is_none()
             && self.lock.is_none()
             && self.container_loot.is_none()
+            && self.block_entity_data.is_none()
             && !self.hide_tooltip
             && self.glint_override.is_none()
             && self.potion.is_none()

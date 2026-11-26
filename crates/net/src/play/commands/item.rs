@@ -232,6 +232,23 @@ fn apply_one(extra: &mut Extra, damage: &mut Option<i32>, key: &str, value: Tag)
             extra.container_loot = Some(snbt::format_tag(&Tag::Compound(map)));
             true
         }
+        "block_entity_data" => {
+            let Some(map) = value.as_compound() else {
+                return false;
+            };
+            let Some(Tag::String(id)) = map.get("id") else {
+                return false;
+            };
+            let mut map = map.clone();
+            let id = if id.contains(':') {
+                id.clone()
+            } else {
+                format!("minecraft:{id}")
+            };
+            map.insert("id".into(), Tag::String(id));
+            extra.block_entity_data = Some(snbt::format_tag(&Tag::Compound(map)));
+            true
+        }
         "custom_data" => {
             let Some(map) = value.as_compound() else {
                 return false;

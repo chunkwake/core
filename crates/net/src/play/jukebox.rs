@@ -210,7 +210,7 @@ impl PlayPlan {
 
     /// Проигрыватель с диска: песня продолжается с сохранённого места
     /// (`loadAdditional` → `setSongWithoutPlaying`), событие 1010 не шлётся.
-    fn adopt_jukebox(&self, pos: [i32; 3]) {
+    pub(super) fn adopt_jukebox(&self, pos: [i32; 3]) {
         if self.jukebox_at(pos).is_none() {
             return;
         }
