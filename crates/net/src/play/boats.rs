@@ -331,13 +331,43 @@ impl PlayPlan {
     }
 
     /// `/summon minecraft:oak_boat`: лодка без предмета в руке.
-    pub(super) fn summon_boat(&self, kind: &str, pos: [f64; 3]) -> Option<i32> {
+    pub(super) fn summon_boat(
+        &self,
+        kind: &str,
+        pos: [f64; 3],
+        nbt: Option<&Compound>,
+    ) -> Option<i32> {
         // В реестре есть все сущности: лодкой считаем только `*_boat`/`*_raft`.
         if !(kind.ends_with("_boat") || kind.ends_with("_raft")) {
             return None;
         }
         self.boat_type(kind)?;
-        let id = self.add_boat(Boat::new(kind.to_owned(), pos, 0.0));
+        // `SummonCommand`: позиция из команды, затем NBT (её `Pos` сильнее).
+        let boat = match nbt {
+            Some(c) => {
+                let pos = match c.get("Pos").and_then(Tag::as_list) {
+                    Some(list) => {
+                        let v: Vec<f64> = list
+                            .iter()
+                            .filter_map(|t| match t {
+                                Tag::Double(v) => Some(*v),
+                                Tag::Float(v) => Some(*v as f64),
+                                _ => None,
+                            })
+                            .collect();
+                        if v.len() == 3 && v.iter().all(|x| x.is_finite()) {
+                            [v[0], v[1], v[2]]
+                        } else {
+                            pos
+                        }
+                    }
+                    None => pos,
+                };
+                self.boat_from_nbt(kind, pos, c)
+            }
+            None => Boat::new(kind.to_owned(), pos, 0.0),
+        };
+        let id = self.add_boat(boat);
         self.mark_entity_changed(pos);
         Some(id)
     }
@@ -730,14 +760,9 @@ impl PlayPlan {
         self.hub.remove_tracked(&[id]);
     }
 
-    /// Лодки чанка `entities/*.mca` (`id` — тип лодки), остальное — мобам.
-    pub(super) fn load_boat(&self, c: &Compound) -> bool {
-        let Some(Tag::String(kind)) = c.get("id") else {
-            return false;
-        };
-        if !self.survival.entity_types.contains_key(kind) || !is_boat_item(kind) {
-            return false;
-        }
+    /// Поля `Entity`/`AbstractBoat` из NBT (`loadAdditional`): `Motion`,
+    /// `Rotation`, `UUID`, `CustomName`, `leash` и `Items` сундучной лодки.
+    fn boat_from_nbt(&self, kind: &str, pos: [f64; 3], c: &Compound) -> Boat {
         let doubles = |k: &str| match c.get(k) {
             Some(Tag::List(l)) => l
                 .iter()
@@ -749,12 +774,8 @@ impl PlayPlan {
                 .collect::<Vec<_>>(),
             _ => Vec::new(),
         };
-        let pos = doubles("Pos");
-        if pos.len() != 3 || !pos.iter().all(|v| v.is_finite()) {
-            return false;
-        }
         let yaw = doubles("Rotation").first().copied().unwrap_or(0.0) as f32;
-        let mut b = Boat::new(kind.clone(), [pos[0], pos[1], pos[2]], yaw);
+        let mut b = Boat::new(kind.to_owned(), pos, yaw);
         let motion = doubles("Motion");
         if motion.len() == 3 && motion.iter().all(|v| v.is_finite()) {
             b.vel = [motion[0], motion[1], motion[2]];
@@ -785,6 +806,32 @@ impl PlayPlan {
                 }
             }
         }
+        b
+    }
+
+    /// Лодки чанка `entities/*.mca` (`id` — тип лодки), остальное — мобам.
+    pub(super) fn load_boat(&self, c: &Compound) -> bool {
+        let Some(Tag::String(kind)) = c.get("id") else {
+            return false;
+        };
+        if !self.survival.entity_types.contains_key(kind) || !is_boat_item(kind) {
+            return false;
+        }
+        let pos = match c.get("Pos").and_then(Tag::as_list) {
+            Some(list) => list
+                .iter()
+                .filter_map(|t| match t {
+                    Tag::Double(v) => Some(*v),
+                    Tag::Float(v) => Some(*v as f64),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            None => Vec::new(),
+        };
+        if pos.len() != 3 || !pos.iter().all(|v| v.is_finite()) {
+            return false;
+        }
+        let b = self.boat_from_nbt(kind, [pos[0], pos[1], pos[2]], c);
         self.add_boat(b);
         true
     }

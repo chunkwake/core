@@ -316,37 +316,31 @@ impl PlayPlan {
         nbt: Option<&Compound>,
     ) -> Option<i32> {
         let variant = Variant::of(name)?;
-        let mut e = MinecartEntry::new(Cart::new(pos, 0.0), variant);
-        if let Some(c) = nbt {
-            let numbers = |key: &str| -> Vec<f64> {
-                c.get(key)
-                    .and_then(Tag::as_list)
-                    .map(|list| {
-                        list.iter()
+        // `SummonCommand`: позиция из команды, затем NBT (её `Pos` сильнее).
+        let e = match nbt {
+            Some(c) => {
+                let pos = match c.get("Pos").and_then(Tag::as_list) {
+                    Some(list) => {
+                        let v: Vec<f64> = list
+                            .iter()
                             .filter_map(|t| match t {
                                 Tag::Double(v) => Some(*v),
                                 Tag::Float(v) => Some(*v as f64),
                                 _ => None,
                             })
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            };
-            if let [x, y, z] = numbers("Motion")[..]
-                && [x, y, z].iter().all(|v| v.is_finite())
-            {
-                e.cart.vel = [x, y, z];
+                            .collect();
+                        if v.len() == 3 && v.iter().all(|x| x.is_finite()) {
+                            [v[0], v[1], v[2]]
+                        } else {
+                            pos
+                        }
+                    }
+                    None => pos,
+                };
+                self.minecart_from_nbt(variant, pos, c)
             }
-            if let Some(yaw) = numbers("Rotation").first() {
-                e.cart.yaw = *yaw as f32;
-            }
-            if let Some(Tag::IntArray(u)) = c.get("UUID")
-                && u.len() == 4
-            {
-                e.uuid =
-                    Uuid::from_u128(u.iter().fold(0u128, |acc, &w| acc << 32 | w as u32 as u128));
-            }
-        }
+            None => MinecartEntry::new(Cart::new(pos, 0.0), variant),
+        };
         Some(self.add_minecart(e))
     }
 
@@ -1181,14 +1175,9 @@ impl PlayPlan {
         })
     }
 
-    /// Вагонетки из `entities/*.mca`.
-    pub(super) fn load_minecart(&self, c: &Compound) -> bool {
-        let Some(variant) = (match c.get("id") {
-            Some(Tag::String(id)) => Variant::of(id),
-            _ => None,
-        }) else {
-            return false;
-        };
+    /// Поля `Entity`/`AbstractMinecart` из NBT (`loadAdditional`): `Motion`,
+    /// `Rotation`, `UUID`, `CustomName`, `Items` и данные варианта.
+    fn minecart_from_nbt(&self, variant: Variant, pos: [f64; 3], c: &Compound) -> MinecartEntry {
         let list = |k: &str| match c.get(k) {
             Some(Tag::List(l)) => l
                 .iter()
@@ -1200,12 +1189,8 @@ impl PlayPlan {
                 .collect::<Vec<_>>(),
             _ => Vec::new(),
         };
-        let pos = list("Pos");
-        if pos.len() != 3 || !pos.iter().all(|v| v.is_finite()) {
-            return false;
-        }
         let yaw = list("Rotation").first().copied().unwrap_or(0.0) as f32;
-        let mut cart = Cart::new([pos[0], pos[1], pos[2]], yaw);
+        let mut cart = Cart::new(pos, yaw);
         if let [x, y, z] = list("Motion")[..]
             && [x, y, z].iter().all(|v| v.is_finite())
         {
@@ -1256,6 +1241,32 @@ impl PlayPlan {
             Variant::Tnt => e.fuse = int("fuse").unwrap_or(-1) as i32,
             _ => {}
         }
+        e
+    }
+
+    /// Вагонетки из `entities/*.mca`.
+    pub(super) fn load_minecart(&self, c: &Compound) -> bool {
+        let Some(variant) = (match c.get("id") {
+            Some(Tag::String(id)) => Variant::of(id),
+            _ => None,
+        }) else {
+            return false;
+        };
+        let pos = match c.get("Pos").and_then(Tag::as_list) {
+            Some(list) => list
+                .iter()
+                .filter_map(|t| match t {
+                    Tag::Double(v) => Some(*v),
+                    Tag::Float(v) => Some(*v as f64),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            None => Vec::new(),
+        };
+        if pos.len() != 3 || !pos.iter().all(|v| v.is_finite()) {
+            return false;
+        }
+        let e = self.minecart_from_nbt(variant, [pos[0], pos[1], pos[2]], c);
         self.add_minecart(e);
         true
     }

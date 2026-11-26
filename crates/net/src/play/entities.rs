@@ -71,7 +71,7 @@ impl PlayPlan {
                     "minecraft:area_effect_cloud" => self.summon_cloud([x, y, z], None),
                     "minecraft:eye_of_ender" => self.summon_eye([x, y, z], [0.0; 3], None),
                     _ if kind.ends_with("_boat") || kind.ends_with("_raft") => {
-                        self.summon_boat(kind, [x, y, z])
+                        self.summon_boat(kind, [x, y, z], None)
                     }
                     _ => self.summon_minecart(kind, [x, y, z], None),
                 };

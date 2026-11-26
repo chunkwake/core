@@ -454,7 +454,7 @@ pub(super) fn summon(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
         ctx.plan.summon_eye(coords, vel, nbt.as_ref())
     } else {
         ctx.plan
-            .summon_boat(&name, coords)
+            .summon_boat(&name, coords, nbt.as_ref())
             .or_else(|| ctx.plan.summon_minecart(&name, coords, nbt.as_ref()))
     };
     if let Some(id) = spawned {
