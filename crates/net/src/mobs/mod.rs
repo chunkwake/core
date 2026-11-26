@@ -1964,6 +1964,7 @@ fn navigation_for(species: Species) -> Navigation {
     match species {
         Species::Cod | Species::Salmon | Species::GlowSquid => Navigation::water(false),
         Species::Bat | Species::Phantom => Navigation::flying(),
+        Species::Drowned => Navigation::amphibious(),
         _ => Navigation::new(species == Species::Spider),
     }
 }
@@ -1996,6 +1997,8 @@ pub fn walker(m: &Mob, w: &World, difficulty: u8, in_water: bool) -> path::Walke
         can_walk_over_fences: false,
         malus: if aquatic {
             path::WATER_MALUS
+        } else if m.species == Species::Drowned {
+            path::AMPHIBIOUS_MALUS
         } else if animal {
             path::ANIMAL_MALUS
         } else {
@@ -4815,5 +4818,25 @@ mod tests {
         }
         assert!(m.no_gravity, "flying control must clear gravity");
         assert!(m.pos[0] > 2.0, "did not fly: {:?}", m.pos);
+    }
+
+    /// Утопленник ходит `AmphibiousPathNavigation`: вода дешевле суши,
+    /// проходимый блок — дороже, граница воды — посередине.
+    #[test]
+    fn drowned_uses_amphibious_navigation() {
+        let (shape, water) = flat_world(&floor);
+        let w = World {
+            shape: &*shape,
+            water: &*water,
+            cell: None,
+            info: None,
+            min_y: -64,
+        };
+        let m = Mob::new(Species::Drowned, [0.5, 64.0, 0.5], 1);
+        assert!(matches!(m.nav.kind, path::NavKind::Amphibious));
+        let walk = walker(&m, &w, 2, false);
+        assert_eq!(walk.malus(path::PathType::Water), 0.0);
+        assert_eq!(walk.malus(path::PathType::Walkable), 6.0);
+        assert_eq!(walk.malus(path::PathType::WaterBorder), 4.0);
     }
 }

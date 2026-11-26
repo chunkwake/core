@@ -294,6 +294,14 @@ pub const ANIMAL_MALUS: &[(PathType, f32)] =
 /// штраф 8, он остаётся только у наземных мобов).
 pub const WATER_MALUS: &[(PathType, f32)] = &[(PathType::Water, 0.0)];
 
+/// `AmphibiousNodeEvaluator.prepare`: вода 0, проходимый блок 6 (медленнее
+/// земли), граница воды 4.
+pub const AMPHIBIOUS_MALUS: &[(PathType, f32)] = &[
+    (PathType::Water, 0.0),
+    (PathType::Walkable, 6.0),
+    (PathType::WaterBorder, 4.0),
+];
+
 /// Вид навигации (`PathNavigation` и его наследники).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NavKind {
@@ -305,6 +313,9 @@ pub enum NavKind {
     Water { breaching: bool },
     /// `FlyingPathNavigation` (`FlyNodeEvaluator`): свободный полёт по воздуху.
     Fly,
+    /// `AmphibiousPathNavigation` (`AmphibiousNodeEvaluator`): земля и вода,
+    /// включая вертикальные водные соседи.
+    Amphibious,
 }
 
 impl Walker {
@@ -671,6 +682,7 @@ impl<'q, 'a, 's, 'r> Search<'q, 'a, 's, 'r> {
             NavKind::Ground => self.type_of_mob(p),
             NavKind::Water { .. } => self.swim_type(p),
             NavKind::Fly => self.fly_type_of_mob(p),
+            NavKind::Amphibious => self.amph_type_of_mob(p),
         };
         self.types.insert(p, t);
         t
@@ -788,6 +800,99 @@ impl<'q, 'a, 's, 'r> Search<'q, 'a, 's, 'r> {
             }
         }
         let here = self.fly_static(p);
+        if self.ew > 1 {
+            if self.m.malus(here) < best_m && self.m.malus(PathType::BigMobsCloseToDanger) < best_m
+            {
+                return PathType::BigMobsCloseToDanger;
+            }
+            return best;
+        }
+        if here == PathType::Open && best != PathType::Open && best_m == 0.0 {
+            return PathType::Open;
+        }
+        best
+    }
+
+    /// `AmphibiousNodeEvaluator.getPathType`: вода у твёрдого блока —
+    /// `WATER_BORDER`, иначе обычный тип `WalkNodeEvaluator`.
+    fn amph_state(&self, p: [i32; 3]) -> PathType {
+        if self.state_type(p) == PathType::Water {
+            for (dx, dy, dz) in [
+                (0, -1, 0),
+                (0, 1, 0),
+                (0, 0, -1),
+                (0, 0, 1),
+                (-1, 0, 0),
+                (1, 0, 0),
+            ] {
+                if self.state_type([p[0] + dx, p[1] + dy, p[2] + dz]) == PathType::Blocked {
+                    return PathType::WaterBorder;
+                }
+            }
+            return PathType::Water;
+        }
+        self.type_static(p)
+    }
+
+    /// `WalkNodeEvaluator.getPathTypeWithinMobBB` через `amph_state`.
+    fn amph_types_within(&self, p: [i32; 3]) -> Vec<PathType> {
+        let mut set: Vec<PathType> = Vec::new();
+        let mb = self.m.block();
+        for i in 0..self.ew {
+            for j in 0..self.eh {
+                for k in 0..self.ed {
+                    let q = [p[0] + i, p[1] + j, p[2] + k];
+                    let mut t = self.amph_state(q);
+                    if t == PathType::DoorWoodClosed
+                        && self.m.can_open_doors
+                        && self.m.can_pass_doors
+                    {
+                        t = PathType::WalkableDoor;
+                    }
+                    if t == PathType::DoorOpen && !self.m.can_pass_doors {
+                        t = PathType::Blocked;
+                    }
+                    if t == PathType::Rail
+                        && self.amph_state(mb) != PathType::Rail
+                        && self.amph_state([mb[0], mb[1] - 1, mb[2]]) != PathType::Rail
+                    {
+                        t = PathType::UnpassableRail;
+                    }
+                    if !set.contains(&t) {
+                        set.push(t);
+                    }
+                }
+            }
+        }
+        set.sort();
+        set
+    }
+
+    /// `getPathTypeOfMob` для `AmphibiousNodeEvaluator`.
+    fn amph_type_of_mob(&self, p: [i32; 3]) -> PathType {
+        let set = self.amph_types_within(p);
+        if set.len() == 1 {
+            return set[0];
+        }
+        if set.contains(&PathType::Fence) {
+            return PathType::Fence;
+        }
+        if set.contains(&PathType::UnpassableRail) {
+            return PathType::UnpassableRail;
+        }
+        let mut best = PathType::Blocked;
+        let mut best_m = self.m.malus(best);
+        for &t in &set {
+            let m = self.m.malus(t);
+            if m < 0.0 {
+                return t;
+            }
+            if m >= best_m {
+                best_m = m;
+                best = t;
+            }
+        }
+        let here = self.amph_state(p);
         if self.ew > 1 {
             if self.m.malus(here) < best_m && self.m.malus(PathType::BigMobsCloseToDanger) < best_m
             {
@@ -1084,6 +1189,9 @@ impl<'q, 'a, 's, 'r> Search<'q, 'a, 's, 'r> {
                 }
             }
         }
+        if self.kind == NavKind::Amphibious {
+            self.amphibious_extra(cur, &mut out);
+        }
         out
     }
 
@@ -1249,6 +1357,30 @@ impl<'q, 'a, 's, 'r> Search<'q, 'a, 's, 'r> {
         self.m.malus(t) >= 0.0
     }
 
+    /// `AmphibiousNodeEvaluator.getNeighbors`: к обычным соседям добавляются
+    /// верхняя и нижняя водные клетки (`isVerticalNeighborValid`).
+    fn amphibious_extra(&mut self, cur: u32, out: &mut Vec<u32>) {
+        let p = self.n(cur).p;
+        let here = self.n(cur).kind;
+        for dy in [1, -1] {
+            if dy < 0 && here == PathType::Trapdoor {
+                continue;
+            }
+            let q = [p[0], p[1] + dy, p[2]];
+            if self.cached(q) != PathType::Water {
+                continue;
+            }
+            let malus = self.m.malus(PathType::Water);
+            if malus < 0.0 {
+                continue;
+            }
+            let node = self.node_cost_max(q, PathType::Water, malus);
+            if self.neighbor_valid(Some(node), cur) {
+                out.push(node);
+            }
+        }
+    }
+
     fn can_start_at(&mut self, p: [i32; 3]) -> bool {
         let t = self.cached(p);
         t != PathType::Open && self.m.malus(t) >= 0.0
@@ -1268,6 +1400,17 @@ impl<'q, 'a, 's, 'r> Search<'q, 'a, 's, 'r> {
     fn start(&mut self) -> u32 {
         if matches!(self.kind, NavKind::Water { .. }) {
             // `SwimNodeEvaluator.getStart`: угол рамки, середина по Y.
+            let (lo, _) = self.m.bb();
+            let p = [
+                lo[0].floor() as i32,
+                (lo[1] + 0.5).floor() as i32,
+                lo[2].floor() as i32,
+            ];
+            return self.start_node(p);
+        }
+        if self.kind == NavKind::Amphibious && self.m.in_water {
+            // `AmphibiousNodeEvaluator.getStart`: в воде — угол рамки с
+            // серединой по Y; на земле ниже сработает обычный старт.
             let (lo, _) = self.m.bb();
             let p = [
                 lo[0].floor() as i32,
@@ -1612,6 +1755,14 @@ impl Navigation {
         }
     }
 
+    /// `AmphibiousPathNavigation`.
+    pub fn amphibious() -> Self {
+        Self {
+            kind: NavKind::Amphibious,
+            ..Self::default()
+        }
+    }
+
     pub fn is_done(&self) -> bool {
         self.path.as_ref().is_none_or(Path::is_done)
     }
@@ -1628,14 +1779,18 @@ impl Navigation {
             NavKind::Water { breaching } => breaching || m.in_water,
             // `FlyingPathNavigation`: пассажиров у нас нет, полёт всегда можно.
             NavKind::Fly => true,
+            // `AmphibiousPathNavigation.canUpdatePath`: всегда.
+            NavKind::Amphibious => true,
         }
     }
 
     /// `GroundPathNavigation.getTempMobPos` / `WaterBoundPathNavigation` /
-    /// `FlyingPathNavigation`.
+    /// `FlyingPathNavigation` / `AmphibiousPathNavigation`.
     fn temp_pos(&self, m: &Walker, w: &World) -> [f64; 3] {
         match self.kind {
-            NavKind::Water { .. } => return [m.pos[0], m.pos[1] + 0.5, m.pos[2]],
+            NavKind::Water { .. } | NavKind::Amphibious => {
+                return [m.pos[0], m.pos[1] + 0.5, m.pos[2]];
+            }
             NavKind::Fly => return m.pos,
             NavKind::Ground => {}
         }
@@ -1881,8 +2036,9 @@ impl Navigation {
         let path = self.path.as_ref().expect("путь не закончен");
         let next = path.entity_pos_at(path.next, m.width);
         let y = match self.kind {
-            // `WaterBoundPathNavigation.getGroundY`: высота узла как есть.
-            NavKind::Water { .. } => next[1],
+            // `WaterBoundPathNavigation.getGroundY` и
+            // `AmphibiousPathNavigation.getGroundY`: высота узла как есть.
+            NavKind::Water { .. } | NavKind::Amphibious => next[1],
             NavKind::Ground | NavKind::Fly => ground_y(w, next),
         };
         Some(([next[0], y, next[2]], self.speed))
@@ -2640,5 +2796,38 @@ mod tests {
         assert!(p.reached, "{p:?}");
         assert!(cells(&p).iter().any(|c| (2..=4).contains(&c[0])), "{p:?}");
         assert!(cells(&p).iter().all(|c| c[1] >= 64), "{p:?}");
+    }
+
+    /// `AmphibiousNodeEvaluator`: в воде можно подниматься и опускаться по
+    /// вертикальным водным соседям, а не только шагать по дну.
+    #[test]
+    fn amphibious_path_swims_up_water_column() {
+        let shape = solid(|p| p[1] < 64);
+        let water = |p: [i32; 3]| (64..=70).contains(&p[1]);
+        let w = World {
+            shape: &shape,
+            water: &water,
+            cell: None,
+            info: None,
+            min_y: -64,
+        };
+        let mut walk = walker([0.5, 64.5, 0.5]);
+        walk.in_water = true;
+        walk.can_float = true;
+        walk.malus = AMPHIBIOUS_MALUS;
+        let p = find_path(
+            &w,
+            &walk,
+            &[[0, 68, 0]],
+            35.0,
+            0,
+            560,
+            1.0,
+            NavKind::Amphibious,
+        )
+        .unwrap();
+        assert!(p.reached, "{p:?}");
+        assert!(cells(&p).iter().all(|c| water(*c)), "dry node: {p:?}");
+        assert!(cells(&p).contains(&[0, 68, 0]), "{p:?}");
     }
 }
