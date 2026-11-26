@@ -2370,6 +2370,9 @@ pub struct Source {
     pub from: Option<[f64; 3]>,
     /// Обидчик (`lastHurtByMob`) — UUID игрока: его берёт целью `HurtByTargetGoal`.
     pub attacker: Option<u128>,
+    /// Снаряд (`AbstractArrow`/`WindCharge`): визер во второй половине
+    /// здоровья (`isPowered`) такой урон игнорирует.
+    pub projectile: bool,
 }
 
 impl Source {
@@ -2377,6 +2380,16 @@ impl Source {
         Self {
             from: Some(from),
             attacker,
+            projectile: false,
+        }
+    }
+
+    /// Урон снарядом: `WitherBoss.hurtServer` отбрасывает его при `isPowered`.
+    pub fn projectile(from: [f64; 3], attacker: Option<u128>) -> Self {
+        Self {
+            from: Some(from),
+            attacker,
+            projectile: true,
         }
     }
 }
@@ -2408,6 +2421,11 @@ pub fn knockback(m: &mut Mob, power: f64, xd: f64, zd: f64) {
 
 pub fn hurt(m: &mut Mob, amount: f32, src: Source, knockback_power: f64) -> Option<bool> {
     if !m.alive() {
+        return None;
+    }
+    // `WitherBoss.hurtServer`: во второй половине здоровья (`isPowered`)
+    // стрелы и ветряные заряды не ранят.
+    if src.projectile && m.species == Species::Wither && m.health <= m.max_health() / 2.0 {
         return None;
     }
     let dealt = if m.invulnerable > INVULNERABLE / 2 {
@@ -2842,6 +2860,27 @@ mod tests {
         m.next_weather_age = -1;
         copper_golem_weathering(&mut m);
         assert!(m.next_weather_age >= 504_000);
+    }
+
+    #[test]
+    fn wither_ignores_projectiles_in_second_phase() {
+        // `WitherBoss.hurtServer`: `isPowered` (здоровье <= max/2)
+        // отбрасывает урон стрел и ветряных зарядов.
+        let mut full = Mob::new(Species::Wither, [0.0; 3], 1);
+        assert_eq!(
+            hurt(&mut full, 10.0, Source::projectile([0.0; 3], None), 0.0),
+            Some(false)
+        );
+        let mut weak = Mob::new(Species::Wither, [0.0; 3], 1);
+        weak.health = weak.max_health() / 2.0;
+        assert_eq!(
+            hurt(&mut weak, 10.0, Source::projectile([0.0; 3], None), 0.0),
+            None
+        );
+        assert_eq!(
+            hurt(&mut weak, 10.0, Source::at([0.0; 3], None), 0.0),
+            Some(false)
+        );
     }
 
     #[test]

@@ -9746,7 +9746,7 @@ impl PlayPlan {
                     && let Some(dead) = crate::mobs::hurt(
                         &mut entry.mob,
                         damage,
-                        crate::mobs::Source::at(at, owner),
+                        crate::mobs::Source::projectile(at, owner),
                         0.4,
                     )
                 {
