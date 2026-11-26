@@ -161,7 +161,7 @@ impl PlayPlan {
 
     /// `World.createExplosion`: без Bukkit-событий пока; `break_blocks=false` сохраняет блоки.
     fn explode_api(&self, center: [f64; 3], power: f32, fire: bool, break_blocks: bool) {
-        self.explode_full(center, power, false, fire, None, None, break_blocks);
+        self.explode_full(center, power, false, fire, None, None, break_blocks, None);
     }
 }
 

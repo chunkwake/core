@@ -307,6 +307,9 @@ pub enum Cause {
     /// Стрела (`minecraft:arrow`).
     Arrow,
     Explosion,
+    /// Якорь возрождения или кровать не в том измерении
+    /// (`minecraft:bad_respawn_point`).
+    BadRespawnPoint,
     Fire,
     Lava,
     Drown,
@@ -356,6 +359,7 @@ impl Cause {
             "wither" => Cause::Wither,
             "arrow" | "trident" | "mob_projectile" => Cause::Arrow,
             "explosion" | "player_explosion" => Cause::Explosion,
+            "bad_respawn_point" => Cause::BadRespawnPoint,
             "in_fire" | "on_fire" => Cause::Fire,
             "lava" => Cause::Lava,
             "drown" => Cause::Drown,
@@ -380,6 +384,7 @@ impl Cause {
             Cause::Wither => "death.attack.wither",
             Cause::Arrow => "death.attack.arrow",
             Cause::Explosion => "death.attack.explosion",
+            Cause::BadRespawnPoint => "death.attack.badRespawnPoint.message",
             Cause::Fire => "death.attack.onFire",
             Cause::Lava => "death.attack.lava",
             Cause::Drown => "death.attack.drown",
@@ -409,7 +414,7 @@ impl Cause {
             Cause::Wither => "WITHER",
             Cause::Magic => "MAGIC",
             Cause::Arrow => "PROJECTILE",
-            Cause::Explosion => "BLOCK_EXPLOSION",
+            Cause::Explosion | Cause::BadRespawnPoint => "BLOCK_EXPLOSION",
             Cause::Fire => "FIRE_TICK",
             Cause::Lava => "LAVA",
             Cause::Drown => "DROWNING",
@@ -438,6 +443,7 @@ impl Cause {
             Cause::Wither => "minecraft:wither",
             Cause::Arrow => "minecraft:arrow",
             Cause::Explosion => "minecraft:explosion",
+            Cause::BadRespawnPoint => "minecraft:bad_respawn_point",
             Cause::Fire => "minecraft:on_fire",
             Cause::Lava => "minecraft:lava",
             Cause::Drown => "minecraft:drown",
@@ -1962,6 +1968,18 @@ mod tests {
         assert!(!cause.bypasses_resistance());
         assert_eq!(cause.damage_type(), "minecraft:sonic_boom");
         assert_eq!(cause.death_key(), "death.attack.sonic_boom");
+    }
+
+    #[test]
+    fn bad_respawn_point_has_own_damage_type() {
+        let cause = Cause::BadRespawnPoint;
+        assert_eq!(cause.damage_type(), "minecraft:bad_respawn_point");
+        assert_eq!(cause.death_key(), "death.attack.badRespawnPoint.message");
+        assert_eq!(cause.bukkit(), "BLOCK_EXPLOSION");
+        assert_eq!(
+            Cause::from_damage_type("minecraft:bad_respawn_point"),
+            Cause::BadRespawnPoint
+        );
     }
 
     #[test]

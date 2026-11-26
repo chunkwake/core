@@ -396,7 +396,7 @@ impl PlayPlan {
         self.set_block(pos, AIR);
         self.redstone_update(&crate::redstone::around(pos));
         let center = pos.map(|v| v as f64 + 0.5);
-        self.explode_with(center, 5.0, false, true, shield.then_some(pos));
+        self.explode_bad_respawn(center, 5.0, false, true, shield.then_some(pos));
     }
 
     /// `BedBlock.destroyOnUse`: обе половины убраны, взрыв 5 с огнём в изголовье.
@@ -410,7 +410,7 @@ impl PlayPlan {
         touched.extend_from_slice(&crate::redstone::around(foot));
         self.redstone_update(&touched);
         let center = head.map(|v| v as f64 + 0.5);
-        self.explode_with(center, 5.0, false, true, None);
+        self.explode_bad_respawn(center, 5.0, false, true, None);
     }
 }
 

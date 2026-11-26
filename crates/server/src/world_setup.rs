@@ -1169,6 +1169,9 @@ fn survival_data(
         damage_explosion: registries
             .network_id("damage_type", "minecraft:explosion")
             .map_err(s)?,
+        damage_bad_respawn: registries
+            .network_id("damage_type", "minecraft:bad_respawn_point")
+            .map_err(s)?,
         damage_fire: registries
             .network_id("damage_type", "minecraft:on_fire")
             .map_err(s)?,

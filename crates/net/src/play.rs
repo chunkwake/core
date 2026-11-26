@@ -3359,6 +3359,7 @@ pub struct SurvivalData {
     /// `minecraft:player_attack` (PvP).
     pub damage_player_attack: i32,
     pub damage_explosion: i32,
+    pub damage_bad_respawn: i32,
     pub damage_fire: i32,
     pub damage_lava: i32,
     pub damage_drown: i32,
@@ -13257,13 +13258,44 @@ impl PlayPlan {
         fire: bool,
         water_shield: Option<[i32; 3]>,
     ) {
-        self.explode_full(center, power, rails_safe, fire, water_shield, None, true);
+        self.explode_full(
+            center,
+            power,
+            rails_safe,
+            fire,
+            water_shield,
+            None,
+            true,
+            None,
+        );
+    }
+
+    /// Взрыв якоря/кровати не в том измерении: отдельный
+    /// `minecraft:bad_respawn_point` для урона игрокам.
+    pub(super) fn explode_bad_respawn(
+        &self,
+        center: [f64; 3],
+        power: f32,
+        rails_safe: bool,
+        fire: bool,
+        water_shield: Option<[i32; 3]>,
+    ) {
+        self.explode_full(
+            center,
+            power,
+            rails_safe,
+            fire,
+            water_shield,
+            None,
+            true,
+            Some(Cause::BadRespawnPoint),
+        );
     }
 
     /// Взрыв моба (`ExplosionInteraction.MOB`): блоки рушатся только при
     /// `mob_griefing`, а дроп — с шансом `1 / мощность` (`mob_explosion_drop_decay`).
     pub(super) fn explode_mob(&self, center: [f64; 3], power: f32, species: &'static str) {
-        self.explode_full(center, power, false, false, None, Some(species), true);
+        self.explode_full(center, power, false, false, None, Some(species), true, None);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -13276,9 +13308,11 @@ impl PlayPlan {
         water_shield: Option<[i32; 3]>,
         mob: Option<&'static str>,
         break_blocks: bool,
+        cause: Option<Cause>,
     ) {
         let keep_blocks = !break_blocks || (mob.is_some() && !self.vars.flag("mob_griefing"));
         let drop_chance = if mob.is_some() { 1.0 / power } else { 0.25 };
+        let cause = cause.unwrap_or_else(|| mob.map_or(Cause::Explosion, Cause::MobExplosion));
         let cache = std::cell::RefCell::new(HashMap::<[i32; 3], Option<f32>>::new());
         let is_rail = |p: [i32; 3]| {
             self.block(p)
@@ -13345,7 +13379,7 @@ impl PlayPlan {
             .filter(|_| !keep_blocks)
             .collect();
         blocks.sort_unstable();
-        self.damage_tnt_targets(center, power, mob);
+        self.damage_tnt_targets(center, power, cause);
         let fire_at: Vec<[i32; 3]> = if fire { blocks.clone() } else { Vec::new() };
         for block in blocks {
             let Some(state) = self.block(block) else {
@@ -13460,9 +13494,8 @@ impl PlayPlan {
 
     /// Урон взрыва. Тип `explosion` и `player_explosion` масштабируется
     /// сложностью всегда (`scaling: always`); `mob` — вид-источник.
-    fn damage_tnt_targets(&self, center: [f64; 3], power: f32, mob: Option<&'static str>) {
+    fn damage_tnt_targets(&self, center: [f64; 3], power: f32, cause: Cause) {
         let difficulty = self.difficulty();
-        let cause = mob.map_or(Cause::Explosion, Cause::MobExplosion);
         let reach = power as f64 * 2.0;
         // Взрыв задевает только игроков своего измерения.
         let dim = self.active_dim();
@@ -28157,6 +28190,7 @@ impl PlayPlan {
             Cause::Wither => Some(self.survival.damage_wither),
             Cause::Arrow => Some(self.survival.damage_arrow),
             Cause::Explosion => Some(self.survival.damage_explosion),
+            Cause::BadRespawnPoint => Some(self.survival.damage_bad_respawn),
             Cause::Fire => Some(self.survival.damage_fire),
             Cause::Lava => Some(self.survival.damage_lava),
             Cause::Drown => Some(self.survival.damage_drown),
@@ -28266,6 +28300,13 @@ impl PlayPlan {
                 Cause::Fireworks(Some(attacker)) => {
                     serde_json::json!({"translate": cause.death_key(), "with": [me.entry.name, attacker]})
                 }
+                Cause::BadRespawnPoint => serde_json::json!({
+                    "translate": cause.death_key(),
+                    "with": [
+                        me.entry.name,
+                        {"translate": "death.attack.badRespawnPoint.link"}
+                    ]
+                }),
                 _ => serde_json::json!({"translate": cause.death_key(), "with": [me.entry.name]}),
             };
             let mut message = Some(msg.to_string());
