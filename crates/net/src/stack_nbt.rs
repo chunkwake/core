@@ -96,6 +96,12 @@ pub fn named_nbt(
             Tag::String((*name).to_owned()),
         );
     }
+    if let Some(sound) = &e.note_block_sound {
+        comps.insert(
+            "minecraft:note_block_sound".into(),
+            Tag::String(sound.clone()),
+        );
+    }
     if !e.enchantments.is_empty() {
         let levels: Compound = e
             .enchantments
@@ -311,6 +317,10 @@ fn from_nbt_ref(c: &Compound, item_id: &dyn Fn(&str) -> Option<i32>, depth: u32)
                     .position(|&c| c == name)
                     .map(|i| i as i32)
             });
+        e.note_block_sound = m
+            .get("minecraft:note_block_sound")
+            .and_then(Tag::as_str)
+            .map(str::to_owned);
         s.damage = m
             .get("minecraft:damage")
             .and_then(Tag::as_i64)
@@ -663,6 +673,9 @@ pub fn to_line(s: Stack, name: &str) -> String {
     {
         j.insert("base_color".into(), Value::from(*name));
     }
+    if let Some(sound) = &e.note_block_sound {
+        j.insert("note_block_sound".into(), Value::from(sound.clone()));
+    }
     if !e.enchantments.is_empty() {
         let levels = e
             .enchantments
@@ -820,6 +833,10 @@ pub fn from_line(line: &str, item_id: impl Fn(&str) -> Option<i32>) -> Option<St
                     .position(|&c| c == name)
                     .map(|i| i as i32)
             });
+        e.note_block_sound = j
+            .get("note_block_sound")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         if let Some(Value::Object(levels)) = j.get("enchantments") {
             for (name, lvl) in levels {
                 if let (Some(id), Some(lvl)) = (components::enchantment_id(name), lvl.as_i64()) {
@@ -1194,6 +1211,20 @@ mod tests {
     }
 
     #[test]
+    fn note_block_sound_round_trips_through_playerdata() {
+        let stack = Stack {
+            extra: components::intern(Extra {
+                note_block_sound: Some("minecraft:block.note_block.basedrum".into()),
+                ..Default::default()
+            }),
+            ..Stack::new(7, 1)
+        };
+        let nbt = to_nbt(stack, "minecraft:player_head").unwrap();
+        let back = from_nbt(&nbt, |n| (n == "minecraft:player_head").then_some(7)).unwrap();
+        assert_eq!(back, stack);
+    }
+
+    #[test]
     fn book_page_count_survives_playerdata_and_lectern_nbt() {
         let stack = Stack {
             extra: components::intern(Extra {
@@ -1409,6 +1440,7 @@ mod tests {
             item_name: Some(r#""Visual Stone""#.into()),
             item_model: Some("minecraft:apple".into()),
             tooltip_style: Some("minecraft:default".into()),
+            note_block_sound: None,
             hide_tooltip: true,
             glint_override: Some(false),
             potion: Some(0),

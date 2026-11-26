@@ -337,6 +337,7 @@ fn write_patch(w: &mut Writer, s: &Stack) {
             && id_of(&crate::components::CUSTOM_MODEL_DATA_COMPONENT) >= 0,
         e.unbreakable && id_of(&crate::components::UNBREAKABLE_COMPONENT) >= 0,
         e.base_color.is_some() && id_of(&crate::components::BASE_COLOR_COMPONENT) >= 0,
+        e.note_block_sound.is_some() && id_of(&crate::components::NOTE_BLOCK_SOUND_COMPONENT) >= 0,
     ];
 
     w.var_int(parts.iter().filter(|&&p| p).count() as i32)
@@ -487,6 +488,10 @@ fn write_patch(w: &mut Writer, s: &Stack) {
         w.var_int(id_of(&crate::components::BASE_COLOR_COMPONENT))
             .var_int(color);
     }
+    if let (true, Some(sound)) = (parts[26], &e.note_block_sound) {
+        w.var_int(id_of(&crate::components::NOTE_BLOCK_SOUND_COMPONENT))
+            .string(sound);
+    }
 }
 
 /// Номер компонента книги в реестре; -1 — нет книги или реестр не задан.
@@ -629,6 +634,8 @@ fn read_stack_tail(r: &mut Reader, item: i32, count: i32, depth: u8) -> Result<S
             if (0..16).contains(&color) {
                 e.base_color = Some(color);
             }
+        } else if t == id_of(&crate::components::NOTE_BLOCK_SOUND_COMPONENT) {
+            e.note_block_sound = Some(r.string(32767)?.to_owned());
         } else if t == id_of(&crate::components::WRITTEN_BOOK_CONTENT_COMPONENT)
             || t == id_of(&crate::components::WRITABLE_BOOK_CONTENT_COMPONENT)
         {
@@ -901,6 +908,7 @@ fn read_untrusted_stack(r: &mut Reader) -> Result<Slot> {
         if kind != id_of(&crate::components::TRIM_COMPONENT)
             && kind != id_of(&crate::components::BANNER_PATTERNS_COMPONENT)
             && kind != id_of(&crate::components::BASE_COLOR_COMPONENT)
+            && kind != id_of(&crate::components::NOTE_BLOCK_SOUND_COMPONENT)
         {
             raw_added += 1;
             patch.var_int(kind);
@@ -966,6 +974,10 @@ fn read_untrusted_stack(r: &mut Reader) -> Result<Slot> {
             if (0..16).contains(&color) {
                 e.base_color = Some(color);
             }
+        } else if kind == id_of(&crate::components::NOTE_BLOCK_SOUND_COMPONENT)
+            && let Ok(sound) = body.string(32767)
+        {
+            e.note_block_sound = Some(sound.to_owned());
         } else if kind == id_of(&crate::components::WRITTEN_BOOK_CONTENT_COMPONENT)
             || kind == id_of(&crate::components::WRITABLE_BOOK_CONTENT_COMPONENT)
         {

@@ -57,6 +57,8 @@ pub struct Extra {
     pub item_model: Option<String>,
     /// `minecraft:tooltip_style`: stil podskazki.
     pub tooltip_style: Option<String>,
+    /// `minecraft:note_block_sound`: звук головы над нотным блоком.
+    pub note_block_sound: Option<String>,
     /// `minecraft:hide_tooltip`: skryt podskazku.
     pub hide_tooltip: bool,
     /// `minecraft:enchantment_glint_override`: prinuditelnyy blesk.
@@ -155,6 +157,7 @@ impl Extra {
             && self.item_name.is_none()
             && self.item_model.is_none()
             && self.tooltip_style.is_none()
+            && self.note_block_sound.is_none()
             && !self.hide_tooltip
             && self.glint_override.is_none()
             && self.potion.is_none()
@@ -255,6 +258,8 @@ pub static MAP_POST_PROCESSING_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static ITEM_NAME_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static ITEM_MODEL_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static TOOLTIP_STYLE_COMPONENT: AtomicI32 = AtomicI32::new(-1);
+/// `minecraft:note_block_sound`: звук головы над нотным блоком.
+pub static NOTE_BLOCK_SOUND_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static TOOLTIP_DISPLAY_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static GLINT_OVERRIDE_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 /// `minecraft:custom_model_data`: целочисленный legacy-CMD (floats[0]).

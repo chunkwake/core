@@ -2789,6 +2789,28 @@ fn container_entity(block: &str) -> Option<&'static str> {
     }
 }
 
+/// `SkullBlock` (включая настенные черепа): у блока есть
+/// `SkullBlockEntity` с `note_block_sound` и `custom_name`.
+fn is_skull_block(block: &str) -> bool {
+    matches!(
+        block,
+        "minecraft:player_head"
+            | "minecraft:player_wall_head"
+            | "minecraft:skeleton_skull"
+            | "minecraft:skeleton_wall_skull"
+            | "minecraft:wither_skeleton_skull"
+            | "minecraft:wither_skeleton_wall_skull"
+            | "minecraft:zombie_head"
+            | "minecraft:zombie_wall_head"
+            | "minecraft:creeper_head"
+            | "minecraft:creeper_wall_head"
+            | "minecraft:dragon_head"
+            | "minecraft:dragon_wall_head"
+            | "minecraft:piglin_head"
+            | "minecraft:piglin_wall_head"
+    )
+}
+
 fn is_copper_chest(name: &str) -> bool {
     matches!(
         name,
@@ -18394,6 +18416,9 @@ impl PlayPlan {
                                 if let Some(id) = signs::sign_entity(self.state_name(place)) {
                                     self.place_sign(target, id);
                                 }
+                                if is_skull_block(self.state_name(place)) {
+                                    self.place_skull(target, hand_slot.and_then(|i| state.inv.slots[i]));
+                                }
                                 // Крюк сразу считает свою цепь
                                 // (`TripWireHookBlock.setPlacedBy`).
                                 if crate::redstone::is_tripwire_hook(&name) {
@@ -25117,6 +25142,42 @@ impl PlayPlan {
             }
         }
         true
+    }
+
+    /// `SkullBlockEntity.applyImplicitComponents`: `note_block_sound` и
+    /// `custom_name` из компонентов головы попадают в блок-сущность.
+    /// `getUpdatePacket` черепа есть всегда, поэтому данные уходят клиентам.
+    fn place_skull(&self, pos: [i32; 3], item: Slot) {
+        let e = item.map_or_else(Default::default, |s| {
+            (*chunkwake_protocol::components::get(s.extra)).clone()
+        });
+        let mut nbt = Compound::new();
+        if let Some(sound) = &e.note_block_sound {
+            nbt.insert("note_block_sound".into(), Tag::String(sound.clone()));
+        }
+        if let Some(name) = &e.custom_name {
+            nbt.insert(
+                "custom_name".into(),
+                crate::stack_nbt::json_to_tag(&crate::stack_nbt::text_json(name)),
+            );
+        }
+        self.set_block_entity(
+            pos,
+            Some(BlockEntity {
+                id: "minecraft:skull".into(),
+                nbt: nbt.clone(),
+            }),
+        );
+        if let Some(&kind) = chunkwake_world::BLOCK_ENTITY_TYPES
+            .get()
+            .and_then(|t| t.get("minecraft:skull"))
+        {
+            let bytes = chunkwake_world::nbt::write_network(&nbt);
+            self.hub.send(
+                None,
+                play::block_entity_data(self.ids.block_entity_data, pos, kind, &bytes),
+            );
+        }
     }
 
     /// `SkullBlockEntity.getNoteBlockSound()` у блока над нотным блоком.

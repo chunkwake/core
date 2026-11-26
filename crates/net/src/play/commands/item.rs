@@ -173,6 +173,18 @@ fn apply_one(extra: &mut Extra, damage: &mut Option<i32>, key: &str, value: Tag)
             extra.base_color = Some(color as i32);
             true
         }
+        "note_block_sound" => {
+            let Some(sound) = value.as_str() else {
+                return false;
+            };
+            // `ResourceLocation.parse`: без пространства имён — `minecraft:`.
+            extra.note_block_sound = Some(if sound.contains(':') {
+                sound.to_owned()
+            } else {
+                format!("minecraft:{sound}")
+            });
+            true
+        }
         "custom_data" => {
             let Some(map) = value.as_compound() else {
                 return false;
