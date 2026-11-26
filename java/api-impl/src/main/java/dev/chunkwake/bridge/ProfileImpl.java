@@ -22,6 +22,8 @@ final class ProfileImpl implements PlayerProfile {
     private UUID id;
     /** По имени свойства, как {@code PropertyMap} профиля: одно на имя. */
     private final Map<String, ProfileProperty> properties = new LinkedHashMap<>();
+    /** Стабильный вид на {@code textures}; читает свойство лениво. */
+    private final PlayerTexturesImpl textures = new PlayerTexturesImpl(this);
 
     ProfileImpl(UUID id, String name) {
         this.id = id;
@@ -49,10 +51,18 @@ final class ProfileImpl implements PlayerProfile {
 
     @Override
     public PlayerTextures getTextures() {
-        return Stub.of(PlayerTextures.class, new Object());
+        textures.load();
+        return textures;
     }
 
-    @Override public void setTextures(PlayerTextures textures) {}
+    @Override
+    public void setTextures(PlayerTextures textures) {
+        if (textures == null) {
+            this.textures.clear();
+        } else {
+            this.textures.copyFrom(textures);
+        }
+    }
 
     @Override public Set<ProfileProperty> getProperties() { return new LinkedHashSet<>(properties.values()); }
     @Override public boolean hasProperty(String property) { return properties.containsKey(property); }
@@ -60,6 +70,9 @@ final class ProfileImpl implements PlayerProfile {
     @Override
     public void setProperty(ProfileProperty property) {
         properties.put(property.getName(), property);
+        if ("textures".equals(property.getName())) {
+            textures.invalidate();
+        }
     }
 
     @Override
@@ -67,8 +80,34 @@ final class ProfileImpl implements PlayerProfile {
         properties.forEach(this::setProperty);
     }
 
-    @Override public boolean removeProperty(String property) { return properties.remove(property) != null; }
-    @Override public void clearProperties() { properties.clear(); }
+    @Override
+    public boolean removeProperty(String property) {
+        boolean removed = properties.remove(property) != null;
+        if (removed && "textures".equals(property)) {
+            textures.invalidate();
+        }
+        return removed;
+    }
+
+    @Override
+    public void clearProperties() {
+        properties.clear();
+        textures.invalidate();
+    }
+
+    /** Сырое свойство профиля, без ленивой загрузки текстур. */
+    ProfileProperty storedProperty(String name) {
+        return properties.get(name);
+    }
+
+    /** Запись свойства из {@link PlayerTexturesImpl}, без инвалидации его кэша. */
+    void storeProperty(String name, ProfileProperty property) {
+        if (property == null) {
+            properties.remove(name);
+        } else {
+            properties.put(name, property);
+        }
+    }
 
     @Override
     public boolean isComplete() {
