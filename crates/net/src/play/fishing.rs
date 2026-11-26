@@ -31,6 +31,109 @@ pub struct Bobber {
     pub luck: i32,
 }
 
+/// Одна запись таблицы `gameplay/fishing`: предмет и модификаторы.
+#[derive(Clone, Copy)]
+struct FishingDrop {
+    name: &'static str,
+    weight: i32,
+    count: i32,
+    /// `set_damage`: максимальная доля оставшейся прочности.
+    damage: Option<f32>,
+    /// `set_potion`: id зелья.
+    potion: Option<&'static str>,
+    /// `enchant_with_levels`: уровни.
+    enchant_levels: Option<i32>,
+    /// `location_check`: запись только в биомах джунглей.
+    jungle_only: bool,
+}
+
+const fn drop(name: &'static str, weight: i32) -> FishingDrop {
+    FishingDrop {
+        name,
+        weight,
+        count: 1,
+        damage: None,
+        potion: None,
+        enchant_levels: None,
+        jungle_only: false,
+    }
+}
+
+const fn damaged(name: &'static str, weight: i32, damage: f32) -> FishingDrop {
+    FishingDrop {
+        damage: Some(damage),
+        ..drop(name, weight)
+    }
+}
+
+const fn potion(name: &'static str, weight: i32) -> FishingDrop {
+    FishingDrop {
+        potion: Some("minecraft:water"),
+        ..drop(name, weight)
+    }
+}
+
+const fn enchanted(
+    name: &'static str,
+    weight: i32,
+    damage: Option<f32>,
+    levels: i32,
+) -> FishingDrop {
+    FishingDrop {
+        damage,
+        enchant_levels: Some(levels),
+        ..drop(name, weight)
+    }
+}
+
+const fn jungle(name: &'static str, weight: i32) -> FishingDrop {
+    FishingDrop {
+        jungle_only: true,
+        ..drop(name, weight)
+    }
+}
+
+const FISH_TABLE: &[FishingDrop] = &[
+    drop("minecraft:cod", 60),
+    drop("minecraft:salmon", 25),
+    drop("minecraft:pufferfish", 13),
+    drop("minecraft:tropical_fish", 2),
+];
+
+const JUNK_TABLE: &[FishingDrop] = &[
+    drop("minecraft:lily_pad", 17),
+    damaged("minecraft:leather_boots", 10, 0.9),
+    drop("minecraft:leather", 10),
+    drop("minecraft:bone", 10),
+    potion("minecraft:potion", 10),
+    drop("minecraft:string", 5),
+    damaged("minecraft:fishing_rod", 2, 0.9),
+    drop("minecraft:bowl", 10),
+    drop("minecraft:stick", 5),
+    FishingDrop {
+        count: 10,
+        ..drop("minecraft:ink_sac", 1)
+    },
+    drop("minecraft:tripwire_hook", 10),
+    drop("minecraft:rotten_flesh", 10),
+    jungle("minecraft:bamboo", 10),
+];
+
+const TREASURE_TABLE: &[FishingDrop] = &[
+    drop("minecraft:name_tag", 1),
+    drop("minecraft:saddle", 1),
+    enchanted("minecraft:bow", 1, Some(0.25), 30),
+    enchanted("minecraft:fishing_rod", 1, Some(0.25), 30),
+    enchanted("minecraft:book", 1, None, 30),
+    drop("minecraft:nautilus_shell", 1),
+];
+
+/// `SetItemDamageFunction`: `floor((1 − clamp(damage, 0, 1)) × maxDamage)`.
+fn set_damage(damage: f32, max: i32) -> i32 {
+    let remaining = 1.0 - damage.clamp(0.0, 1.0);
+    (remaining * max as f32).floor() as i32
+}
+
 impl PlayPlan {
     fn bobber_type(&self) -> Option<i32> {
         self.survival
@@ -247,17 +350,73 @@ impl PlayPlan {
             return;
         };
         let mut caught: Option<&'static str> = None;
-        for (name, count) in self.fishing_loot(b.luck, b.open_water) {
-            let Some(item) = self.item_id(name) else {
+        for drop in self.fishing_loot(b.luck, b.open_water, b.pos) {
+            let Some(mut item) = self.item_id(drop.name) else {
                 continue;
             };
-            caught.get_or_insert(name);
+            caught.get_or_insert(drop.name);
+            let mut stack = Stack::new(item, drop.count);
+            // `SetItemDamageFunction`: доля оставшейся прочности равномерна
+            // в `0..max`, урон — `floor((1 − доля) × maxDamage)`.
+            if let Some(max_fraction) = drop.damage {
+                let max = self.item_max_damage(item);
+                if max > 0 {
+                    stack.damage = set_damage(rand::random::<f32>() * max_fraction, max);
+                }
+            }
+            // `SetPotionFunction`: `minecraft:water`.
+            if let Some(potion) = drop.potion
+                && let Some(extra) = self.with_potion(item, stack.extra, potion)
+            {
+                stack.extra = extra;
+            }
+            // `EnchantWithLevelsFunction`: 30 уровней, тег `#on_random_loot`.
+            if let Some(levels) = drop.enchant_levels {
+                let options = self
+                    .survival
+                    .trades
+                    .enchant_tags
+                    .get("minecraft:on_random_loot")
+                    .cloned()
+                    .unwrap_or_default();
+                let enchantable = self
+                    .survival
+                    .enchanting
+                    .enchantable
+                    .get(drop.name)
+                    .copied()
+                    .unwrap_or(1);
+                let mut rng = rand::thread_rng();
+                let enchants = super::villagers::select_enchantments(
+                    &self.survival.enchanting.defs,
+                    &options,
+                    drop.name,
+                    enchantable,
+                    levels,
+                    &mut rng,
+                );
+                if !enchants.is_empty() {
+                    let mut extra = (*chunkwake_protocol::components::get(stack.extra)).clone();
+                    if drop.name == "minecraft:book" {
+                        // `EnchantmentHelper.enchantItem`: книга становится
+                        // зачарованной, чары — в `stored_enchantments`.
+                        if let Some(book) = self.item_id("minecraft:enchanted_book") {
+                            item = book;
+                        }
+                        extra.stored = enchants;
+                    } else {
+                        extra.enchantments = enchants;
+                    }
+                    stack.item = item;
+                    stack.extra = chunkwake_protocol::components::intern(extra);
+                }
+            }
             let vel = [
                 (feet[0] - b.pos[0]) * 0.1,
                 (feet[1] - b.pos[1]) * 0.1 + 0.3,
                 (feet[2] - b.pos[2]) * 0.1,
             ];
-            self.drop_item(b.pos, vel, Stack::new(item, count), Duration::ZERO);
+            self.drop_item(b.pos, vel, stack, Duration::ZERO);
         }
         self.spawn_orbs(
             [feet[0], feet[1] + 0.5, feet[2]],
@@ -277,16 +436,16 @@ impl PlayPlan {
         );
     }
 
-    /// Таблица `gameplay/fishing`: рыба 85, мусор 10, сокровища 5 + `2×luck`
-    /// (только на открытой воде); внутри категории — по весам.
-    fn fishing_loot(&self, luck: i32, open_water: bool) -> Vec<(&'static str, i32)> {
-        let mut pools: Vec<(&'static str, i32, i32)> = vec![("fish", 85, -1), ("junk", 10, -2)];
+    /// Таблица `gameplay/fishing`: мусор 10 (`quality` −2), сокровища 5
+    /// (`quality` +2, только на открытой воде), рыба 85 (`quality` −1).
+    fn fishing_loot(&self, luck: i32, open_water: bool, at: [f64; 3]) -> Vec<FishingDrop> {
+        let mut pools: Vec<(&str, i32, i32)> = vec![("junk", 10, -2), ("fish", 85, -1)];
         if open_water {
-            pools.push(("treasure", 5, 2));
+            pools.insert(1, ("treasure", 5, 2));
         }
         let total: i32 = pools.iter().map(|(_, w, q)| (*w + q * luck).max(0)).sum();
         if total <= 0 {
-            return vec![("minecraft:cod", 1)];
+            return vec![FISH_TABLE[0]];
         }
         let mut roll = rand::random::<u32>() % total as u32;
         let mut kind = "fish";
@@ -298,45 +457,39 @@ impl PlayPlan {
             }
             roll -= weight;
         }
-        let table: &[(&str, i32)] = match kind {
-            "junk" => &[
-                ("minecraft:lily_pad", 17),
-                ("minecraft:leather_boots", 10),
-                ("minecraft:leather", 10),
-                ("minecraft:bone", 10),
-                ("minecraft:potion", 10),
-                ("minecraft:string", 5),
-                ("minecraft:fishing_rod", 2),
-                ("minecraft:bowl", 10),
-                ("minecraft:stick", 5),
-                ("minecraft:ink_sac", 1),
-                ("minecraft:tripwire_hook", 10),
-                ("minecraft:rotten_flesh", 10),
-            ],
-            "treasure" => &[
-                ("minecraft:bow", 1),
-                ("minecraft:enchanted_book", 1),
-                ("minecraft:fishing_rod", 1),
-                ("minecraft:name_tag", 1),
-                ("minecraft:nautilus_shell", 1),
-                ("minecraft:saddle", 1),
-            ],
-            _ => &[
-                ("minecraft:cod", 60),
-                ("minecraft:salmon", 25),
-                ("minecraft:pufferfish", 13),
-                ("minecraft:tropical_fish", 2),
-            ],
+        let jungle = self
+            .biome_name_at([
+                at[0].floor() as i32,
+                at[1].floor() as i32,
+                at[2].floor() as i32,
+            ])
+            .is_some_and(|b| {
+                matches!(
+                    b.as_str(),
+                    "minecraft:jungle" | "minecraft:sparse_jungle" | "minecraft:bamboo_jungle"
+                )
+            });
+        let table: Vec<FishingDrop> = match kind {
+            "junk" => JUNK_TABLE
+                .iter()
+                .copied()
+                .filter(|d| !d.jungle_only || jungle)
+                .collect(),
+            "treasure" => TREASURE_TABLE.to_vec(),
+            _ => FISH_TABLE.to_vec(),
         };
-        let sum: i32 = table.iter().map(|(_, w)| *w).sum();
-        let mut r = rand::random::<u32>() % sum as u32;
-        for (name, w) in table {
-            if r < *w as u32 {
-                return vec![(*name, 1)];
-            }
-            r -= *w as u32;
+        let sum: i32 = table.iter().map(|d| d.weight).sum();
+        if sum <= 0 {
+            return vec![FISH_TABLE[0]];
         }
-        vec![("minecraft:cod", 1)]
+        let mut r = rand::random::<u32>() % sum as u32;
+        for drop in table {
+            if r < drop.weight as u32 {
+                return vec![drop];
+            }
+            r -= drop.weight as u32;
+        }
+        vec![FISH_TABLE[0]]
     }
 
     pub(super) fn track_fish(&self, out: &mut Vec<Tracked>) {
@@ -582,5 +735,79 @@ impl PlayPlan {
             }
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fishing_tables_match_vanilla_26_3() {
+        assert_eq!(FISH_TABLE.iter().map(|d| d.weight).sum::<i32>(), 100);
+        assert_eq!(JUNK_TABLE.iter().map(|d| d.weight).sum::<i32>(), 110);
+        assert_eq!(TREASURE_TABLE.len(), 6);
+        // `set_count: 10` у чернильного мешка, остальное по одному.
+        let ink = JUNK_TABLE
+            .iter()
+            .find(|d| d.name == "minecraft:ink_sac")
+            .unwrap();
+        assert_eq!(ink.count, 10);
+        // `set_potion: minecraft:water`.
+        let bottle = JUNK_TABLE
+            .iter()
+            .find(|d| d.name == "minecraft:potion")
+            .unwrap();
+        assert_eq!(bottle.potion, Some("minecraft:water"));
+        // `location_check`: бамбук только в джунглях.
+        let bamboo = JUNK_TABLE
+            .iter()
+            .find(|d| d.name == "minecraft:bamboo")
+            .unwrap();
+        assert!(bamboo.jungle_only);
+        // Сокровища: книга — именно `minecraft:book`, чары добавит функция.
+        assert!(
+            TREASURE_TABLE
+                .iter()
+                .all(|d| d.name != "minecraft:enchanted_book")
+        );
+        let book = TREASURE_TABLE
+            .iter()
+            .find(|d| d.name == "minecraft:book")
+            .unwrap();
+        assert_eq!(book.enchant_levels, Some(30));
+        assert_eq!(book.damage, None);
+        for name in ["minecraft:bow", "minecraft:fishing_rod"] {
+            let d = TREASURE_TABLE.iter().find(|d| d.name == name).unwrap();
+            assert_eq!(d.damage, Some(0.25));
+            assert_eq!(d.enchant_levels, Some(30));
+        }
+        let boots = JUNK_TABLE
+            .iter()
+            .find(|d| d.name == "minecraft:leather_boots")
+            .unwrap();
+        assert_eq!(boots.damage, Some(0.9));
+    }
+
+    #[test]
+    fn set_damage_uses_remaining_durability() {
+        assert_eq!(set_damage(0.0, 100), 100);
+        assert_eq!(set_damage(0.25, 100), 75);
+        assert_eq!(set_damage(0.9, 100), 10);
+        assert_eq!(set_damage(1.0, 100), 0);
+        assert_eq!(set_damage(1.5, 100), 0);
+        assert_eq!(set_damage(0.5, 0), 0);
+    }
+
+    #[test]
+    fn category_weights_include_luck_quality() {
+        // junk 10 − 2·luck, treasure 5 + 2·luck (только открытая вода), fish 85 − luck.
+        let weight = |base: i32, quality: i32, luck: i32| (base + quality * luck).max(0);
+        assert_eq!(weight(10, -2, 0), 10);
+        assert_eq!(weight(5, 2, 0), 5);
+        assert_eq!(weight(85, -1, 0), 85);
+        assert_eq!(weight(10, -2, 3), 4);
+        assert_eq!(weight(5, 2, 3), 11);
+        assert_eq!(weight(85, -1, 3), 82);
     }
 }

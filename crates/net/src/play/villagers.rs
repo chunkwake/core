@@ -47,7 +47,7 @@ fn weighted_enchant(
 /// `EnchantmentHelper.enchantItem` (`selectEnchantment`) для
 /// `enchant_with_levels`: стоимость с разбросом, уровни по диапазонам и
 /// совместимость только с последними чарами.
-fn select_enchantments(
+pub(super) fn select_enchantments(
     defs: &[chunkwake_data::enchanting::EnchantDef],
     options: &[String],
     item: &str,
