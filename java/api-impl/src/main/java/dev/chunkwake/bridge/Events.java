@@ -91,11 +91,8 @@ final class Events {
                 yield e.isCancelled() ? "c" : "";
             }
             case Bridge.EVENT_INVENTORY_CLICK -> inventoryClick(plugins, p, arg);
-            case Bridge.EVENT_INVENTORY_OPEN -> p.inventoryOpened(arg) ? "" : "c";
-            case Bridge.EVENT_INVENTORY_CLOSE -> {
-                p.inventoryClosed(Integer.parseInt(arg.trim()));
-                yield "";
-            }
+            case Bridge.EVENT_INVENTORY_OPEN -> p.inventoryOpened(arg);
+            case Bridge.EVENT_INVENTORY_CLOSE -> p.inventoryClosed(arg);
             case Bridge.EVENT_SHOOT_BOW -> {
                 // оружие снаряд сила рука тратить
                 String[] f = arg.split(" ");

@@ -321,6 +321,9 @@ fn write_patch(w: &mut Writer, s: &Stack) {
         e.potion.is_some() && id_of(&crate::components::POTION_CONTENTS_COMPONENT) >= 0,
         e.fireworks.is_some() && id_of(&crate::components::FIREWORKS_COMPONENT) >= 0,
         e.instrument.is_some() && id_of(&crate::components::INSTRUMENT_COMPONENT) >= 0,
+        e.custom_model_data.is_some()
+            && id_of(&crate::components::CUSTOM_MODEL_DATA_COMPONENT) >= 0,
+        e.unbreakable && id_of(&crate::components::UNBREAKABLE_COMPONENT) >= 0,
     ];
 
     w.var_int(parts.iter().filter(|&&p| p).count() as i32)
@@ -454,6 +457,19 @@ fn write_patch(w: &mut Writer, s: &Stack) {
         w.var_int(id_of(&crate::components::INSTRUMENT_COMPONENT))
             .var_int(instrument);
     }
+    if let (true, Some(cmd)) = (parts[23], e.custom_model_data) {
+        // CustomModelData: floats, flags, strings, colors (каждый список с длиной).
+        w.var_int(id_of(&crate::components::CUSTOM_MODEL_DATA_COMPONENT))
+            .var_int(1)
+            .f32(cmd as f32)
+            .var_int(0)
+            .var_int(0)
+            .var_int(0);
+    }
+    if parts[24] {
+        // Unbreakable — unit-компонент: только тип, без данных.
+        w.var_int(id_of(&crate::components::UNBREAKABLE_COMPONENT));
+    }
 }
 
 /// Номер компонента книги в реестре; -1 — нет книги или реестр не задан.
@@ -521,6 +537,29 @@ pub fn read_container_value(r: &mut Reader, depth: u8) -> Result<Vec<Slot>> {
         out.push(read_stack_template(r, depth + 1)?);
     }
     Ok(out)
+}
+
+/// `minecraft:custom_model_data`: floats, flags, strings, colors.
+/// Legacy `ItemMeta.setCustomModelData(int)` хранит число в `floats[0]`.
+fn read_custom_model_data(r: &mut Reader) -> Result<Option<i32>> {
+    let floats = r.var_int()?.clamp(0, 256);
+    let mut first = None;
+    for i in 0..floats {
+        let value = r.f32()?;
+        if i == 0 {
+            first = Some(value);
+        }
+    }
+    for _ in 0..r.var_int()?.clamp(0, 256) {
+        r.bool()?;
+    }
+    for _ in 0..r.var_int()?.clamp(0, 256) {
+        r.string(32767)?;
+    }
+    for _ in 0..r.var_int()?.clamp(0, 256) {
+        r.i32()?;
+    }
+    Ok(first.map(|v| v as i32))
 }
 
 fn read_stack_tail(r: &mut Reader, item: i32, count: i32, depth: u8) -> Result<Slot> {
@@ -603,6 +642,10 @@ fn read_stack_tail(r: &mut Reader, item: i32, count: i32, depth: u8) -> Result<S
             }
         } else if id_of(&CONTAINER_COMPONENT) >= 0 && t == id_of(&CONTAINER_COMPONENT) {
             e.container = read_container_value(r, depth)?;
+        } else if t == id_of(&crate::components::CUSTOM_MODEL_DATA_COMPONENT) {
+            e.custom_model_data = read_custom_model_data(r)?;
+        } else if t == id_of(&crate::components::UNBREAKABLE_COMPONENT) {
+            e.unbreakable = true;
         } else {
             known = false;
             break;
@@ -917,6 +960,12 @@ fn read_untrusted_stack(r: &mut Reader) -> Result<Slot> {
                     e.charged.push(st);
                 }
             }
+        } else if kind == id_of(&crate::components::CUSTOM_MODEL_DATA_COMPONENT) {
+            if let Ok(cmd) = read_custom_model_data(&mut body) {
+                e.custom_model_data = cmd;
+            }
+        } else if kind == id_of(&crate::components::UNBREAKABLE_COMPONENT) {
+            e.unbreakable = true;
         } else {
             known = false;
         }
@@ -1296,6 +1345,24 @@ mod tests {
         let mut out = Writer::new();
         write_stack(&mut out, stack);
         assert_eq!(out.buf, original);
+    }
+
+    #[test]
+    fn legacy_custom_model_data_and_unbreakable_roundtrip() {
+        use std::sync::atomic::Ordering;
+        crate::components::CUSTOM_MODEL_DATA_COMPONENT.store(300, Ordering::Relaxed);
+        crate::components::UNBREAKABLE_COMPONENT.store(301, Ordering::Relaxed);
+        let stack = Stack {
+            extra: crate::components::intern(crate::components::Extra {
+                custom_model_data: Some(42),
+                unbreakable: true,
+                ..Default::default()
+            }),
+            ..Stack::new(10, 1)
+        };
+        let mut w = Writer::new();
+        write_stack(&mut w, Some(stack));
+        assert_eq!(read_stack(&mut Reader::new(&w.buf)).unwrap(), Some(stack));
     }
 
     #[test]

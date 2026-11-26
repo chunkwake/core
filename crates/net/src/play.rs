@@ -2531,6 +2531,33 @@ impl Window {
     }
 }
 
+/// Применяет правки верхнего инвентаря из ответа `InventoryOpenEvent`:
+/// первая строка `k` (не отменено), далее `<индекс> <slot-line>`.
+fn apply_inventory_open_reply(
+    slots: &mut [Slot],
+    reply: &str,
+    item_id: impl Fn(&str) -> Option<i32>,
+) -> bool {
+    let mut changed = false;
+    for line in reply.lines().skip(1) {
+        let Some((index, data)) = line.split_once(' ') else {
+            continue;
+        };
+        let Ok(index) = index.trim().parse::<usize>() else {
+            continue;
+        };
+        let Some(slot) = slots.get_mut(index) else {
+            continue;
+        };
+        *slot = match data.trim() {
+            "-" => None,
+            data => crate::stack_nbt::from_line(data, &item_id),
+        };
+        changed = true;
+    }
+    changed
+}
+
 fn stone_result_for(
     recipes: &chunkwake_data::recipes::Recipes,
     input: Slot,
@@ -13394,10 +13421,12 @@ impl PlayPlan {
     }
 
     /// `InventoryOpenEvent` до `open_screen`: `false` — плагин отменил.
+    /// Plugin edits to the top inventory (`getTopInventory`) are applied to
+    /// `window`: e.g. ChestSort reorders container contents before open_screen.
     async fn inventory_open_allowed(
         &self,
         uuid: Uuid,
-        window: &Window,
+        window: &mut Window,
         title: &serde_json::Value,
     ) -> bool {
         if !self
@@ -13407,16 +13436,38 @@ impl PlayPlan {
             return true;
         }
         let title = serde_json::to_string(title).unwrap_or_default();
-        !self
-            .cancelled(Event::InventoryOpen, uuid, || {
-                format!(
-                    "{} {} {} {title}",
-                    Self::window_type(window.kind),
-                    window.id,
-                    window.slots.len()
-                )
-            })
-            .await
+        let holder = self.block(window.pos).map_or_else(
+            || "minecraft:air".to_owned(),
+            |state| self.state_name(state).to_owned(),
+        );
+        let mut arg = format!(
+            "{} {} {} {} {} {} {}",
+            Self::window_type(window.kind),
+            window.id,
+            window.slots.len(),
+            window.pos[0],
+            window.pos[1],
+            window.pos[2],
+            holder
+        );
+        for slot in &window.slots {
+            arg.push('\n');
+            arg.push_str(&self.slot_line(*slot));
+        }
+        arg.push('\n');
+        arg.push_str(&title);
+        let Some(reply) = self.plugin_event(Event::InventoryOpen, uuid, || arg).await else {
+            return true;
+        };
+        if reply.trim() == "c" {
+            return false;
+        }
+        let changed =
+            apply_inventory_open_reply(&mut window.slots, &reply, |name| self.item_id(name));
+        if changed && matches!(window.kind, Kind::Chest(_)) {
+            self.save_window(window, uuid);
+        }
+        true
     }
 
     /// `InventoryClickEvent` до применения клика; `true` — плагин отменил.
@@ -13483,11 +13534,41 @@ impl PlayPlan {
         .await
     }
 
-    /// Закрыть окно; плагинам — `InventoryCloseEvent` (id окна или плагина).
-    async fn close_with_event(&self, inv: &mut Inventory, window: &mut Option<Window>, uuid: Uuid) {
-        if let Some(w) = window.as_ref() {
-            let arg = plugin_of(w.pos).map_or_else(|| w.id.to_string(), |pid| pid.to_string());
-            self.plugin_event(Event::InventoryClose, uuid, || arg).await;
+    /// Закрыть окно; плагинам — `InventoryCloseEvent` (id окна и слоты).
+    async fn close_with_event(
+        &self,
+        inv: &mut Inventory,
+        ender: &mut Vec<Slot>,
+        window: &mut Option<Window>,
+        uuid: Uuid,
+    ) {
+        let (native, arg) = match window.as_ref() {
+            Some(w) => {
+                let pid = plugin_of(w.pos);
+                let mut arg = pid.map_or_else(|| w.id.to_string(), |pid| pid.to_string());
+                if pid.is_none() {
+                    arg.clear();
+                    arg.push_str(&w.id.to_string());
+                    for slot in &w.slots {
+                        arg.push('\n');
+                        arg.push_str(&self.slot_line(*slot));
+                    }
+                }
+                (pid.is_none(), arg)
+            }
+            None => (false, String::new()),
+        };
+        if window.is_some()
+            && let Some(reply) = self.plugin_event(Event::InventoryClose, uuid, || arg).await
+            && native
+            && let Some(w) = window.as_mut()
+            && apply_inventory_open_reply(&mut w.slots, &reply, |name| self.item_id(name))
+        {
+            match w.kind {
+                Kind::Chest(_) => self.save_window(w, uuid),
+                Kind::EnderChest => ender.clone_from(&w.slots),
+                _ => {}
+            }
         }
         self.close_window(inv, window, uuid);
     }
@@ -14380,7 +14461,7 @@ impl PlayPlan {
                                 if let Some(w) = window.as_ref() {
                                     conn.send(&chunkwake_protocol::inventory::container_close(ids.container_close, w.id)).await?;
                                 }
-                                self.close_with_event(&mut state.inv, &mut window, uuid).await;
+                                self.close_with_event(&mut state.inv, &mut state.ender, &mut window, uuid).await;
                                 next_window = next_window % 100 + 1;
                                 let pos = plugin_pos(pid);
                                 let mut w = Window { id: next_window, kind: Kind::Chest(size), pos, second: None, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false, crafter: [i32::MIN; 10], merchant: None };
@@ -14399,7 +14480,7 @@ impl PlayPlan {
                         Control::CloseWindow => {
                             if let Some(w) = window.as_ref() {
                                 conn.send(&chunkwake_protocol::inventory::container_close(ids.container_close, w.id)).await?;
-                                self.close_with_event(&mut state.inv, &mut window, uuid).await;
+                                self.close_with_event(&mut state.inv, &mut state.ender, &mut window, uuid).await;
                                 self.send_inventory(conn, &mut state.inv).await?;
                             }
                         }
@@ -15703,17 +15784,17 @@ impl PlayPlan {
                                 conn.send(&chunkwake_protocol::inventory::container_close(ids.container_close, w.id))
                                     .await?;
                             }
-                            self.close_with_event(&mut state.inv, &mut window, uuid).await;
+                            self.close_with_event(&mut state.inv, &mut state.ender, &mut window, uuid).await;
                             next_window = next_window % 100 + 1;
                             let pos = [
                                 vpos[0].floor() as i32,
                                 vpos[1].floor() as i32,
                                 vpos[2].floor() as i32,
                             ];
-                            let w = Window { id: next_window, kind: Kind::Merchant, pos, second: None, slots: vec![None; 3], data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false, crafter: [i32::MIN; 10], merchant: Some(villagers::MerchantWindow { villager: it.entity, selected: None }) };
+                            let mut w = Window { id: next_window, kind: Kind::Merchant, pos, second: None, slots: vec![None; 3], data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false, crafter: [i32::MIN; 10], merchant: Some(villagers::MerchantWindow { villager: it.entity, selected: None }) };
                             let menu = self.survival.menu_merchant;
                             let title = self.villager_title(it.entity);
-                            if !self.inventory_open_allowed(uuid, &w, &title).await {
+                            if !self.inventory_open_allowed(uuid, &mut w, &title).await {
                                 continue;
                             }
                             conn.send(&chunkwake_protocol::inventory::open_screen(ids.open_screen, w.id, menu, &title))
@@ -15755,13 +15836,13 @@ impl PlayPlan {
                                     if let Some(w) = window.as_ref() {
                                         conn.send(&chunkwake_protocol::inventory::container_close(ids.container_close, w.id)).await?;
                                     }
-                                    self.close_with_event(&mut state.inv, &mut window, uuid).await;
+                                    self.close_with_event(&mut state.inv, &mut state.ender, &mut window, uuid).await;
                                     next_window = next_window % 100 + 1;
                                     let menu = if size == 5 { self.survival.menu_hopper } else { self.survival.menu_chest };
                                     let pos = cart_pos(it.entity);
                                     let mut w = Window { id: next_window, kind: Kind::Chest(size), pos, second: None, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false, crafter: [i32::MIN; 10], merchant: None };
                                     w.slots = self.window_slots(&w);
-                                    if !self.inventory_open_allowed(uuid, &w, &title).await {
+                                    if !self.inventory_open_allowed(uuid, &mut w, &title).await {
                                         continue;
                                     }
                                     conn.send(&chunkwake_protocol::inventory::open_screen(ids.open_screen, w.id, menu, &title)).await?;
@@ -15843,12 +15924,12 @@ impl PlayPlan {
                                         conn.send(&chunkwake_protocol::inventory::container_close(ids.container_close, w.id))
                                             .await?;
                                     }
-                                    self.close_with_event(&mut state.inv, &mut window, uuid).await;
+                                    self.close_with_event(&mut state.inv, &mut state.ender, &mut window, uuid).await;
                                     next_window = next_window % 100 + 1;
                                     let pos = boat_pos(it.entity);
                                     let mut w = Window { id: next_window, kind: Kind::Chest(size), pos, second: None, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false, crafter: [i32::MIN; 10], merchant: None };
                                     w.slots = self.window_slots(&w);
-                                    if !self.inventory_open_allowed(uuid, &w, &title).await {
+                                    if !self.inventory_open_allowed(uuid, &mut w, &title).await {
                                         continue;
                                     }
                                     conn.send(&chunkwake_protocol::inventory::open_screen(
@@ -16070,7 +16151,7 @@ impl PlayPlan {
                     }
                     if id == ids.sb_container_close {
                         let _id = r.var_int()?;
-                        self.close_with_event(&mut state.inv, &mut window, uuid).await;
+                        self.close_with_event(&mut state.inv, &mut state.ender, &mut window, uuid).await;
                         self.send_inventory(conn, &mut state.inv).await?;
                         self.refresh_glide(conn, me, state, sneaking, flying, &mut gliding).await?;
                         continue;
@@ -17433,7 +17514,7 @@ impl PlayPlan {
                                 w.slots = self.window_slots(&w);
                             }
                             let title = serde_json::json!({"translate": title});
-                            if !self.inventory_open_allowed(uuid, &w, &title).await {
+                            if !self.inventory_open_allowed(uuid, &mut w, &title).await {
                                 continue;
                             }
                             conn.send(&chunkwake_protocol::inventory::open_screen(ids.open_screen, w.id, menu, &title)).await?;
@@ -27416,9 +27497,10 @@ mod tests {
     use super::{
         CHEST_SINGLE, CUSTOM_FIRST, ChestState, ClientLoading, DimSpec, Dimension,
         DynamicFactoryFn, DynamicGen, FastMap, GameModeChange, LOAD_GATED_PACKETS,
-        acknowledge_player_save, add_banner_pattern, chunks_around, container_entity,
-        create_dynamic_world, derived_seed, dominant_axis, dynamic_world_args, game_mode_change,
-        in_view, lectern_page_request, update_container_viewers, within_pick_range,
+        acknowledge_player_save, add_banner_pattern, apply_inventory_open_reply, chunks_around,
+        container_entity, create_dynamic_world, derived_seed, dominant_axis, dynamic_world_args,
+        game_mode_change, in_view, lectern_page_request, update_container_viewers,
+        within_pick_range,
     };
     use crate::survival::PlayerState;
     use uuid::Uuid;
@@ -27560,6 +27642,42 @@ mod tests {
             ..Default::default()
         };
         assert!(super::fallback_portal_origin(&narrow, 0, [0, 70, 0], true, 70).is_none());
+    }
+
+    #[test]
+    fn inventory_open_reply_applies_reordered_slots() {
+        use chunkwake_protocol::inventory::Stack;
+        let id = |name: &str| match name {
+            "minecraft:stone" => Some(1),
+            "minecraft:dirt" => Some(2),
+            _ => None,
+        };
+        let mut slots = vec![Some(Stack::new(1, 1)), Some(Stack::new(2, 1)), None];
+        let changed = apply_inventory_open_reply(
+            &mut slots,
+            "k\n0 minecraft:dirt 4\n2 minecraft:stone 1\n9 minecraft:stone 1\nbad\n",
+            id,
+        );
+        assert!(changed);
+        assert_eq!(slots[0], Some(Stack::new(2, 4)));
+        assert_eq!(slots[1], Some(Stack::new(2, 1)));
+        assert_eq!(slots[2], Some(Stack::new(1, 1)));
+    }
+
+    #[test]
+    fn inventory_open_reply_empty_and_removed_slots() {
+        use chunkwake_protocol::inventory::Stack;
+        let mut slots = vec![Some(Stack::new(1, 1)), Some(Stack::new(2, 1))];
+        let changed = apply_inventory_open_reply(&mut slots, "k\n0 -\n1 minecraft:dirt 2", |n| {
+            (n == "minecraft:dirt").then_some(2)
+        });
+        assert!(changed);
+        assert_eq!(slots[0], None);
+        assert_eq!(slots[1], Some(Stack::new(2, 2)));
+
+        let mut untouched = vec![Some(Stack::new(1, 1))];
+        assert!(!apply_inventory_open_reply(&mut untouched, "k", |_| None));
+        assert_eq!(untouched[0], Some(Stack::new(1, 1)));
     }
 
     #[test]

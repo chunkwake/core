@@ -1293,51 +1293,118 @@ public final class PlayerImpl {
     }
 
     /** Ванильный контейнер открыт: {@code InventoryOpenEvent} до open_screen. */
-    boolean inventoryOpened(String arg) {
-        String[] f = arg.split(" ", 4);
+    String inventoryOpened(String arg) {
+        String[] lines = arg.split("\n", -1);
+        String[] f = lines[0].split(" ");
         if (f.length < 4) {
-            return false;
+            return "c";
         }
         org.bukkit.event.inventory.InventoryType type;
-        int id, size;
+        int id, size, x = 0, y = 0, z = 0;
+        String holder = "";
         try {
             type = org.bukkit.event.inventory.InventoryType.valueOf(f[0]);
             id = Integer.parseInt(f[1]);
-            size = Integer.parseInt(f[2]);
+            size = Math.max(0, Integer.parseInt(f[2]));
+            if (f.length >= 7) {
+                x = Integer.parseInt(f[3]);
+                y = Integer.parseInt(f[4]);
+                z = Integer.parseInt(f[5]);
+                holder = f[6];
+            }
         } catch (RuntimeException e) {
-            return false;
+            return "c";
         }
+        String[] before = new String[size];
+        ItemStack[] items = new ItemStack[size];
+        for (int i = 0; i < size; i++) {
+            String line = lines.length > 1 + i ? lines[1 + i] : "-";
+            before[i] = line;
+            items[i] = "-".equals(line) ? null : StackImpl.parse(line);
+        }
+        int titleIndex = 1 + size;
+        String titleText = titleIndex < lines.length
+                ? String.join("\n", java.util.Arrays.copyOfRange(lines, titleIndex, lines.length))
+                : "{}";
         Component title;
         try {
-            title = GsonComponentSerializer.gson().deserialize(f[3]);
+            title = GsonComponentSerializer.gson().deserialize(titleText);
         } catch (RuntimeException e) {
             title = Component.translatable("container." + type.name().toLowerCase(java.util.Locale.ROOT));
         }
-        ViewImpl view = new ViewImpl(this, ViewImpl.blockTop(this, type, size), type, title);
+        org.bukkit.Location location = null;
+        if (type != org.bukkit.event.inventory.InventoryType.CRAFTING) {
+            try {
+                location = new org.bukkit.Location(api.getWorld(), x, y, z);
+            } catch (RuntimeException ignored) {
+                // Мир мог быть выгружен: позиция необязательна.
+            }
+        }
+        ViewImpl.BlockTop top = new ViewImpl.BlockTop(this, type, items, location, holder);
+        ViewImpl view = new ViewImpl(this, ViewImpl.blockTop(top), type, title, top);
         var event = new org.bukkit.event.inventory.InventoryOpenEvent(view.api);
         server.api.getPluginManager().callEvent(event);
         if (event.isCancelled()) {
-            return false;
+            return "c";
         }
         openView = view;
         openInv = null;
         openWindowId = id;
-        return true;
+        // Плагин (ChestSort) мог переставить предметы: отдаём Rust только изменения.
+        StringBuilder out = new StringBuilder("k");
+        for (int i = 0; i < size; i++) {
+            String after = StackImpl.line(items[i]);
+            if (after == null) {
+                after = "-";
+            }
+            if (!after.equals(before[i])) {
+                out.append('\n').append(i).append(' ').append(after);
+            }
+        }
+        return out.toString();
     }
 
     public void closeInventory() { control("closewin"); }
     public void closeInventory(org.bukkit.event.inventory.InventoryCloseEvent.Reason reason) { closeInventory(); }
 
     /** Rust закрыл окно плагина {@code id}: событие и сброс вида. */
-    void inventoryClosed(int id) {
+    String inventoryClosed(String arg) {
+        String[] lines = arg.split("\n", -1);
+        int id;
+        try {
+            id = Integer.parseInt(lines[0].trim());
+        } catch (RuntimeException e) {
+            return "k";
+        }
         ViewImpl v = openView;
         if (v == null) {
-            return;
+            return "k";
         }
         PluginInventory pi = openInv;
         int current = pi != null ? pi.id : openWindowId;
         if (current != id) {
-            return;
+            return "k";
+        }
+        StringBuilder out = new StringBuilder("k");
+        if (pi == null && v.blockTop != null) {
+            ViewImpl.BlockTop top = v.blockTop;
+            String[] before = new String[top.size()];
+            for (int i = 0; i < before.length; i++) {
+                before[i] = i + 1 < lines.length ? lines[i + 1] : "-";
+                top.setLine(i, before[i]);
+            }
+            server.api.getPluginManager()
+                    .callEvent(new org.bukkit.event.inventory.InventoryCloseEvent(v.api));
+            // ChestSort по умолчанию сортирует на close: возвращаем правки в Rust.
+            for (int i = 0; i < before.length; i++) {
+                String after = top.line(i);
+                if (!after.equals(before[i])) {
+                    out.append('\n').append(i).append(' ').append(after);
+                }
+            }
+        } else {
+            server.api.getPluginManager()
+                    .callEvent(new org.bukkit.event.inventory.InventoryCloseEvent(v.api));
         }
         openView = null;
         openInv = null;
@@ -1345,7 +1412,7 @@ public final class PlayerImpl {
         if (pi != null) {
             pi.viewers.remove(api);
         }
-        server.api.getPluginManager().callEvent(new org.bukkit.event.inventory.InventoryCloseEvent(v.api));
+        return out.toString();
     }
     public ItemStack getItemOnCursor() { return new StackImpl(org.bukkit.Material.AIR, 0); }
     public double getHealth() { return state().health(); }

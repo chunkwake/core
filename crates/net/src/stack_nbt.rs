@@ -161,6 +161,19 @@ pub fn named_nbt(
     if let Some(name) = e.instrument.and_then(components::instrument_name) {
         comps.insert("minecraft:instrument".into(), Tag::String(name.to_owned()));
     }
+    if let Some(value) = e.custom_model_data {
+        // Legacy int хранится первым float компонента (`CustomModelData.CODEC`).
+        let mut cmd = Compound::new();
+        cmd.insert("floats".into(), Tag::List(vec![Tag::Float(value as f32)]));
+        comps.insert("minecraft:custom_model_data".into(), Tag::Compound(cmd));
+    }
+    if e.unbreakable {
+        // `minecraft:unbreakable` — unit-компонент: пустой compound.
+        comps.insert(
+            "minecraft:unbreakable".into(),
+            Tag::Compound(Compound::new()),
+        );
+    }
     if !e.lore.is_empty() {
         let lines = e.lore.iter().map(|l| json_to_tag(&parse(l))).collect();
         comps.insert("minecraft:lore".into(), Tag::List(lines));
@@ -367,6 +380,18 @@ fn from_nbt_ref(c: &Compound, item_id: &dyn Fn(&str) -> Option<i32>, depth: u32)
             .get("minecraft:instrument")
             .and_then(Tag::as_str)
             .and_then(components::instrument_id);
+        e.custom_model_data = m
+            .get("minecraft:custom_model_data")
+            .and_then(Tag::as_compound)
+            .and_then(|c| c.get("floats"))
+            .and_then(Tag::as_list)
+            .and_then(|floats| floats.first())
+            .and_then(|t| match t {
+                Tag::Float(v) => Some(*v as i32),
+                Tag::Double(v) => Some(*v as i32),
+                other => other.as_i64().map(|v| v as i32),
+            });
+        e.unbreakable = m.contains_key("minecraft:unbreakable");
         if let Some(lines) = m.get("minecraft:lore").and_then(Tag::as_list) {
             e.lore = lines.iter().map(|t| tag_to_json(t).to_string()).collect();
         }
@@ -679,6 +704,12 @@ pub fn to_line(s: Stack, name: &str) -> String {
     if let Some(name) = e.instrument.and_then(components::instrument_name) {
         j.insert("instrument".into(), Value::from(name));
     }
+    if let Some(value) = e.custom_model_data {
+        j.insert("custom_model_data".into(), Value::from(value));
+    }
+    if e.unbreakable {
+        j.insert("unbreakable".into(), Value::Bool(true));
+    }
     if !e.lore.is_empty() {
         j.insert("lore".into(), e.lore.iter().map(|l| parse(l)).collect());
     }
@@ -820,6 +851,14 @@ pub fn from_line(line: &str, item_id: impl Fn(&str) -> Option<i32>) -> Option<St
             .get("instrument")
             .and_then(Value::as_str)
             .and_then(components::instrument_id);
+        e.custom_model_data = j
+            .get("custom_model_data")
+            .and_then(Value::as_i64)
+            .map(|v| v as i32);
+        e.unbreakable = j
+            .get("unbreakable")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         if let Some(Value::Array(lore)) = j.get("lore") {
             e.lore = lore.iter().map(Value::to_string).collect();
         }
@@ -1202,6 +1241,72 @@ mod tests {
     }
 
     #[test]
+    fn legacy_custom_model_data_and_unbreakable_round_trip() {
+        let stack = Stack {
+            extra: components::intern(Extra {
+                custom_model_data: Some(42),
+                unbreakable: true,
+                ..Default::default()
+            }),
+            ..Stack::new(7, 1)
+        };
+        let id = |n: &str| (n == "minecraft:diamond_sword").then_some(7);
+        let nbt = to_nbt(stack, "minecraft:diamond_sword").unwrap();
+        let comps = nbt.get("components").and_then(Tag::as_compound).unwrap();
+        let cmd = comps
+            .get("minecraft:custom_model_data")
+            .and_then(Tag::as_compound)
+            .unwrap();
+        assert_eq!(
+            cmd.get("floats").and_then(Tag::as_list),
+            Some(&[Tag::Float(42.0)][..])
+        );
+        assert_eq!(
+            comps.get("minecraft:unbreakable"),
+            Some(&Tag::Compound(Compound::new()))
+        );
+        assert_eq!(from_nbt(&nbt, id), Some(stack));
+
+        let line = to_line(stack, "minecraft:diamond_sword");
+        assert!(line.contains("\"custom_model_data\":42"), "{line}");
+        assert!(line.contains("\"unbreakable\":true"), "{line}");
+        assert_eq!(from_line(&line, id), Some(stack));
+    }
+
+    #[test]
+    fn custom_model_data_reads_first_float_and_unbreakable_by_presence() {
+        let nbt = Compound::from([
+            ("id".into(), Tag::String("minecraft:paper".into())),
+            ("count".into(), Tag::Int(1)),
+            (
+                "components".into(),
+                Tag::Compound(Compound::from([
+                    (
+                        "minecraft:custom_model_data".into(),
+                        Tag::Compound(Compound::from([
+                            (
+                                "floats".into(),
+                                Tag::List(vec![Tag::Float(17.0), Tag::Float(99.0)]),
+                            ),
+                            ("flags".into(), Tag::List(vec![Tag::Byte(1)])),
+                            ("strings".into(), Tag::List(vec![Tag::String("x".into())])),
+                            ("colors".into(), Tag::List(vec![Tag::Int(0xff0000)])),
+                        ])),
+                    ),
+                    (
+                        "minecraft:unbreakable".into(),
+                        Tag::Compound(Compound::new()),
+                    ),
+                ])),
+            ),
+        ]);
+        let stack = from_nbt(&nbt, |n| (n == "minecraft:paper").then_some(3)).unwrap();
+        let e = components::get(stack.extra);
+        assert_eq!(e.custom_model_data, Some(17));
+        assert!(e.unbreakable);
+    }
+
+    #[test]
     fn container_contents_survive_nbt() {
         let names = |id: i32| {
             Some(
@@ -1273,6 +1378,8 @@ mod tests {
             }),
             charged: Vec::new(),
             container: Vec::new(),
+            custom_model_data: Some(9),
+            unbreakable: true,
             custom_data: Some(compound_to_net(&Compound::from([(
                 "PublicBukkitValues".into(),
                 Tag::Compound(Compound::from([

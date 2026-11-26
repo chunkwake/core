@@ -19,16 +19,24 @@ final class ViewImpl {
     private final Inventory top;
     private final InventoryType type;
     private final Component title;
+    /** Реальный верх окна для синхронизации слотов на open/close. */
+    final BlockTop blockTop;
     /** Снимок клика: что было в нажатом слоте и на курсоре. */
     private int clicked = Integer.MIN_VALUE;
     private ItemStack current;
     private ItemStack cursor;
 
     ViewImpl(PlayerImpl player, Inventory top, InventoryType type, Component title) {
+        this(player, top, type, title, null);
+    }
+
+    ViewImpl(PlayerImpl player, Inventory top, InventoryType type, Component title,
+            BlockTop blockTop) {
         this.player = player;
         this.top = top;
         this.type = type;
         this.title = title;
+        this.blockTop = blockTop;
     }
 
     ViewImpl clicked(int raw, ItemStack current, ItemStack cursor) {
@@ -38,22 +46,206 @@ final class ViewImpl {
         return this;
     }
 
-    /** Верх без хранилища на стороне Java (сундук, печь, верстак, сетка игрока). */
+    /** Верхний инвентарь окна: содержимое контейнера, а не пустышка. */
     static Inventory blockTop(PlayerImpl p, InventoryType type, int size) {
-        return Stub.of(Inventory.class, new BlockTop(p, type, size));
+        return Stub.of(Inventory.class, new BlockTop(p, type, new ItemStack[size], null, ""));
     }
 
-    /** Окно блока: размер и тип; предметы видны через снимок клика. */
-    record BlockTop(PlayerImpl p, InventoryType type, int size) {
-        public int getSize() { return size; }
+    /** Верхний инвентарь с настоящими предметами, позицией и типом блока. */
+    static Inventory blockTop(PlayerImpl p, InventoryType type, ItemStack[] items,
+            org.bukkit.Location location, String holderName) {
+        return blockTop(new BlockTop(p, type, items, location, holderName));
+    }
+
+    /** Прокси верхнего инвентаря; impl остаётся доступен для синхронизации. */
+    static Inventory blockTop(BlockTop impl) {
+        Inventory inventory = Stub.of(Inventory.class, impl);
+        impl.self = inventory;
+        return inventory;
+    }
+
+    /**
+     * Инвентарь контейнера для {@code InventoryOpenEvent}. Плагины (ChestSort)
+     * читают {@code getContents()}, сортируют и вызывают {@code setContents()};
+     * Rust получает изменённые слоты в ответе события.
+     */
+    static final class BlockTop {
+        private final PlayerImpl p;
+        private final InventoryType type;
+        private final ItemStack[] items;
+        private final org.bukkit.Location location;
+        private final String holderName;
+        private Inventory self;
+        private org.bukkit.inventory.InventoryHolder holder;
+
+        BlockTop(PlayerImpl p, InventoryType type, ItemStack[] items,
+                org.bukkit.Location location, String holderName) {
+            this.p = p;
+            this.type = type;
+            this.items = items;
+            this.location = location;
+            this.holderName = holderName;
+        }
+
+        public int getSize() { return items.length; }
         public InventoryType getType() { return type; }
-        public org.bukkit.inventory.InventoryHolder getHolder() { return type == InventoryType.CRAFTING ? p.api : null; }
+        public org.bukkit.inventory.InventoryHolder getHolder() {
+            if (type == InventoryType.CRAFTING) {
+                return p.api;
+            }
+            if (holder == null) {
+                holder = makeHolder();
+            }
+            return holder;
+        }
+        public org.bukkit.inventory.InventoryHolder getHolder(boolean useSnapshot) {
+            return getHolder();
+        }
         public List<HumanEntity> getViewers() { return List.of(p.api); }
-        public ItemStack getItem(int i) { return null; }
-        public ItemStack[] getContents() { return new ItemStack[size]; }
-        public ItemStack[] getStorageContents() { return new ItemStack[size]; }
-        public boolean isEmpty() { return true; }
-        public org.bukkit.Location getLocation() { return null; }
+        public ItemStack getItem(int i) {
+            return i >= 0 && i < items.length ? items[i] : null;
+        }
+        public void setItem(int i, ItemStack s) {
+            if (i >= 0 && i < items.length) {
+                items[i] = s == null || s.getType().isAir() ? null : s;
+            }
+        }
+        public ItemStack[] getContents() { return items.clone(); }
+        public void setContents(ItemStack[] contents) {
+            for (int i = 0; i < items.length; i++) {
+                ItemStack s = contents != null && i < contents.length ? contents[i] : null;
+                items[i] = s == null || s.getType().isAir() ? null : s;
+            }
+        }
+        public ItemStack[] getStorageContents() { return getContents(); }
+        public void setStorageContents(ItemStack[] contents) { setContents(contents); }
+        public boolean isEmpty() {
+            for (ItemStack s : items) {
+                if (s != null && !s.getType().isAir() && s.getAmount() > 0) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        public org.bukkit.Location getLocation() {
+            return location == null ? null : location.clone();
+        }
+        public int getMaxStackSize() { return 64; }
+        int size() { return items.length; }
+        String line(int index) {
+            if (index < 0 || index >= items.length) {
+                return "-";
+            }
+            String line = StackImpl.line(items[index]);
+            return line == null ? "-" : line;
+        }
+        void setLine(int index, String line) {
+            if (index >= 0 && index < items.length) {
+                items[index] = line == null || line.equals("-") ? null : StackImpl.parse(line);
+            }
+        }
+        public java.util.ListIterator<ItemStack> iterator() {
+            return java.util.Arrays.asList(getContents()).listIterator();
+        }
+        public java.util.ListIterator<ItemStack> iterator(int index) {
+            return java.util.Arrays.asList(getContents()).listIterator(index);
+        }
+        public void clear() { java.util.Arrays.fill(items, null); }
+        public void clear(int index) { setItem(index, null); }
+        public void clear(int start, int end) {
+            for (int i = Math.max(0, start); i < Math.min(items.length, end); i++) {
+                items[i] = null;
+            }
+        }
+
+        /**
+         * Holder by real block material: ChestSort проверяет
+         * {@code holder instanceof Chest} (или Barrel/ShulkerBox).
+         */
+        private org.bukkit.inventory.InventoryHolder makeHolder() {
+            if (location == null || self == null) {
+                return null;
+            }
+            org.bukkit.Material material =
+                    org.bukkit.Material.matchMaterial(holderName == null ? "" : holderName);
+            if (material == null || material.isAir()) {
+                material = switch (type) {
+                    case CHEST -> org.bukkit.Material.CHEST;
+                    case HOPPER -> org.bukkit.Material.HOPPER;
+                    case DISPENSER -> org.bukkit.Material.DISPENSER;
+                    case FURNACE -> org.bukkit.Material.FURNACE;
+                    case BLAST_FURNACE -> org.bukkit.Material.BLAST_FURNACE;
+                    case SMOKER -> org.bukkit.Material.SMOKER;
+                    default -> null;
+                };
+            }
+            if (material == null) {
+                return null;
+            }
+            String key = material.getKey().getKey();
+            HolderImpl impl = new HolderImpl(material, self, location);
+            if (key.equals("barrel")) {
+                // ChestSort проверяет instanceof Chest, а не только Barrel.
+                return (org.bukkit.inventory.InventoryHolder) Stub.ofAll(
+                        new Class<?>[] {org.bukkit.block.Barrel.class, org.bukkit.block.Chest.class},
+                        impl);
+            }
+            if (key.endsWith("shulker_box")) {
+                return (org.bukkit.inventory.InventoryHolder) Stub.ofAll(
+                        new Class<?>[] {org.bukkit.block.ShulkerBox.class,
+                                org.bukkit.block.Chest.class},
+                        impl);
+            }
+            if (key.equals("hopper")) {
+                return Stub.of(org.bukkit.block.Hopper.class, impl);
+            }
+            if (key.equals("dispenser")) {
+                return Stub.of(org.bukkit.block.Dispenser.class, impl);
+            }
+            if (key.equals("dropper")) {
+                return Stub.of(org.bukkit.block.Dropper.class, impl);
+            }
+            if (key.equals("furnace")) {
+                return Stub.of(org.bukkit.block.Furnace.class, impl);
+            }
+            if (key.equals("blast_furnace")) {
+                return Stub.of(org.bukkit.block.BlastFurnace.class, impl);
+            }
+            if (key.equals("smoker")) {
+                return Stub.of(org.bukkit.block.Smoker.class, impl);
+            }
+            if (key.equals("ender_chest")) {
+                return null;
+            }
+            if (key.contains("chest") || type == InventoryType.CHEST) {
+                return Stub.of(org.bukkit.block.Chest.class, impl);
+            }
+            return null;
+        }
+    }
+
+    /** Общие методы block-state holder'а контейнера. */
+    static final class HolderImpl {
+        private final org.bukkit.Material material;
+        private final Inventory inventory;
+        private final org.bukkit.Location location;
+
+        HolderImpl(org.bukkit.Material material, Inventory inventory,
+                org.bukkit.Location location) {
+            this.material = material;
+            this.inventory = inventory;
+            this.location = location;
+        }
+
+        public Inventory getInventory() { return inventory; }
+        public org.bukkit.Material getType() { return material; }
+        public org.bukkit.World getWorld() { return location.getWorld(); }
+        public org.bukkit.Location getLocation() { return location.clone(); }
+        public org.bukkit.block.Block getBlock() { return location.getBlock(); }
+        public boolean isPlaced() { return true; }
+        public void update() {}
+        @Override
+        public String toString() { return "Chunkwake" + material; }
     }
 
     private int topSize() { return top.getSize(); }

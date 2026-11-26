@@ -860,6 +860,8 @@ fn survival_data(
         c::TOOLTIP_DISPLAY_COMPONENT.store(component("minecraft:tooltip_display")?, order);
         c::GLINT_OVERRIDE_COMPONENT
             .store(component("minecraft:enchantment_glint_override")?, order);
+        c::CUSTOM_MODEL_DATA_COMPONENT.store(component("minecraft:custom_model_data")?, order);
+        c::UNBREAKABLE_COMPONENT.store(component("minecraft:unbreakable")?, order);
         c::POTION_CONTENTS_COMPONENT.store(component("minecraft:potion_contents")?, order);
         c::INSTRUMENT_COMPONENT.store(component("minecraft:instrument")?, order);
         c::set_banner_pattern_names(

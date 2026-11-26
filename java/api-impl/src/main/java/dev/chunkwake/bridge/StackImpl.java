@@ -370,6 +370,10 @@ final class StackImpl extends org.bukkit.craftbukkit.inventory.CraftItemStack {
         final List<Shot> fireworkShots = new ArrayList<>();
         /** instrument: ключ инструмента (козий рог). */
         String instrument;
+        /** legacy custom_model_data: целое, хранится первым float компонента. */
+        Integer customModelData;
+        /** unbreakable: unit-компонент, null-значения нет. */
+        boolean unbreakable;
 
         /** {@code custom_data} без пустого {@code PublicBukkitValues} (пустой PDC не сохраняется). */
         Map<String, Object> customOut() {
@@ -387,7 +391,7 @@ final class StackImpl extends org.bukkit.craftbukkit.inventory.CraftItemStack {
                     && itemName == null && itemModel == null && tooltipStyle == null
                     && !hideTooltip && glintOverride == null
                     && potion == null && fireworkFlight == null && fireworkShots.isEmpty()
-                    && instrument == null;
+                    && instrument == null && customModelData == null && !unbreakable;
         }
 
         Data copy() {
@@ -408,6 +412,8 @@ final class StackImpl extends org.bukkit.craftbukkit.inventory.CraftItemStack {
             d.fireworkFlight = fireworkFlight;
             d.fireworkShots.addAll(fireworkShots);
             d.instrument = instrument;
+            d.customModelData = customModelData;
+            d.unbreakable = unbreakable;
             @SuppressWarnings("unchecked")
             Map<String, Object> c = (Map<String, Object>) PdcImpl.copy(custom);
             d.custom = c;
@@ -452,6 +458,8 @@ final class StackImpl extends org.bukkit.craftbukkit.inventory.CraftItemStack {
             if (j.has("glint_override")) d.glintOverride = j.get("glint_override").getAsBoolean();
             if (j.has("potion")) d.potion = j.get("potion").getAsString();
             if (j.has("instrument")) d.instrument = j.get("instrument").getAsString();
+            if (j.has("custom_model_data")) d.customModelData = j.get("custom_model_data").getAsInt();
+            if (j.has("unbreakable")) d.unbreakable = j.get("unbreakable").getAsBoolean();
             if (j.has("fireworks")) {
                 JsonObject fw = j.getAsJsonObject("fireworks");
                 if (fw.has("flight")) d.fireworkFlight = fw.get("flight").getAsInt();
@@ -496,6 +504,8 @@ final class StackImpl extends org.bukkit.craftbukkit.inventory.CraftItemStack {
             if (glintOverride != null) j.addProperty("glint_override", glintOverride);
             if (potion != null) j.addProperty("potion", potion);
             if (instrument != null) j.addProperty("instrument", instrument);
+            if (customModelData != null) j.addProperty("custom_model_data", customModelData);
+            if (unbreakable) j.addProperty("unbreakable", true);
             if (fireworkFlight != null || !fireworkShots.isEmpty()) {
                 JsonObject fw = new JsonObject();
                 fw.addProperty("flight", fireworkFlight == null ? 0 : fireworkFlight);
@@ -535,6 +545,8 @@ final class StackImpl extends org.bukkit.craftbukkit.inventory.CraftItemStack {
                     && Objects.equals(d.fireworkFlight, fireworkFlight)
                     && d.fireworkShots.equals(fireworkShots)
                     && Objects.equals(d.instrument, instrument)
+                    && Objects.equals(d.customModelData, customModelData)
+                    && d.unbreakable == unbreakable
                     && PdcImpl.Nbt.encode(d.customOut()).equals(PdcImpl.Nbt.encode(customOut()));
         }
 
@@ -542,7 +554,7 @@ final class StackImpl extends org.bukkit.craftbukkit.inventory.CraftItemStack {
         public int hashCode() {
             return Objects.hash(damage, enchants, name, lore, raw, stored, book, itemName,
                     itemModel, tooltipStyle, hideTooltip, glintOverride, potion,
-                    fireworkFlight, fireworkShots, instrument,
+                    fireworkFlight, fireworkShots, instrument, customModelData, unbreakable,
                     PdcImpl.Nbt.encode(customOut()));
         }
 
@@ -560,14 +572,30 @@ final class StackImpl extends org.bukkit.craftbukkit.inventory.CraftItemStack {
     /** Ключ данных плагинов в {@code custom_data} (как у CraftBukkit). */
     static final String PDC = "PublicBukkitValues";
 
-    /** Пустой {@code CustomModelDataComponent}: плагины (nightcore) ждут
-     * не-null, даже если данных нет. */
+    /** {@code CustomModelDataComponent} над legacy-целым: floats[0] — CMD.
+     * Плагины (nightcore) ждут не-null, даже если данных нет. */
     static final class CmdImpl {
+        private final Data data;
+
+        CmdImpl() {
+            this(null);
+        }
+
+        CmdImpl(Data data) {
+            this.data = data;
+        }
+
         public java.util.List<Float> getFloats() {
-            return java.util.List.of();
+            return data == null || data.customModelData == null
+                    ? java.util.List.of()
+                    : java.util.List.of((float) data.customModelData);
         }
 
         public void setFloats(java.util.List<Float> floats) {
+            if (data != null) {
+                data.customModelData = floats == null || floats.isEmpty()
+                        ? null : floats.get(0).intValue();
+            }
         }
 
         public java.util.List<Boolean> getFlags() {
@@ -611,17 +639,18 @@ final class StackImpl extends org.bukkit.craftbukkit.inventory.CraftItemStack {
         /** Тип стопки: у книг мета ещё и {@link org.bukkit.inventory.meta.BookMeta}, как CraftMetaBook. */
         final Material type;
 
-        private static final org.bukkit.inventory.meta.components.CustomModelDataComponent CMD =
-                StackImpl.customModelData();
-
-        /** Paper-компонент custom model data: не-null (nightcore). */
+        /** Paper-компонент custom model data: не-null (nightcore), отражает legacy int. */
         public org.bukkit.inventory.meta.components.CustomModelDataComponent
                 getCustomModelDataComponent() {
-            return CMD;
+            return Stub.of(org.bukkit.inventory.meta.components.CustomModelDataComponent.class,
+                    new CmdImpl(data));
         }
 
         public void setCustomModelDataComponent(
                 org.bukkit.inventory.meta.components.CustomModelDataComponent component) {
+            java.util.List<Float> floats = component == null ? null : component.getFloats();
+            data.customModelData = floats == null || floats.isEmpty()
+                    ? null : floats.get(0).intValue();
         }
 
         MetaImpl(Data data, Material type) {
@@ -955,7 +984,19 @@ final class StackImpl extends org.bukkit.craftbukkit.inventory.CraftItemStack {
         public boolean hasDamageValue() { return hasDamage(); }
         public void resetDamage() { data.damage = 0; }
 
-        public boolean isUnbreakable() { return false; }
+        public boolean hasCustomModelData() { return data.customModelData != null; }
+
+        public int getCustomModelData() {
+            return data.customModelData == null ? 0 : data.customModelData;
+        }
+
+        public void setCustomModelData(Integer value) { data.customModelData = value; }
+
+        public boolean hasCustomModelDataComponent() { return data.customModelData != null; }
+
+        public boolean isUnbreakable() { return data.unbreakable; }
+        public void setUnbreakable(boolean unbreakable) { data.unbreakable = unbreakable; }
+
         public java.util.Set<org.bukkit.inventory.ItemFlag> getItemFlags() {
             return java.util.Set.copyOf(flags());
         }

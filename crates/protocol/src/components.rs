@@ -65,6 +65,10 @@ pub struct Extra {
     pub fireworks: Option<Fireworks>,
     /// `minecraft:instrument`: id инструмента (MusicInstrumentMeta).
     pub instrument: Option<i32>,
+    /// `minecraft:custom_model_data.floats[0]`: legacy `ItemMeta` int.
+    pub custom_model_data: Option<i32>,
+    /// `minecraft:unbreakable`: unit-компонент, важно только присутствие.
+    pub unbreakable: bool,
 }
 
 /// ID `minecraft:dyed_color` в реестре компонентов; -1 — неизвестен.
@@ -153,6 +157,8 @@ impl Extra {
             && self.potion.is_none()
             && self.fireworks.is_none()
             && self.instrument.is_none()
+            && self.custom_model_data.is_none()
+            && !self.unbreakable
     }
 
     pub fn level(&self, enchantment: i32) -> i32 {
@@ -246,6 +252,10 @@ pub static ITEM_MODEL_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static TOOLTIP_STYLE_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static TOOLTIP_DISPLAY_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static GLINT_OVERRIDE_COMPONENT: AtomicI32 = AtomicI32::new(-1);
+/// `minecraft:custom_model_data`: целочисленный legacy-CMD (floats[0]).
+pub static CUSTOM_MODEL_DATA_COMPONENT: AtomicI32 = AtomicI32::new(-1);
+/// `minecraft:unbreakable`: unit-компонент, важно само наличие.
+pub static UNBREAKABLE_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 /// `minecraft:potion_contents` (PotionMeta) и имена ванильных зелий.
 pub static POTION_CONTENTS_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 /// `minecraft:instrument` (MusicInstrumentMeta) и имена инструментов.
