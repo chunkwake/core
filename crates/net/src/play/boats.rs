@@ -13,6 +13,9 @@ use super::*;
 /// `EntityType.BOAT`: ширина и высота коробки.
 pub(super) const WIDTH: f64 = 1.375;
 pub(super) const HEIGHT: f64 = 0.5625;
+/// `Player.getDefaultDimensions(Pose.STANDING)`: 0.6 × 1.8.
+const PLAYER_WIDTH: f64 = 0.6;
+const PLAYER_HEIGHT: f64 = 1.8;
 /// `VehicleEntity.hurtServer`: урон за удар множится на 10, больше 40 — сломана.
 const DAMAGE_SCALE: f32 = 10.0;
 const BREAK_AT: f32 = 40.0;
@@ -53,6 +56,16 @@ pub(crate) struct Boat {
     /// Поводок (`Leashable`).
     pub leash: Option<crate::leash::Leash>,
     custom_name: Option<String>,
+}
+
+/// Снимок игрока для толчков лодкой: `ServerPlayer.push` отправляет
+/// себе `set_entity_motion`, а сервер знает только позицию из пакетов.
+#[derive(Clone, Copy)]
+struct BoatPlayer {
+    id: i32,
+    pos: [f64; 3],
+    yaw: f32,
+    spectator: bool,
 }
 
 /// `AbstractBoat.Status`.
@@ -840,19 +853,33 @@ impl PlayPlan {
             simulated.is_empty()
                 || simulated.contains(&((p[0].floor() as i32) >> 4, (p[2].floor() as i32) >> 4))
         };
-        let players: FastMap<Uuid, f32> = self
+        let dim = tick_dim();
+        let players: FastMap<Uuid, BoatPlayer> = self
             .hub
             .players
             .lock()
             .unwrap()
             .values()
-            .map(|p| (p.entry.uuid, p.yaw))
+            .filter(|p| dim.is_none_or(|d| p.dimension == d))
+            .map(|p| {
+                (
+                    p.entry.uuid,
+                    BoatPlayer {
+                        id: p.entity_id,
+                        pos: p.pos,
+                        yaw: p.yaw,
+                        spectator: p.entry.game_mode == 3,
+                    },
+                )
+            })
             .collect();
         let now = self.game_time.load(Ordering::Relaxed);
         let mut packets = Vec::new();
         let mut gone = Vec::new();
         let mut marks = Vec::new();
         let mut player_ejects = Vec::new();
+        // `ServerPlayer.push` шлёт себе `set_entity_motion`.
+        let mut player_pushes: Vec<(Uuid, Vec<u8>)> = Vec::new();
         self.with_world(|w| {
             let mut boats = self.sim().boats.lock().unwrap();
             let mut mobs = self.sim().mobs.lock().unwrap();
@@ -881,7 +908,7 @@ impl PlayPlan {
                 if b.out_of_control >= 60.0 && !b.riders.is_empty() {
                     let riders: Vec<(Uuid, i32)> = std::mem::take(&mut b.riders);
                     for (uuid, rider) in riders {
-                        let yaw = players.get(&uuid).copied().unwrap_or(b.yaw);
+                        let yaw = players.get(&uuid).map_or(b.yaw, |p| p.yaw);
                         let spot = self.dismount_spot(b.pos, yaw);
                         if players.contains_key(&uuid) {
                             player_ejects.push((uuid, spot));
@@ -939,7 +966,15 @@ impl PlayPlan {
                 self.boat_riders(b, &players, &mut mobs, &mut packets, &mut marks);
                 // `AbstractBoat.tick` в конце: посадка мобов и толчки.
                 if let Some(b) = boats.get_mut(&id) {
-                    self.boat_contacts(b, id, &players, &mut mobs, &mut packets, &mut marks);
+                    self.boat_contacts(
+                        b,
+                        id,
+                        &players,
+                        &mut mobs,
+                        &mut packets,
+                        &mut marks,
+                        &mut player_pushes,
+                    );
                 }
             }
             // Лодки толкают друг друга (`AbstractBoat.push` → `Entity.push`).
@@ -993,6 +1028,9 @@ impl PlayPlan {
                 }
             }
         });
+        for (uuid, packet) in player_pushes {
+            self.send_to(uuid, packet);
+        }
         if !packets.is_empty() {
             self.hub.send_many_about(packets);
         }
@@ -1019,7 +1057,7 @@ impl PlayPlan {
     fn boat_riders(
         &self,
         b: &mut Boat,
-        players: &FastMap<Uuid, f32>,
+        players: &FastMap<Uuid, BoatPlayer>,
         mobs: &mut FastMap<i32, mobs::MobEntry>,
         packets: &mut Vec<(i32, Vec<u8>)>,
         marks: &mut Vec<[f64; 3]>,
@@ -1094,10 +1132,11 @@ impl PlayPlan {
         &self,
         b: &mut Boat,
         id: i32,
-        players: &FastMap<Uuid, f32>,
+        players: &FastMap<Uuid, BoatPlayer>,
         mobs: &mut FastMap<i32, mobs::MobEntry>,
         packets: &mut Vec<(i32, Vec<u8>)>,
         marks: &mut Vec<[f64; 3]>,
+        pushes: &mut Vec<(Uuid, Vec<u8>)>,
     ) {
         let (lo, hi) = b.bounds();
         let slo = [lo[0] - 0.2, lo[1] + 0.01, lo[2] - 0.2];
@@ -1141,18 +1180,56 @@ impl PlayPlan {
             }
             self.push_mob(b, &mut e.mob);
         }
+        // `Entity.push` для игроков: `ServerPlayer.push` шлёт импульс
+        // самому игроку, наблюдателей и пассажиров этой лодки не толкаем.
+        for (&uuid, p) in players {
+            if p.spectator || b.riders.iter().any(|r| r.0 == uuid) {
+                continue;
+            }
+            let mlo = [
+                p.pos[0] - PLAYER_WIDTH / 2.0,
+                p.pos[1],
+                p.pos[2] - PLAYER_WIDTH / 2.0,
+            ];
+            let mhi = [
+                p.pos[0] + PLAYER_WIDTH / 2.0,
+                p.pos[1] + PLAYER_HEIGHT,
+                p.pos[2] + PLAYER_WIDTH / 2.0,
+            ];
+            if (0..3).any(|k| slo[k] >= mhi[k] || mlo[k] >= shi[k]) {
+                continue;
+            }
+            self.push_player(b, uuid, p, pushes);
+        }
+    }
+
+    /// `Entity.push(Entity)` для игрока: взаимный импульс 0.05, игроку —
+    /// `set_entity_motion` (`ServerPlayer.push`).
+    fn push_player(
+        &self,
+        b: &mut Boat,
+        uuid: Uuid,
+        p: &BoatPlayer,
+        pushes: &mut Vec<(Uuid, Vec<u8>)>,
+    ) {
+        let Some([ix, iz]) = push_impulse(b.pos, p.pos) else {
+            return;
+        };
+        if b.riders.is_empty() {
+            b.vel[0] -= ix;
+            b.vel[2] -= iz;
+        }
+        pushes.push((
+            uuid,
+            play::set_entity_motion(self.ids.set_entity_motion, p.id, [ix, 0.0, iz]),
+        ));
     }
 
     /// `Entity.push(Entity)` для моба: взаимный импульс 0.05.
     fn push_mob(&self, b: &mut Boat, m: &mut crate::mobs::Mob) {
-        let (dx, dz) = (m.pos[0] - b.pos[0], m.pos[2] - b.pos[2]);
-        let dd = dx.abs().max(dz.abs());
-        if dd < 0.01 {
+        let Some([ix, iz]) = push_impulse(b.pos, m.pos) else {
             return;
-        }
-        let d = dd.sqrt();
-        let power = (1.0 / d).min(1.0) * 0.05;
-        let (ix, iz) = (dx / d * power, dz / d * power);
+        };
         if b.riders.is_empty() {
             b.vel[0] -= ix;
             b.vel[2] -= iz;
@@ -1588,6 +1665,20 @@ fn boardable(m: &crate::mobs::Mob) -> bool {
     )
 }
 
+/// `Entity.push(Entity)`: горизонтальный импульс `0.05` в сторону `to`.
+/// `f = sqrt(max(|dx|, |dz|))`, `g = min(1, 1/f)`, итог `d/f * g * 0.05`;
+/// почти совпадающие координаты (`f < 0.01`) не толкаются.
+fn push_impulse(from: [f64; 3], to: [f64; 3]) -> Option<[f64; 2]> {
+    let (dx, dz) = (to[0] - from[0], to[2] - from[2]);
+    let dd = dx.abs().max(dz.abs());
+    if dd < 0.01 {
+        return None;
+    }
+    let d = dd.sqrt();
+    let power = (1.0 / d).min(1.0) * 0.05;
+    Some([dx / d * power, dz / d * power])
+}
+
 /// `AbstractBoat.push` → `Entity.push` между двумя лодками.
 fn push_boats(a: &mut Boat, b: &mut Boat) {
     // Чужую лодку толкаем, только если её низ ниже нашего верха.
@@ -1691,6 +1782,20 @@ mod tests {
         assert!((got[0] - 0.5).abs() < 1e-9, "{got:?}");
         assert!(got[1].abs() < 1e-9, "{got:?}");
         assert!(got[2].abs() < 1e-9, "{got:?}");
+    }
+
+    #[test]
+    fn push_impulse_matches_entity_push() {
+        // Совсем рядом — импульса нет (`f < 0.01`).
+        assert_eq!(push_impulse([0.0; 3], [0.0, 0.0, 0.005]), None);
+        // Ближе блока: `1/f` обрезается единицей, импульс 0.05·√f.
+        let [x, z] = push_impulse([0.0; 3], [0.25, 0.0, 0.0]).unwrap();
+        assert!((x - 0.025).abs() < 1e-12, "{x}");
+        assert_eq!(z, 0.0);
+        // Дальше блока: 0.05 / sqrt(absMax), направление по осям.
+        let [x, z] = push_impulse([0.0; 3], [3.0, 0.0, 4.0]).unwrap();
+        assert!((x - 0.0375).abs() < 1e-12, "{x}");
+        assert!((z - 0.05).abs() < 1e-12, "{z}");
     }
 
     #[test]
