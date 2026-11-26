@@ -41,6 +41,27 @@ impl PlayPlan {
                     crate::stack_nbt::json_to_tag(&crate::stack_nbt::text_json(n)),
                 );
             }
+            // `applyImplicitComponents` кладёт в `components` ещё имя
+            // предмета и настройки подсказки.
+            let mut comps = Compound::new();
+            if let Some(name) = &e.item_name {
+                comps.insert(
+                    "minecraft:item_name".into(),
+                    crate::stack_nbt::json_to_tag(&crate::stack_nbt::text_json(name)),
+                );
+            }
+            if e.hide_tooltip {
+                comps.insert(
+                    "minecraft:tooltip_display".into(),
+                    Tag::Compound(Compound::from([
+                        ("hide_tooltip".into(), Tag::Byte(1)),
+                        ("hidden_components".into(), Tag::List(Vec::new())),
+                    ])),
+                );
+            }
+            if !comps.is_empty() {
+                nbt.insert("components".into(), Tag::Compound(comps));
+            }
         }
         self.set_block_entity(
             pos,
@@ -80,7 +101,17 @@ impl PlayPlan {
             .nbt
             .get("CustomName")
             .map(|t| crate::stack_nbt::tag_to_json(t).to_string());
-        if patterns.is_empty() && name.is_none() {
+        let components = be.nbt.get("components").and_then(Tag::as_compound);
+        let item_name = components
+            .and_then(|c| c.get("minecraft:item_name"))
+            .map(|t| crate::stack_nbt::tag_to_json(t).to_string());
+        let tooltip = components
+            .and_then(|c| c.get("minecraft:tooltip_display"))
+            .and_then(Tag::as_compound)
+            .and_then(|c| c.get("hide_tooltip"))
+            .and_then(Tag::as_i64)
+            .is_some_and(|v| v != 0);
+        if patterns.is_empty() && name.is_none() && item_name.is_none() && !tooltip {
             return loot;
         }
         loot.into_iter()
@@ -90,6 +121,12 @@ impl PlayPlan {
                     e.banner_patterns = patterns.clone();
                     if name.is_some() {
                         e.custom_name = name.clone();
+                    }
+                    if item_name.is_some() {
+                        e.item_name = item_name.clone();
+                    }
+                    if tooltip {
+                        e.hide_tooltip = true;
                     }
                     s.extra = chunkwake_protocol::components::intern(e);
                 }
