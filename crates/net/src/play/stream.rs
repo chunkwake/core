@@ -200,6 +200,13 @@ impl PlayPlan {
         s: &mut ChunkStream,
     ) -> Result<(), NetError> {
         let all = chunks_around(s.center, s.radius, None);
+        // `ClientboundSetChunkCacheRadiusPacket`: без него клиент остаётся с
+        // прежним (малым) радиусом кэша и может не закрыть экран загрузки.
+        conn.send(&play::set_chunk_cache_radius(
+            self.ids.set_chunk_cache_radius,
+            s.radius,
+        ))
+        .await?;
         self.stream_enter(conn, s, s.center, &[], all).await
     }
 

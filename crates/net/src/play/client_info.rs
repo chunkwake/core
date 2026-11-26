@@ -57,6 +57,11 @@ impl PlayPlan {
         let forget = chunks_around(c, old, Some((c, radius)));
         let fresh = chunks_around(c, radius, Some((c, old)));
         s.set_radius(radius);
+        conn.send(&play::set_chunk_cache_radius(
+            self.ids.set_chunk_cache_radius,
+            radius,
+        ))
+        .await?;
         self.stream_enter(conn, s, c, &forget, fresh).await
     }
 }

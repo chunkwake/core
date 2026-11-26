@@ -94,6 +94,13 @@ pub fn set_chunk_cache_center(id: i32, x: i32, z: i32) -> Vec<u8> {
     w.buf
 }
 
+/// `ClientboundSetChunkCacheRadiusPacket`: радиус обзора клиента в чанках.
+pub fn set_chunk_cache_radius(id: i32, radius: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(radius);
+    w.buf
+}
+
 /// `set_default_spawn_position`: измерение, `BlockPos` и угол взгляда спавна.
 /// Без этого пакета Xaero не выбирает мир карты и не рисует тайлы.
 pub fn set_default_spawn_position(
@@ -405,6 +412,12 @@ mod tests {
         assert_eq!(unpack_block_pos(r.i64().unwrap()), [8, -60, 8]);
         assert_eq!(r.f32().unwrap(), 0.0);
         assert_eq!(r.f32().unwrap(), 90.0);
+        assert!(r.remaining().is_empty());
+
+        let radius = set_chunk_cache_radius(4, 12);
+        let mut r = Reader::new(&radius);
+        assert_eq!(r.var_int().unwrap(), 4);
+        assert_eq!(r.var_int().unwrap(), 12);
         assert!(r.remaining().is_empty());
 
         let border = initialize_border(3);
