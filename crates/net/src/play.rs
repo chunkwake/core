@@ -2789,6 +2789,12 @@ fn container_entity(block: &str) -> Option<&'static str> {
     }
 }
 
+/// `RotationSegment.convertToSegment(Direction)`: север 0, восток 4,
+/// юг 8, запад 12 (порядок `DIRS`: низ, верх, север, юг, запад, восток).
+fn skull_rotation(facing: usize) -> i32 {
+    [0, 0, 0, 8, 12, 4][facing.min(5)]
+}
+
 /// `SkullBlock` (включая настенные черепа): у блока есть
 /// `SkullBlockEntity` с `note_block_sound` и `custom_name`.
 fn is_skull_block(block: &str) -> bool {
@@ -4589,12 +4595,22 @@ impl PlayPlan {
         self.try_spawn_copper_golem(pos);
     }
 
+    /// `CarvedPumpkinBlock.canSpawnGolem`: шаблон голема без установки тыквы.
+    fn can_spawn_golem(&self, pos: [i32; 3]) -> bool {
+        self.can_spawn_snow_golem(pos)
+            || self.can_spawn_iron_golem(pos)
+            || self.can_spawn_copper_golem(pos)
+    }
+
     /// Снежный голем: тыква на двух блоках снега (`"^"`, `"#"`, `"#"`).
-    fn try_spawn_snow_golem(&self, [x, y, z]: [i32; 3]) -> bool {
+    fn can_spawn_snow_golem(&self, [x, y, z]: [i32; 3]) -> bool {
         let at = |p: [i32; 3]| self.block(p).map(|s| self.state_name(s).to_owned());
         let is = |p: [i32; 3], name: &str| at(p).as_deref() == Some(name);
-        if !is([x, y - 1, z], "minecraft:snow_block") || !is([x, y - 2, z], "minecraft:snow_block")
-        {
+        is([x, y - 1, z], "minecraft:snow_block") && is([x, y - 2, z], "minecraft:snow_block")
+    }
+
+    fn try_spawn_snow_golem(&self, [x, y, z]: [i32; 3]) -> bool {
+        if !self.can_spawn_snow_golem([x, y, z]) {
             return false;
         }
         for p in [[x, y, z], [x, y - 1, z], [x, y - 2, z]] {
@@ -4620,24 +4636,26 @@ impl PlayPlan {
     /// `CarvedPumpkinBlock.trySpawnGolem`: железный голем из тыквы и блоков
     /// железа. Шаблон `ironGolemFull`: `"~^~"`, `"###"`, `"~#~"` (верхний
     /// центр - тыква, средний ряд из трёх блоков железа и центр снизу).
-    fn try_spawn_iron_golem(&self, [x, y, z]: [i32; 3]) -> bool {
+    fn can_spawn_iron_golem(&self, [x, y, z]: [i32; 3]) -> bool {
         let at = |p: [i32; 3]| self.block(p).map(|s| self.state_name(s).to_owned());
         let is = |p: [i32; 3], name: &str| at(p).as_deref() == Some(name);
         let air = |p: [i32; 3]| is(p, "minecraft:air");
-        if !air([x - 1, y, z]) || !air([x + 1, y, z]) {
+        air([x - 1, y, z])
+            && air([x + 1, y, z])
+            && [[x - 1, y - 1, z], [x, y - 1, z], [x + 1, y - 1, z]]
+                .iter()
+                .all(|&p| is(p, "minecraft:iron_block"))
+            && air([x - 1, y - 2, z])
+            && air([x + 1, y - 2, z])
+            && is([x, y - 2, z], "minecraft:iron_block")
+    }
+
+    fn try_spawn_iron_golem(&self, [x, y, z]: [i32; 3]) -> bool {
+        if !self.can_spawn_iron_golem([x, y, z]) {
             return false;
         }
         let middle = [[x - 1, y - 1, z], [x, y - 1, z], [x + 1, y - 1, z]];
-        if middle.iter().any(|&p| !is(p, "minecraft:iron_block")) {
-            return false;
-        }
-        if !air([x - 1, y - 2, z]) || !air([x + 1, y - 2, z]) {
-            return false;
-        }
         let bottom = [x, y - 2, z];
-        if !is(bottom, "minecraft:iron_block") {
-            return false;
-        }
         // `clearPatternBlocks`: тыква, средний ряд и нижний центр.
         for p in [[x, y, z], middle[0], middle[1], middle[2], bottom] {
             self.set_block(p, AIR);
@@ -4661,8 +4679,16 @@ impl PlayPlan {
 
     /// Медный голем: тыква на блоке из `#minecraft:copper`; блок заменяется
     /// медным сундуком той же окисленности (`replaceCopperBlockWithChest`).
+    fn can_spawn_copper_golem(&self, [x, y, z]: [i32; 3]) -> bool {
+        self.block([x, y - 1, z])
+            .is_some_and(|s| copper_chest_of(self.state_name(s)).is_some())
+    }
+
     fn try_spawn_copper_golem(&self, [x, y, z]: [i32; 3]) -> bool {
         let at = |p: [i32; 3]| self.block(p).map(|s| self.state_name(s).to_owned());
+        if !self.can_spawn_copper_golem([x, y, z]) {
+            return false;
+        }
         let Some(chest) = at([x, y - 1, z]).as_deref().and_then(copper_chest_of) else {
             return false;
         };
@@ -4727,6 +4753,24 @@ impl PlayPlan {
             self.set_block([x, y - 1, z], state);
         }
         true
+    }
+
+    /// `WitherSkullBlock.canSpawnMob`: под передней клеткой уже лежит основа
+    /// ритуала (`###` из `#wither_summon_base_blocks`), сложность не мирная и
+    /// до низа мира хватает места. Череп тогда кладётся блоком, а не на голову.
+    fn can_spawn_wither(&self, [x, y, z]: [i32; 3]) -> bool {
+        if self.difficulty() == crate::survival::Difficulty::Peaceful || y < self.min_y() + 2 {
+            return false;
+        }
+        let base = |p: [i32; 3]| {
+            matches!(
+                self.block(p).map(|s| self.state_name(s)),
+                Some("minecraft:soul_sand" | "minecraft:soul_soil")
+            )
+        };
+        let y = y - 1;
+        (base([x - 1, y, z]) && base([x, y, z]) && base([x + 1, y, z]))
+            || (base([x, y, z - 1]) && base([x, y, z]) && base([x, y, z + 1]))
     }
 
     /// `WitherSkullBlock.checkSpawn`: три черепа визер-скелета на
@@ -23403,6 +23447,39 @@ impl PlayPlan {
                         false,
                     ),
                 );
+                crate::hoppers::take_one(&mut me.slots, i);
+                Some(true)
+            }
+            // `$7`: череп визер-скелета сначала завершает ритуал (основа из
+            // душ под клеткой), иначе уходит на голову, как броня.
+            "minecraft:wither_skeleton_skull" if empty && self.can_spawn_wither(front) => {
+                let Some(base) = self
+                    .survival
+                    .block_defaults
+                    .get("minecraft:wither_skeleton_skull")
+                else {
+                    return None;
+                };
+                let state = self
+                    .survival
+                    .placement
+                    .with_prop(*base, "rotation", &skull_rotation(facing).to_string())
+                    .unwrap_or(*base);
+                self.set_block(front, state);
+                self.emit_vibration(front.map(|v| v as f64 + 0.5), "minecraft:block_place");
+                self.try_spawn_wither(front);
+                crate::hoppers::take_one(&mut me.slots, i);
+                Some(true)
+            }
+            // `$8`: тыква на готовый шаблон голема, иначе — на голову.
+            "minecraft:carved_pumpkin" if empty && self.can_spawn_golem(front) => {
+                let Some(base) = self.survival.block_defaults.get("minecraft:carved_pumpkin")
+                else {
+                    return None;
+                };
+                // `set_block` → `after_block_change` сам зовёт `try_spawn_golem`.
+                self.set_block(front, *base);
+                self.emit_vibration(front.map(|v| v as f64 + 0.5), "minecraft:block_place");
                 crate::hoppers::take_one(&mut me.slots, i);
                 Some(true)
             }
