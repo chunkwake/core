@@ -2841,6 +2841,7 @@ mod sculk;
 mod section_order;
 mod signs;
 mod stats;
+mod world_effects;
 pub use advancements::load_advancements;
 pub use recipe_book::load as load_recipe_book;
 mod stream;
@@ -5954,6 +5955,9 @@ impl PlayPlan {
         }
         if let Some(rest) = line.strip_prefix("entity ") {
             return self.entity_request(rest);
+        }
+        if let Some(rest) = line.strip_prefix("fx ") {
+            return self.world_effect_request(rest);
         }
         if let Some(rest) = line.strip_prefix("attr ") {
             return self.plugin_attribute(rest);
@@ -10325,6 +10329,33 @@ impl PlayPlan {
         Some(id)
     }
 
+    /// `World.spawnArrow`/`/summon minecraft:trident`: трезубец с заданной скоростью.
+    pub(super) fn summon_trident_vel(&self, pos: [f64; 3], vel: [f64; 3]) -> Option<i32> {
+        let mut arrow = crate::arrows::Arrow::flight(pos, vel, false);
+        arrow.base_damage = 8.0;
+        arrow.trident = true;
+        arrow.trident_item = self.item_id("minecraft:trident").map(|i| Stack::new(i, 1));
+        let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
+        self.sim().arrows.lock().unwrap().insert(id, arrow);
+        self.mark_work();
+        let (yaw, pitch) = crate::arrows::rotation(vel);
+        self.hub.send(
+            None,
+            play::add_entity_moving(
+                self.ids.add_entity,
+                id,
+                Uuid::from_u128(rand::random()),
+                self.trident_type()?,
+                pos,
+                vel,
+                yaw,
+                pitch,
+                0,
+            ),
+        );
+        Some(id)
+    }
+
     fn launch(&self, entity_type: i32, arrow: crate::arrows::Arrow) {
         let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
         let (pos, vel) = (arrow.pos, arrow.vel);
@@ -12600,13 +12631,13 @@ impl PlayPlan {
         fire: bool,
         water_shield: Option<[i32; 3]>,
     ) {
-        self.explode_full(center, power, rails_safe, fire, water_shield, None);
+        self.explode_full(center, power, rails_safe, fire, water_shield, None, true);
     }
 
     /// Взрыв моба (`ExplosionInteraction.MOB`): блоки рушатся только при
     /// `mob_griefing`, а дроп — с шансом `1 / мощность` (`mob_explosion_drop_decay`).
     pub(super) fn explode_mob(&self, center: [f64; 3], power: f32, species: &'static str) {
-        self.explode_full(center, power, false, false, None, Some(species));
+        self.explode_full(center, power, false, false, None, Some(species), true);
     }
 
     fn explode_full(
@@ -12617,8 +12648,9 @@ impl PlayPlan {
         fire: bool,
         water_shield: Option<[i32; 3]>,
         mob: Option<&'static str>,
+        break_blocks: bool,
     ) {
-        let keep_blocks = mob.is_some() && !self.vars.flag("mob_griefing");
+        let keep_blocks = !break_blocks || (mob.is_some() && !self.vars.flag("mob_griefing"));
         let drop_chance = if mob.is_some() { 1.0 / power } else { 0.25 };
         let cache = std::cell::RefCell::new(HashMap::<[i32; 3], Option<f32>>::new());
         let is_rail = |p: [i32; 3]| {

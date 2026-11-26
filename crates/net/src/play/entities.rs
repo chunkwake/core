@@ -77,6 +77,25 @@ impl PlayPlan {
                 };
                 id.map_or_else(String::new, |id| format!("{id} {}", plugin_uuid(id)))
             }
+            Some("spawnarrow") => {
+                let (Some(kind), Some(x), Some(y), Some(z), Some(vx), Some(vy), Some(vz)) = (
+                    f.get(1).copied(),
+                    num(2),
+                    num(3),
+                    num(4),
+                    num(5),
+                    num(6),
+                    num(7),
+                ) else {
+                    return String::new();
+                };
+                let id = match kind {
+                    "minecraft:trident" => self.summon_trident_vel([x, y, z], [vx, vy, vz]),
+                    "minecraft:arrow" => self.summon_arrow([x, y, z], [vx, vy, vz]),
+                    _ => None,
+                };
+                id.map_or_else(String::new, |id| format!("{id} {}", plugin_uuid(id)))
+            }
             // `list после`: сущности с ID больше `после` по возрастанию, кусок до 7 КБ.
             Some("list") => {
                 let after = f

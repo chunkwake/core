@@ -141,6 +141,11 @@ final class NonMobImpl {
         return new NonMobImpl(world, Integer.parseInt(f[0]), kind, uuid, type).api;
     }
 
+    /** Обёртка уже созданной Rust-сущности (например, стрелы из {@code World.spawnArrow}). */
+    static Entity wrap(WorldImpl world, int id, String kind, UUID uuid, EntityType type) {
+        return new NonMobImpl(world, id, kind, uuid, type).api;
+    }
+
     /** Все поддерживаемые немобовые сущности мира, страницами до 7 КБ. */
     static List<Entity> all(WorldImpl world) {
         List<Entity> out = new ArrayList<>();

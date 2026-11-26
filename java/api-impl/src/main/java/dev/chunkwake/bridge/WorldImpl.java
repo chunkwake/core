@@ -884,6 +884,125 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
         }
     }
 
+    // --- мировые эффекты: молния, взрыв, стрелы ---
+
+    public org.bukkit.entity.LightningStrike strikeLightning(Location loc) {
+        return strikeLightning0(loc, false);
+    }
+
+    public org.bukkit.entity.LightningStrike strikeLightningEffect(Location loc) {
+        return strikeLightning0(loc, true);
+    }
+
+    private org.bukkit.entity.LightningStrike strikeLightning0(Location loc, boolean effect) {
+        if (loc == null) {
+            throw new IllegalArgumentException("Location cannot be null");
+        }
+        LightningStrikeImpl bolt = new LightningStrikeImpl(this, loc, effect);
+        var event = new org.bukkit.event.weather.LightningStrikeEvent(
+                api, (org.bukkit.entity.LightningStrike) bolt.api,
+                org.bukkit.event.weather.LightningStrikeEvent.Cause.CUSTOM);
+        server.api.getPluginManager().callEvent(event);
+        if (event.isCancelled()) {
+            return (org.bukkit.entity.LightningStrike) bolt.api;
+        }
+        String reply = request("fx lightning " + loc.getX() + " " + loc.getY() + " " + loc.getZ()
+                + " " + (effect ? 1 : 0)).trim();
+        if (!reply.isEmpty()) {
+            try {
+                bolt.id = Integer.parseInt(reply);
+            } catch (NumberFormatException ignored) {
+                // id нужен только для getEntityId; сам эффект уже создан
+            }
+        }
+        return (org.bukkit.entity.LightningStrike) bolt.api;
+    }
+
+    /** Общая точка входа {@code createExplosion}; Bukkit-события взрыва пока не поднимаются. */
+    private boolean explode(Location loc, float power, boolean setFire, boolean breakBlocks) {
+        if (loc == null) {
+            throw new IllegalArgumentException("Location cannot be null");
+        }
+        request("fx explosion " + loc.getX() + " " + loc.getY() + " " + loc.getZ()
+                + " " + power + " " + (setFire ? 1 : 0) + " " + (breakBlocks ? 1 : 0));
+        return true;
+    }
+
+    public boolean createExplosion(Location loc, float power) {
+        return explode(loc, power, false, true);
+    }
+
+    public boolean createExplosion(Location loc, float power, boolean setFire) {
+        return explode(loc, power, setFire, true);
+    }
+
+    public boolean createExplosion(Location loc, float power, boolean setFire, boolean breakBlocks) {
+        return explode(loc, power, setFire, breakBlocks);
+    }
+
+    public boolean createExplosion(Location loc, float power, boolean setFire, boolean breakBlocks,
+            Entity source) {
+        return explode(loc, power, setFire, breakBlocks);
+    }
+
+    public boolean createExplosion(Entity source, Location loc, float power) {
+        return explode(loc, power, false, true);
+    }
+
+    public boolean createExplosion(Entity source, Location loc, float power, boolean setFire) {
+        return explode(loc, power, setFire, true);
+    }
+
+    public boolean createExplosion(Entity source, Location loc, float power, boolean setFire,
+            boolean breakBlocks) {
+        return explode(loc, power, setFire, breakBlocks);
+    }
+
+    public boolean createExplosion(Entity source, Location loc, float power, boolean setFire,
+            boolean breakBlocks, boolean excludeSource) {
+        return explode(loc, power, setFire, breakBlocks);
+    }
+
+    public boolean createExplosion(double x, double y, double z, float power) {
+        return explode(new Location(api, x, y, z), power, false, true);
+    }
+
+    public boolean createExplosion(double x, double y, double z, float power, boolean setFire) {
+        return explode(new Location(api, x, y, z), power, setFire, true);
+    }
+
+    public boolean createExplosion(double x, double y, double z, float power, boolean setFire,
+            boolean breakBlocks) {
+        return explode(new Location(api, x, y, z), power, setFire, breakBlocks);
+    }
+
+    public boolean createExplosion(double x, double y, double z, float power, boolean setFire,
+            boolean breakBlocks, Entity source) {
+        return explode(new Location(api, x, y, z), power, setFire, breakBlocks);
+    }
+
+    public boolean createExplosion(Entity source, float power) {
+        return source != null && explode(source.getLocation(), power, false, true);
+    }
+
+    public boolean createExplosion(Entity source, float power, boolean setFire) {
+        return source != null && explode(source.getLocation(), power, setFire, true);
+    }
+
+    public boolean createExplosion(Entity source, float power, boolean setFire, boolean breakBlocks) {
+        return source != null && explode(source.getLocation(), power, setFire, breakBlocks);
+    }
+
+    public org.bukkit.entity.Arrow spawnArrow(Location loc, org.bukkit.util.Vector direction,
+            float speed, float spread) {
+        return spawnArrow(loc, direction, speed, spread, org.bukkit.entity.Arrow.class);
+    }
+
+    public <T extends org.bukkit.entity.AbstractArrow> T spawnArrow(Location loc,
+            org.bukkit.util.Vector direction, float speed, float spread, Class<T> clazz) {
+        return ArrowSpawn.spawn(this, loc, direction, speed, spread, clazz);
+    }
+
     public List<Entity> getEntities() {
         List<Entity> out = new ArrayList<>(getPlayers());
         out.addAll(MobImpl.all(this));

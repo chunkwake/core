@@ -1,0 +1,110 @@
+//! Мировые эффекты Bukkit API: `World.strikeLightning`/`strikeLightningEffect`
+//! и `World.createExplosion`. Запросы идут через `PlayPlan::world_request`:
+//!
+//! - `fx lightning <x> <y> <z> <effect>` → `<id>` (id сущности молнии);
+//! - `fx explosion <x> <y> <z> <power> <fire> <break-blocks>` → `1`.
+//!
+//! Молния создаётся в заданной точке, без перенацеливания на громоотвод:
+//! так ведёт себя `CraftWorld.strikeLightning0`. `effect=1` — только визуал,
+//! без урона, огня и удара по мобам.
+
+use super::*;
+
+impl PlayPlan {
+    pub(super) fn world_effect_request(&self, line: &str) -> String {
+        let f: Vec<&str> = line.split(' ').collect();
+        let num = |i: usize| f.get(i).and_then(|v| v.parse::<f64>().ok());
+        match f.first().copied() {
+            Some("lightning") => {
+                let (Some(x), Some(y), Some(z)) = (num(1), num(2), num(3)) else {
+                    return String::new();
+                };
+                let effect = matches!(f.get(4), Some(&"1"));
+                self.strike_lightning_api(
+                    [x.floor() as i32, y.floor() as i32, z.floor() as i32],
+                    effect,
+                )
+                .map_or_else(String::new, |id| id.to_string())
+            }
+            Some("explosion") => {
+                let (Some(x), Some(y), Some(z), Some(power)) = (num(1), num(2), num(3), num(4))
+                else {
+                    return "0".into();
+                };
+                let fire = matches!(f.get(5), Some(&"1"));
+                let break_blocks = matches!(f.get(6), Some(&"1"));
+                self.explode_api([x, y, z], power as f32, fire, break_blocks);
+                "1".into()
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// `World.strikeLightning*`: молния в точку, без перенацеливания на громоотвод.
+    fn strike_lightning_api(&self, at: [i32; 3], effect: bool) -> Option<i32> {
+        let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
+        let pos = [at[0] as f64 + 0.5, at[1] as f64, at[2] as f64 + 0.5];
+        self.hub.send(
+            None,
+            play::add_entity_moving(
+                self.ids.add_entity,
+                id,
+                Uuid::from_u128(rand::random()),
+                self.survival.lightning_entity_type,
+                pos,
+                [0.0; 3],
+                0.0,
+                0.0,
+                0,
+            ),
+        );
+        self.sim()
+            .lightning
+            .lock()
+            .unwrap()
+            .push((id, self.game_time.load(Ordering::Relaxed) + 2));
+        self.mark_work();
+        self.play_sound(
+            None,
+            "minecraft:entity.lightning_bolt.thunder",
+            3,
+            pos,
+            10_000.0,
+            0.8,
+        );
+        self.play_sound(
+            None,
+            "minecraft:entity.lightning_bolt.impact",
+            3,
+            pos,
+            2.0,
+            0.8,
+        );
+        if !effect {
+            let players: Vec<_> = self
+                .hub
+                .players
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|p| p.collects)
+                .map(|p| (p.entry.uuid, p.pos))
+                .collect();
+            for (uuid, feet) in players {
+                let dx = feet[0] - pos[0];
+                let dz = feet[2] - pos[2];
+                if dx * dx + dz * dz <= 9.0 && (feet[1] - pos[1]).abs() <= 6.0 {
+                    self.push_control(uuid, Control::Hurt(5.0, Cause::Fire, Some(pos), 0.0));
+                }
+            }
+            self.lightning_mobs(pos);
+            self.ignite_at(at, 0);
+        }
+        Some(id)
+    }
+
+    /// `World.createExplosion`: без Bukkit-событий пока; `break_blocks=false` сохраняет блоки.
+    fn explode_api(&self, center: [f64; 3], power: f32, fire: bool, break_blocks: bool) {
+        self.explode_full(center, power, false, fire, None, None, break_blocks);
+    }
+}
