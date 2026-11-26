@@ -9,6 +9,7 @@ import net.kyori.adventure.text.ComponentLike;
 import net.kyori.adventure.text.serializer.gson.GsonComponentSerializer;
 import org.bukkit.GameMode;
 import org.bukkit.Material;
+import org.bukkit.Particle;
 import org.bukkit.Server;
 import org.bukkit.World;
 import org.bukkit.entity.Player;
@@ -244,6 +245,136 @@ public final class PlayerImpl {
         if (online) {
             Bridge.world("player " + id + " " + line);
         }
+    }
+
+    /** Отправка уже собранной команды частицы (её же использует World-список). */
+    void sendParticleCommand(String line) {
+        playerEffect(line);
+    }
+
+    private void spawnParticle0(Particle particle, double x, double y, double z, int count,
+            double offsetX, double offsetY, double offsetZ, double speed,
+            Object data, boolean force) {
+        String line = ParticleWire.command(particle, x, y, z, count,
+                offsetX, offsetY, offsetZ, speed, data, force);
+        if (line != null) {
+            sendParticleCommand(line);
+        }
+    }
+
+    public void spawnParticle(Particle particle, org.bukkit.Location location, int count,
+            Object data) {
+        if (location == null) {
+            throw new IllegalArgumentException("Location cannot be null");
+        }
+        spawnParticle0(particle, location.getX(), location.getY(), location.getZ(),
+                count, 0.0, 0.0, 0.0, 0.0, data, false);
+    }
+
+    public void spawnParticle(Particle particle, org.bukkit.Location location, int count,
+            double offsetX, double offsetY, double offsetZ, double speed) {
+        if (location == null) {
+            throw new IllegalArgumentException("Location cannot be null");
+        }
+        spawnParticle0(particle, location.getX(), location.getY(), location.getZ(),
+                count, offsetX, offsetY, offsetZ, speed, null, false);
+    }
+
+    public void spawnParticle(Particle particle, org.bukkit.Location location, int count,
+            double offsetX, double offsetY, double offsetZ) {
+        if (location == null) {
+            throw new IllegalArgumentException("Location cannot be null");
+        }
+        spawnParticle0(particle, location.getX(), location.getY(), location.getZ(),
+                count, offsetX, offsetY, offsetZ, 0.0, null, false);
+    }
+
+    public void spawnParticle(Particle particle, double x, double y, double z, int count) {
+        spawnParticle0(particle, x, y, z, count, 0.0, 0.0, 0.0, 0.0, null, false);
+    }
+
+    public void spawnParticle(Particle particle, double x, double y, double z, int count,
+            double offsetX, double offsetY, double offsetZ) {
+        spawnParticle0(particle, x, y, z, count,
+                offsetX, offsetY, offsetZ, 0.0, null, false);
+    }
+
+    public void spawnParticle(Particle particle, org.bukkit.Location location, int count,
+            double offsetX, double offsetY, double offsetZ, Object data) {
+        if (location == null) {
+            throw new IllegalArgumentException("Location cannot be null");
+        }
+        spawnParticle0(particle, location.getX(), location.getY(), location.getZ(),
+                count, offsetX, offsetY, offsetZ, 0.0, data, false);
+    }
+
+    public void spawnParticle(Particle particle, double x, double y, double z, int count,
+            double offsetX, double offsetY, double offsetZ, Object data) {
+        spawnParticle0(particle, x, y, z, count,
+                offsetX, offsetY, offsetZ, 0.0, data, false);
+    }
+
+    public void spawnParticle(Particle particle, double x, double y, double z, int count,
+            Object data) {
+        spawnParticle0(particle, x, y, z, count, 0.0, 0.0, 0.0, 0.0, data, false);
+    }
+
+    public void spawnParticle(Particle particle, org.bukkit.Location location, int count,
+            double offsetX, double offsetY, double offsetZ, double speed,
+            Object data, boolean force) {
+        if (location == null) {
+            throw new IllegalArgumentException("Location cannot be null");
+        }
+        spawnParticle0(particle, location.getX(), location.getY(), location.getZ(),
+                count, offsetX, offsetY, offsetZ, speed, data, force);
+    }
+
+    public void spawnParticle(Particle particle, double x, double y, double z, int count,
+            double offsetX, double offsetY, double offsetZ, double speed,
+            Object data, boolean force) {
+        spawnParticle0(particle, x, y, z, count,
+                offsetX, offsetY, offsetZ, speed, data, force);
+    }
+
+    /**
+     * Paper-ядро `Player.spawnParticle`: скорость по осям в пакете моста
+     * представлена одним значением ({@code speedX}), randomization — DEFAULT.
+     */
+    public void spawnParticle(Particle particle, double x, double y, double z, int count,
+            double offsetX, double offsetY, double offsetZ,
+            double speedX, double speedY, double speedZ, Object data, boolean force,
+            Particle.RandomizationType randomizationType) {
+        spawnParticle0(particle, x, y, z, count,
+                offsetX, offsetY, offsetZ, speedX, data, force);
+    }
+
+    public void spawnParticle(Particle particle, org.bukkit.Location location, int count) {
+        if (location == null) {
+            throw new IllegalArgumentException("Location cannot be null");
+        }
+        spawnParticle0(particle, location.getX(), location.getY(), location.getZ(),
+                count, 0.0, 0.0, 0.0, 0.0, null, false);
+    }
+
+    public void spawnParticle(Particle particle, double x, double y, double z, int count,
+            double offsetX, double offsetY, double offsetZ, double speed, Object data) {
+        spawnParticle0(particle, x, y, z, count,
+                offsetX, offsetY, offsetZ, speed, data, false);
+    }
+
+    public void spawnParticle(Particle particle, org.bukkit.Location location, int count,
+            double offsetX, double offsetY, double offsetZ, double speed, Object data) {
+        if (location == null) {
+            throw new IllegalArgumentException("Location cannot be null");
+        }
+        spawnParticle0(particle, location.getX(), location.getY(), location.getZ(),
+                count, offsetX, offsetY, offsetZ, speed, data, false);
+    }
+
+    public void spawnParticle(Particle particle, double x, double y, double z, int count,
+            double offsetX, double offsetY, double offsetZ, double speed) {
+        spawnParticle0(particle, x, y, z, count,
+                offsetX, offsetY, offsetZ, speed, null, false);
     }
 
     private void titlePart(String part, Component component) {

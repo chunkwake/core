@@ -11,6 +11,7 @@ import java.nio.file.Path;
 import java.util.UUID;
 import org.bukkit.Location;
 import org.bukkit.NamespacedKey;
+import org.bukkit.Particle;
 import org.bukkit.World;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.LivingEntity;
@@ -962,6 +963,146 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
         }
         for (Player p : getPlayers()) {
             p.stopSound(sound);
+        }
+    }
+
+    // --- частицы: World.spawnParticle ---
+
+    /** Общий путь мировых частиц: Rust сам фильтрует зрителей по измерению и радиусу. */
+    private void spawnParticleWorld(Particle particle, double x, double y, double z, int count,
+            double offsetX, double offsetY, double offsetZ, double speed,
+            Object data, boolean force) {
+        String line = ParticleWire.command(particle, x, y, z, count,
+                offsetX, offsetY, offsetZ, speed, data, force);
+        if (line != null) {
+            request("fx " + line);
+        }
+    }
+
+    public void spawnParticle(Particle particle, Location location, int count) {
+        if (location == null) {
+            throw new IllegalArgumentException("Location cannot be null");
+        }
+        spawnParticleWorld(particle, location.getX(), location.getY(), location.getZ(),
+                count, 0.0, 0.0, 0.0, 0.0, null, false);
+    }
+
+    public void spawnParticle(Particle particle, double x, double y, double z, int count) {
+        spawnParticleWorld(particle, x, y, z, count, 0.0, 0.0, 0.0, 0.0, null, false);
+    }
+
+    public <T> void spawnParticle(Particle particle, Location location, int count, T data) {
+        if (location == null) {
+            throw new IllegalArgumentException("Location cannot be null");
+        }
+        spawnParticleWorld(particle, location.getX(), location.getY(), location.getZ(),
+                count, 0.0, 0.0, 0.0, 0.0, data, false);
+    }
+
+    public <T> void spawnParticle(Particle particle, double x, double y, double z, int count,
+            T data) {
+        spawnParticleWorld(particle, x, y, z, count, 0.0, 0.0, 0.0, 0.0, data, false);
+    }
+
+    public void spawnParticle(Particle particle, Location location, int count,
+            double offsetX, double offsetY, double offsetZ) {
+        if (location == null) {
+            throw new IllegalArgumentException("Location cannot be null");
+        }
+        spawnParticleWorld(particle, location.getX(), location.getY(), location.getZ(),
+                count, offsetX, offsetY, offsetZ, 0.0, null, false);
+    }
+
+    public void spawnParticle(Particle particle, double x, double y, double z, int count,
+            double offsetX, double offsetY, double offsetZ) {
+        spawnParticleWorld(particle, x, y, z, count,
+                offsetX, offsetY, offsetZ, 0.0, null, false);
+    }
+
+    public <T> void spawnParticle(Particle particle, Location location, int count,
+            double offsetX, double offsetY, double offsetZ, T data) {
+        if (location == null) {
+            throw new IllegalArgumentException("Location cannot be null");
+        }
+        spawnParticleWorld(particle, location.getX(), location.getY(), location.getZ(),
+                count, offsetX, offsetY, offsetZ, 0.0, data, false);
+    }
+
+    public <T> void spawnParticle(Particle particle, double x, double y, double z, int count,
+            double offsetX, double offsetY, double offsetZ, T data) {
+        spawnParticleWorld(particle, x, y, z, count,
+                offsetX, offsetY, offsetZ, 0.0, data, false);
+    }
+
+    public void spawnParticle(Particle particle, Location location, int count,
+            double offsetX, double offsetY, double offsetZ, double speed) {
+        if (location == null) {
+            throw new IllegalArgumentException("Location cannot be null");
+        }
+        spawnParticleWorld(particle, location.getX(), location.getY(), location.getZ(),
+                count, offsetX, offsetY, offsetZ, speed, null, false);
+    }
+
+    public void spawnParticle(Particle particle, double x, double y, double z, int count,
+            double offsetX, double offsetY, double offsetZ, double speed) {
+        spawnParticleWorld(particle, x, y, z, count,
+                offsetX, offsetY, offsetZ, speed, null, false);
+    }
+
+    public <T> void spawnParticle(Particle particle, Location location, int count,
+            double offsetX, double offsetY, double offsetZ, double speed, T data) {
+        if (location == null) {
+            throw new IllegalArgumentException("Location cannot be null");
+        }
+        spawnParticleWorld(particle, location.getX(), location.getY(), location.getZ(),
+                count, offsetX, offsetY, offsetZ, speed, data, false);
+    }
+
+    public <T> void spawnParticle(Particle particle, double x, double y, double z, int count,
+            double offsetX, double offsetY, double offsetZ, double speed, T data) {
+        spawnParticleWorld(particle, x, y, z, count,
+                offsetX, offsetY, offsetZ, speed, data, false);
+    }
+
+    public <T> void spawnParticle(Particle particle, Location location, int count,
+            double offsetX, double offsetY, double offsetZ, double speed, T data, boolean force) {
+        if (location == null) {
+            throw new IllegalArgumentException("Location cannot be null");
+        }
+        spawnParticleWorld(particle, location.getX(), location.getY(), location.getZ(),
+                count, offsetX, offsetY, offsetZ, speed, data, force);
+    }
+
+    public <T> void spawnParticle(Particle particle, double x, double y, double z, int count,
+            double offsetX, double offsetY, double offsetZ, double speed, T data, boolean force) {
+        spawnParticleWorld(particle, x, y, z, count,
+                offsetX, offsetY, offsetZ, speed, data, force);
+    }
+
+    /**
+     * Ядро Paper с явным списком получателей. Список {@code null} — все игроки
+     * мира; {@code source} в мосте не влияет на видимость (трекеров нет).
+     * {@code randomizationType} пока не передаётся в пакет (Rust шлёт DEFAULT).
+     */
+    public <T> void spawnParticle(Particle particle, List<Player> receivers, Player source,
+            double x, double y, double z, int count,
+            double offsetX, double offsetY, double offsetZ,
+            double speedX, double speedY, double speedZ,
+            T data, boolean force, Particle.RandomizationType randomizationType) {
+        String line = ParticleWire.command(particle, x, y, z, count,
+                offsetX, offsetY, offsetZ, speedX, data, force);
+        if (line == null) {
+            return;
+        }
+        List<Player> viewers = receivers != null ? receivers : getPlayers();
+        for (Player viewer : viewers) {
+            if (viewer == null) {
+                continue;
+            }
+            PlayerImpl impl = server.playerImpl(viewer);
+            if (impl != null) {
+                impl.sendParticleCommand(line);
+            }
         }
     }
 

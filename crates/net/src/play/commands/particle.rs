@@ -241,7 +241,7 @@ fn look(ctx: &Context<'_>, call: &Call<'_>) -> ([f64; 3], f32, f32) {
     (ctx.spawn(), 0.0, 0.0)
 }
 
-fn in_range(player: [f64; 3], at: [f64; 3], force: bool) -> bool {
+pub(crate) fn in_range(player: [f64; 3], at: [f64; 3], force: bool) -> bool {
     let dx = player[0] - at[0];
     let dy = player[1] - at[1];
     let dz = player[2] - at[2];

@@ -3,6 +3,7 @@
 //! `player <uuid> sound|title|times|stopsound|block …`.
 
 use super::PlayPlan;
+use super::world_effects::parse_particle;
 use chunkwake_protocol::play;
 use uuid::Uuid;
 
@@ -12,6 +13,18 @@ impl PlayPlan {
         let rest = line.strip_prefix("player ")?;
         let (uuid, command) = rest.split_once(' ')?;
         let uuid = Uuid::parse_str(uuid).ok()?;
+        if let Some(rest) = command.strip_prefix("particle ") {
+            let mut tokens = rest.split_whitespace();
+            let Some(request) = parse_particle(self, &mut tokens) else {
+                return Some("0".into());
+            };
+            if tokens.next().is_some() {
+                return Some("0".into());
+            }
+            let packet = self.particle_packet(&request);
+            self.send_to(uuid, packet);
+            return Some("1".into());
+        }
         if let Some(rest) = command.strip_prefix("title ") {
             let (part, json) = rest.split_once(' ')?;
             let Ok(component) = serde_json::from_str(json) else {

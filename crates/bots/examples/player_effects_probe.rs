@@ -40,6 +40,7 @@ async fn main() {
         "set_action_bar_text",
         "block_update",
         "container_set_content",
+        "level_particles",
     ];
     let mut capture = Vec::new();
     let mut by_id = BTreeMap::new();
