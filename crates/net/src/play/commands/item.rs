@@ -198,6 +198,40 @@ fn apply_one(extra: &mut Extra, damage: &mut Option<i32>, key: &str, value: Tag)
             extra.rarity = Some(id as u8);
             true
         }
+        "lock" => {
+            // `LockCode.CODEC` — предикат предмета, только compound.
+            if value.as_compound().is_none() {
+                return false;
+            }
+            extra.lock = Some(snbt::format_tag(&value));
+            true
+        }
+        "container_loot" => {
+            let Some(map) = value.as_compound() else {
+                return false;
+            };
+            let Some(Tag::String(table)) = map.get("loot_table") else {
+                return false;
+            };
+            if let Some(seed) = map.get("seed")
+                && !matches!(
+                    seed,
+                    Tag::Byte(_) | Tag::Short(_) | Tag::Int(_) | Tag::Long(_)
+                )
+            {
+                return false;
+            }
+            let mut map = map.clone();
+            // `ResourceKey`: без пространства имён — `minecraft:`.
+            let table = if table.contains(':') {
+                table.clone()
+            } else {
+                format!("minecraft:{table}")
+            };
+            map.insert("loot_table".into(), Tag::String(table));
+            extra.container_loot = Some(snbt::format_tag(&Tag::Compound(map)));
+            true
+        }
         "custom_data" => {
             let Some(map) = value.as_compound() else {
                 return false;

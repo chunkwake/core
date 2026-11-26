@@ -61,6 +61,12 @@ pub struct Extra {
     pub note_block_sound: Option<String>,
     /// `minecraft:rarity`: 0 common, 1 uncommon, 2 rare, 3 epic.
     pub rarity: Option<u8>,
+    /// `minecraft:lock`: `ItemPredicate` ключа в SNBT. Компонент не
+    /// синхронизируется с клиентом, поэтому храним только на сервере.
+    pub lock: Option<String>,
+    /// `minecraft:container_loot`: `SeededContainerLoot` в SNBT
+    /// (`{loot_table: "...", seed: N}`).
+    pub container_loot: Option<String>,
     /// `minecraft:hide_tooltip`: skryt podskazku.
     pub hide_tooltip: bool,
     /// `minecraft:enchantment_glint_override`: prinuditelnyy blesk.
@@ -161,6 +167,8 @@ impl Extra {
             && self.tooltip_style.is_none()
             && self.note_block_sound.is_none()
             && self.rarity.is_none()
+            && self.lock.is_none()
+            && self.container_loot.is_none()
             && !self.hide_tooltip
             && self.glint_override.is_none()
             && self.potion.is_none()

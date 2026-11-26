@@ -2762,6 +2762,31 @@ fn dominant_axis(vel: [f64; 3]) -> usize {
     }
 }
 
+/// Контейнеры с `RandomizableContainerBlockEntity`: у них есть `LootTable`.
+fn is_randomizable_container(block: &str) -> bool {
+    block.ends_with("chest")
+        || block.ends_with("barrel")
+        || block.ends_with("shulker_box")
+        || matches!(block, "minecraft:dispenser" | "minecraft:dropper")
+}
+
+/// Ключ перевода названия контейнера по умолчанию (`getDefaultName`).
+fn container_name_key(block: &str) -> &'static str {
+    match block {
+        "minecraft:barrel" => "container.barrel",
+        "minecraft:hopper" => "container.hopper",
+        "minecraft:dispenser" => "container.dispenser",
+        "minecraft:dropper" => "container.dropper",
+        "minecraft:furnace" => "container.furnace",
+        "minecraft:blast_furnace" => "container.blast_furnace",
+        "minecraft:smoker" => "container.smoker",
+        "minecraft:brewing_stand" => "container.brewing",
+        "minecraft:crafter" => "container.crafter",
+        n if n.ends_with("shulker_box") => "container.shulkerBox",
+        _ => "container.chest",
+    }
+}
+
 fn container_entity(block: &str) -> Option<&'static str> {
     match block {
         "minecraft:chest" => Some("minecraft:chest"),
@@ -2897,6 +2922,7 @@ mod game_events;
 mod item_frames;
 mod jukebox;
 mod kinds;
+mod lock;
 mod leashes;
 mod maps;
 mod minecarts;
@@ -18169,6 +18195,14 @@ impl PlayPlan {
                             }
                         }
                         if let Some(kind) = kind.filter(|_| !state.vitals.dead && login.spawn.game_mode != 3 && !bypass) {
+                            // `BaseContainerBlockEntity.createMenu`: запертый
+                            // контейнер не открывается и не разыгрывает добычу.
+                            if self.container_locked(u.pos, state) {
+                                self.locked_container_notice(uuid, u.pos, &clicked);
+                                conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence)).await?;
+                                self.reset_after_use(me.entity_id, uuid, u.hand, state, &mut swing);
+                                continue;
+                            }
                             // `RandomizableContainerBlockEntity.unpackLootTable`:
                             // при первом открытии контейнер получает добычу.
                             let mut opened = vec![u.pos];
@@ -18558,33 +18592,65 @@ impl PlayPlan {
                                     touched.push(p);
                                 }
                                 self.link_chest(target, place);
+                                // `BlockItem.updateBlockEntityComponents`:
+                                // `BaseContainerBlockEntity.applyImplicitComponents`
+                                // переносит имя, замок, `container` и `container_loot`
+                                // в блок-сущность (лектерн — не контейнер).
                                 if let Some(id) = container_entity(&name) {
-                                    self.set_block_entity(target, Some(BlockEntity { id: id.into(), nbt: Default::default() }));
-                                }
-                                // `BlockItem.updateBlockEntityComponents`: шалкер
-                                // переносит в блок содержимое `minecraft:container`.
-                                if self.state_name(place).ends_with("shulker_box")
-                                    && let Some(extra) = hand_slot.and_then(|i| state.inv.slots[i]).map(|s| s.extra)
-                                {
-                                    let e = chunkwake_protocol::components::get(extra);
-                                    if let Some(name) = &e.custom_name {
-                                        let mut nbt = Compound::new();
-                                        nbt.insert(
-                                            "CustomName".into(),
-                                            crate::stack_nbt::json_to_tag(
-                                                &crate::stack_nbt::text_json(name),
-                                            ),
-                                        );
-                                        self.set_block_entity(
-                                            target,
-                                            Some(BlockEntity {
-                                                id: "minecraft:shulker_box".into(),
-                                                nbt,
-                                            }),
-                                        );
+                                    let mut nbt = Compound::new();
+                                    let mut contents = None;
+                                    if name != "minecraft:lectern"
+                                        && let Some(extra) = hand_slot
+                                            .and_then(|i| state.inv.slots[i])
+                                            .map(|s| s.extra)
+                                    {
+                                        let e = chunkwake_protocol::components::get(extra);
+                                        if let Some(name) = &e.custom_name {
+                                            nbt.insert(
+                                                "CustomName".into(),
+                                                crate::stack_nbt::json_to_tag(
+                                                    &crate::stack_nbt::text_json(name),
+                                                ),
+                                            );
+                                        }
+                                        if let Some(lock) = &e.lock
+                                            && let Some(Tag::Compound(c)) =
+                                                crate::play::commands::snbt::parse_value(lock)
+                                        {
+                                            nbt.insert("lock".into(), Tag::Compound(c));
+                                        }
+                                        if is_randomizable_container(&name)
+                                            && let Some(loot) = &e.container_loot
+                                            && let Some(c) =
+                                                crate::play::commands::snbt::parse_value(loot)
+                                                    .and_then(|t| t.as_compound().cloned())
+                                        {
+                                            if let Some(table) =
+                                                c.get("loot_table").and_then(Tag::as_str)
+                                            {
+                                                nbt.insert(
+                                                    "LootTable".into(),
+                                                    Tag::String(table.to_owned()),
+                                                );
+                                            }
+                                            if let Some(seed) = c
+                                                .get("seed")
+                                                .and_then(Tag::as_i64)
+                                                .filter(|&s| s != 0)
+                                            {
+                                                nbt.insert("LootTableSeed".into(), Tag::Long(seed));
+                                            }
+                                        }
+                                        if !e.container.is_empty() {
+                                            contents = Some(e.container.clone());
+                                        }
                                     }
-                                    if !e.container.is_empty() {
-                                        self.set_container_slots(target, &e.container);
+                                    self.set_block_entity(
+                                        target,
+                                        Some(BlockEntity { id: id.into(), nbt }),
+                                    );
+                                    if let Some(contents) = contents {
+                                        self.set_container_slots(target, &contents);
                                     }
                                 }
                                 if banners::banner_color(self.state_name(place)).is_some() {
@@ -19574,12 +19640,40 @@ impl PlayPlan {
             .nbt
             .get("CustomName")
             .map(|t| crate::stack_nbt::tag_to_json(t).to_string());
-        if slots.iter().all(Option::is_none) && name.is_none() {
+        // `copy_components` шалкера: `custom_name`, `container`, `lock`,
+        // `container_loot` (см. `loot_table/blocks/shulker_box.json`).
+        let lock = be
+            .nbt
+            .get("lock")
+            .map(crate::play::commands::snbt::format_tag);
+        let container_loot = be
+            .nbt
+            .get("LootTable")
+            .and_then(Tag::as_str)
+            .map(|table| {
+                let mut c = Compound::from([(
+                    "loot_table".into(),
+                    Tag::String(table.to_owned()),
+                )]);
+                if let Some(seed) = be.nbt.get("LootTableSeed").and_then(Tag::as_i64)
+                    && seed != 0
+                {
+                    c.insert("seed".into(), Tag::Long(seed));
+                }
+                crate::play::commands::snbt::format_tag(&Tag::Compound(c))
+            });
+        if slots.iter().all(Option::is_none)
+            && name.is_none()
+            && lock.is_none()
+            && container_loot.is_none()
+        {
             return loot;
         }
         let extra = chunkwake_protocol::components::intern(chunkwake_protocol::components::Extra {
             container: slots,
             custom_name: name,
+            lock,
+            container_loot,
             ..Default::default()
         });
         loot.into_iter()
@@ -24436,6 +24530,39 @@ impl PlayPlan {
             None,
             play::block_entity_data(self.ids.block_entity_data, pos, kind, &bytes),
         );
+    }
+
+    /// `BaseContainerBlockEntity.canOpen` / `LockCode.canUnlock`: смотреть
+    /// только на предмет в главной руке (наблюдателя отсекает вызывающий код).
+    fn container_locked(&self, pos: [i32; 3], state: &PlayerState) -> bool {
+        let Some(be) = self.block_entity(pos) else {
+            return false;
+        };
+        let Some(lock) = be.nbt.get("lock").and_then(Tag::as_compound) else {
+            return false;
+        };
+        let held = state.inv.held();
+        let name = held.map_or("", |s| self.item_name(s.item));
+        !self::lock::can_unlock(lock, held, name, &self.survival.item_tags)
+    }
+
+    /// `BaseContainerBlockEntity.sendChestLockedNotifications`: сообщение над
+    /// хотбаром `container.isLocked` и звук `block.chest.locked` всем рядом.
+    fn locked_container_notice(&self, uuid: Uuid, pos: [i32; 3], block: &str) {
+        let display = self
+            .block_entity(pos)
+            .and_then(|be| be.nbt.get("CustomName").cloned())
+            .map(|tag| crate::stack_nbt::tag_to_json(&tag))
+            .unwrap_or_else(|| serde_json::json!({"translate": container_name_key(block)}));
+        self.send_title(
+            uuid,
+            "actionbar",
+            serde_json::json!({
+                "translate": "container.isLocked",
+                "with": [display],
+            }),
+        );
+        self.block_sound(None, "minecraft:block.chest.locked", pos, 1.0, 1.0);
     }
 
     /// `RandomizableContainerBlockEntity.unpackLootTable`: первое открытие

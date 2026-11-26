@@ -107,6 +107,16 @@ pub fn named_nbt(
     {
         comps.insert("minecraft:rarity".into(), Tag::String((*name).to_owned()));
     }
+    if let Some(lock) = &e.lock
+        && let Some(tag) = crate::play::commands::snbt::parse_value(lock)
+    {
+        comps.insert("minecraft:lock".into(), tag);
+    }
+    if let Some(loot) = &e.container_loot
+        && let Some(tag) = crate::play::commands::snbt::parse_value(loot)
+    {
+        comps.insert("minecraft:container_loot".into(), tag);
+    }
     if !e.enchantments.is_empty() {
         let levels: Compound = e
             .enchantments
@@ -331,6 +341,12 @@ fn from_nbt_ref(c: &Compound, item_id: &dyn Fn(&str) -> Option<i32>, depth: u32)
             .and_then(Tag::as_str)
             .and_then(|name| components::RARITY_NAMES.iter().position(|&n| n == name))
             .map(|i| i as u8);
+        e.lock = m
+            .get("minecraft:lock")
+            .map(crate::play::commands::snbt::format_tag);
+        e.container_loot = m
+            .get("minecraft:container_loot")
+            .map(crate::play::commands::snbt::format_tag);
         s.damage = m
             .get("minecraft:damage")
             .and_then(Tag::as_i64)
@@ -641,6 +657,15 @@ fn book_from_json(j: &Value) -> Option<components::Book> {
     })
 }
 
+/// NBT-предикат в JSON для моста плагинов (и обратно).
+fn snbt_to_json(text: &str) -> Option<Value> {
+    crate::play::commands::snbt::parse_value(text).map(|tag| tag_to_json(&tag))
+}
+
+fn json_to_snbt(value: &Value) -> String {
+    crate::play::commands::snbt::format_tag(&json_to_tag(value))
+}
+
 /// Строка для плагинов: `item count` и, если есть компоненты, JSON
 /// `{"damage", "enchantments": {имя: уровень}, "name", "lore"}` до конца строки.
 pub fn to_line(s: Stack, name: &str) -> String {
@@ -690,6 +715,12 @@ pub fn to_line(s: Stack, name: &str) -> String {
         && let Some(name) = components::RARITY_NAMES.get(rarity as usize)
     {
         j.insert("rarity".into(), Value::from(*name));
+    }
+    if let Some(value) = e.lock.as_deref().and_then(snbt_to_json) {
+        j.insert("lock".into(), value);
+    }
+    if let Some(value) = e.container_loot.as_deref().and_then(snbt_to_json) {
+        j.insert("container_loot".into(), value);
     }
     if !e.enchantments.is_empty() {
         let levels = e
@@ -857,6 +888,8 @@ pub fn from_line(line: &str, item_id: impl Fn(&str) -> Option<i32>) -> Option<St
             .and_then(Value::as_str)
             .and_then(|name| components::RARITY_NAMES.iter().position(|&n| n == name))
             .map(|i| i as u8);
+        e.lock = j.get("lock").map(json_to_snbt);
+        e.container_loot = j.get("container_loot").map(json_to_snbt);
         if let Some(Value::Object(levels)) = j.get("enchantments") {
             for (name, lvl) in levels {
                 if let (Some(id), Some(lvl)) = (components::enchantment_id(name), lvl.as_i64()) {
@@ -1418,6 +1451,33 @@ mod tests {
     }
 
     #[test]
+    fn lock_and_container_loot_round_trip_through_nbt_and_line() {
+        let lock = r#"{items:"minecraft:paper"}"#;
+        let loot = r#"{loot_table:"minecraft:chests/simple_dungeon",seed:42}"#;
+        let stack = Stack {
+            extra: components::intern(Extra {
+                lock: Some(lock.into()),
+                container_loot: Some(loot.into()),
+                ..Default::default()
+            }),
+            ..Stack::new(7, 1)
+        };
+        let id = |n: &str| (n == "minecraft:shulker_box").then_some(7);
+        let nbt = to_nbt(stack, "minecraft:shulker_box").unwrap();
+        let comps = nbt.get("components").and_then(Tag::as_compound).unwrap();
+        assert_eq!(
+            comps
+                .get("minecraft:lock")
+                .map(crate::play::commands::snbt::format_tag),
+            Some(lock.to_owned())
+        );
+        assert_eq!(from_nbt(&nbt, id).unwrap(), stack);
+
+        let line = to_line(stack, "minecraft:shulker_box");
+        assert_eq!(from_line(&line, id).unwrap(), stack);
+    }
+
+    #[test]
     fn container_contents_survive_nbt() {
         let names = |id: i32| {
             Some(
@@ -1476,6 +1536,8 @@ mod tests {
             tooltip_style: Some("minecraft:default".into()),
             note_block_sound: None,
             rarity: None,
+            lock: None,
+            container_loot: None,
             hide_tooltip: true,
             glint_override: Some(false),
             potion: Some(0),
