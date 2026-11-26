@@ -38,7 +38,6 @@ const UNHANDLED: &[&str] = &[
     "set_structure_block",
     "set_test_block",
     "spectator_action",
-    "teleport_to_entity",
     "test_instance_block_action",
 ];
 

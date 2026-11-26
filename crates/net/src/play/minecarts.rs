@@ -115,6 +115,11 @@ impl MinecartEntry {
         self.variant.name()
     }
 
+    /// UUID сущности: для наблюдателя (`teleport_to_entity`).
+    pub(super) fn uuid(&self) -> Uuid {
+        self.uuid
+    }
+
     fn new(cart: Cart, variant: Variant) -> Self {
         let mut cart = cart;
         cart.drag = match variant {

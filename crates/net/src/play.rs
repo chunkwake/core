@@ -143,6 +143,7 @@ struct Ids {
     sb_set_creative_mode_slot: i32,
     sb_pick_item_from_block: i32,
     sb_pick_item_from_entity: i32,
+    sb_teleport_to_entity: i32,
     sb_change_game_mode: i32,
     sb_set_carried_item: i32,
     sb_set_beacon: i32,
@@ -3494,6 +3495,7 @@ impl PlayPlan {
                 sb_set_creative_mode_slot: sb("set_creative_mode_slot")?,
                 sb_pick_item_from_block: sb("pick_item_from_block")?,
                 sb_pick_item_from_entity: sb("pick_item_from_entity")?,
+                sb_teleport_to_entity: sb("teleport_to_entity")?,
                 sb_change_game_mode: sb("change_game_mode")?,
                 sb_set_carried_item: sb("set_carried_item")?,
                 sb_set_beacon: sb("set_beacon")?,
@@ -6559,6 +6561,113 @@ impl PlayPlan {
     /// Телепорт игрока (`Player.teleport`).
     fn teleport_player(&self, uuid: Uuid, pos: [f64; 3], yaw: f32, pitch: f32) -> bool {
         self.push_control(uuid, Control::Teleport(pos, yaw, pitch))
+    }
+
+    /// `ServerLevel.getEntity(UUID)` по всем измерениям для наблюдателя:
+    /// игроки, мобы, жители, лодки, вагонетки, рамки, картины и стойки.
+    fn spectator_target(&self, target: Uuid) -> Option<(Dimension, [f64; 3], f32, f32)> {
+        {
+            let players = self.hub.players.lock().unwrap();
+            if let Some(p) = players.values().find(|p| p.entry.uuid == target) {
+                return Some((p.dimension, p.pos, p.yaw, p.pitch));
+            }
+        }
+        let mut dims: Vec<Dimension> = self.dims.keys().copied().collect();
+        dims.sort();
+        for dim in dims {
+            let Some(state) = self.dims.get(&dim) else {
+                continue;
+            };
+            if let Some(e) = state
+                .sim
+                .mobs
+                .lock()
+                .unwrap()
+                .values()
+                .find(|e| e.mob.uuid == target.as_u128())
+            {
+                return Some((dim, e.mob.pos, e.mob.yaw, e.mob.pitch));
+            }
+            if let Some(v) = state
+                .sim
+                .villagers
+                .lock()
+                .unwrap()
+                .values()
+                .find(|v| v.uuid == target)
+            {
+                return Some((dim, v.pos, v.yaw, 0.0));
+            }
+            if let Some(b) = state
+                .sim
+                .boats
+                .lock()
+                .unwrap()
+                .values()
+                .find(|b| b.uuid == target)
+            {
+                return Some((dim, b.pos, b.yaw, 0.0));
+            }
+            if let Some(c) = state
+                .sim
+                .minecarts
+                .lock()
+                .unwrap()
+                .values()
+                .find(|c| c.uuid() == target)
+            {
+                return Some((dim, c.cart.pos, c.cart.yaw, 0.0));
+            }
+            if let Some(f) = state
+                .sim
+                .item_frames
+                .lock()
+                .unwrap()
+                .values()
+                .find(|f| f.uuid == target)
+            {
+                return Some((
+                    dim,
+                    [
+                        f.pos[0] as f64 + 0.5,
+                        f.pos[1] as f64,
+                        f.pos[2] as f64 + 0.5,
+                    ],
+                    0.0,
+                    0.0,
+                ));
+            }
+            if let Some(p) = state
+                .sim
+                .paintings
+                .lock()
+                .unwrap()
+                .values()
+                .find(|p| p.uuid == target)
+            {
+                return Some((
+                    dim,
+                    [
+                        p.pos[0] as f64 + 0.5,
+                        p.pos[1] as f64,
+                        p.pos[2] as f64 + 0.5,
+                    ],
+                    0.0,
+                    0.0,
+                ));
+            }
+            if let Some(a) = state
+                .sim
+                .armor_stands
+                .lock()
+                .unwrap()
+                .values()
+                .find(|a| a.uuid == target)
+            {
+                return Some((dim, a.pos, a.yaw, 0.0));
+            }
+        }
+        None
     }
 
     /// Сколько столбцов мира прочитано с диска.
@@ -15625,6 +15734,22 @@ impl PlayPlan {
                                     self.send_slots(conn, &mut state.inv, &changed).await?;
                                 }
                                 conn.send(&chunkwake_protocol::inventory::set_held_slot(ids.set_held_slot, state.inv.selected as i32)).await?;
+                            }
+                        }
+                        continue;
+                    }
+                    if id == ids.sb_teleport_to_entity {
+                        // `ServerboundTeleportToEntityPacket`: только наблюдатель,
+                        // UUID ищется по загруженным сущностям всех измерений.
+                        let target = r.uuid()?;
+                        if login.spawn.game_mode == 3
+                            && !state.vitals.dead
+                            && let Some((dim, pos, yaw, pitch)) = self.spectator_target(target)
+                        {
+                            if dim == self.player_dim(uuid) {
+                                self.teleport_player(uuid, pos, yaw, pitch);
+                            } else {
+                                self.switch_player_dimension_look(uuid, dim, pos, (yaw, pitch));
                             }
                         }
                         continue;
