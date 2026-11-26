@@ -4246,6 +4246,44 @@ impl PlayPlan {
         }
     }
 
+    /// `FireworkRocketEntity.dealExplosionDamage` по мобу: урон `fireworks`,
+    /// анимация, метаданные и звук.
+    pub(super) fn firework_hurt_mob(
+        &self,
+        id: i32,
+        damage: f32,
+        pos: [f64; 3],
+        owner: Option<Uuid>,
+    ) {
+        let (sound, volume, baby, source, died) = {
+            let mut mobs = self.sim().mobs.lock().unwrap();
+            let Some(e) = mobs.get_mut(&id) else {
+                return;
+            };
+            let died = crate::mobs::hurt(
+                &mut e.mob,
+                damage,
+                crate::mobs::Source::at(pos, owner.map(|u| u.as_u128())),
+                0.0,
+            ) == Some(true);
+            (
+                e.mob.sound(if died { "death" } else { "hurt" }),
+                e.mob.volume(),
+                e.mob.is_baby(),
+                sound_source(e.mob.species),
+                died,
+            )
+        };
+        self.hub
+            .send_about(id, play::hurt_animation(self.ids.hurt_animation, id, 0.0));
+        self.refresh_mob(id);
+        self.play_sound(None, &sound, source, pos, volume, mob_pitch(baby));
+        self.emit_vibration(pos, "minecraft:entity_damage");
+        if died {
+            self.emit_vibration(pos, "minecraft:entity_die");
+        }
+    }
+
     /// Поведение животных поверх ИИ: яйца куриц и взросление детёнышей.
     pub(super) fn tick_animals(&self) {
         let mut eggs = Vec::new();

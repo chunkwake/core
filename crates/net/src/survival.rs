@@ -326,6 +326,9 @@ pub enum Cause {
     Player(&'static str),
     /// Звуковой удар стража (minecraft:sonic_boom): имя источника.
     SonicBoom(&'static str),
+    /// Взрыв фейерверка (`minecraft:fireworks`): имя другого игрока, если
+    /// ракета была его; у своей ракеты `None` (`death.attack.fireworks`).
+    Fireworks(Option<&'static str>),
 }
 
 /// Имя игрока для `death.attack.player`: одна аллокация на имя.
@@ -390,6 +393,8 @@ impl Cause {
             Cause::MobExplosion(_) => "death.attack.explosion.player",
             Cause::Player(_) => "death.attack.player",
             Cause::SonicBoom(_) => "death.attack.sonic_boom",
+            Cause::Fireworks(Some(_)) => "death.attack.fireworks.player",
+            Cause::Fireworks(None) => "death.attack.fireworks",
         }
     }
 
@@ -418,6 +423,7 @@ impl Cause {
             Cause::MobExplosion(_) => "ENTITY_EXPLOSION",
             Cause::Player(_) => "ENTITY_ATTACK",
             Cause::SonicBoom(_) => "MAGIC",
+            Cause::Fireworks(_) => "ENTITY_EXPLOSION",
         }
     }
 
@@ -445,6 +451,7 @@ impl Cause {
             Cause::MobExplosion(_) => "minecraft:player_explosion",
             Cause::Player(_) => "minecraft:player_attack",
             Cause::SonicBoom(_) => "minecraft:sonic_boom",
+            Cause::Fireworks(_) => "minecraft:fireworks",
         }
     }
 

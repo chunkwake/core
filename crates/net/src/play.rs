@@ -9406,6 +9406,12 @@ impl PlayPlan {
         let mut quiet = Vec::new();
         // `dealExplosionDamage` ракеты на элитрах: игрок, к которому она прицеплена.
         let mut blasted = Vec::new();
+        // `dealExplosionDamage` соседям: цель, урон, точка взрыва и хозяин ракеты.
+        enum BlastTarget {
+            Player(usize),
+            Mob(i32),
+        }
+        let mut blasts: Vec<(BlastTarget, f32, [f64; 3], Option<Uuid>)> = Vec::new();
         let mut impacts = Vec::new();
         let mut landed = Vec::new();
         // Попадания в мишень: `set_block` нельзя звать под `with_world`
@@ -9499,6 +9505,67 @@ impl PlayPlan {
                                 broken.push((id, true, a.pos));
                                 if a.attached.is_some() && a.explosions == 0 {
                                     quiet.push(id);
+                                }
+                                // `dealExplosionDamage`: `f = 5 + 2·взрывов`,
+                                // соседям в 5 блоках — `f·√((5−d)/5)`, если
+                                // луч до тела не упирается в блок.
+                                if a.explosions > 0 {
+                                    let f = 5.0 + 2.0 * a.explosions as f32;
+                                    let from = a.pos;
+                                    let owner = a.owner;
+                                    let attached = a.attached;
+                                    let dist2 = |p: [f64; 3]| {
+                                        (0..3).map(|i| (p[i] - from[i]).powi(2)).sum::<f64>()
+                                    };
+                                    let visible = |feet: [f64; 3]| {
+                                        [feet[1], feet[1] + 0.5].iter().any(|&y| {
+                                            let to = [feet[0], y, feet[2]];
+                                            let d =
+                                                [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+                                            let len =
+                                                (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                                            let steps = (len / 0.25).ceil().max(1.0) as usize;
+                                            (0..=steps).all(|i| {
+                                                let t = i as f64 / steps as f64;
+                                                let p = [
+                                                    from[0] + d[0] * t,
+                                                    from[1] + d[1] * t,
+                                                    from[2] + d[2] * t,
+                                                ];
+                                                !solid(w, p.map(|v| v.floor() as i32))
+                                            })
+                                        })
+                                    };
+                                    for (k, (uuid, feet)) in alive.iter().enumerate() {
+                                        if attached == Some(*uuid) {
+                                            continue;
+                                        }
+                                        let d2 = dist2(*feet);
+                                        if d2 > 25.0 || !visible(*feet) {
+                                            continue;
+                                        }
+                                        blasts.push((
+                                            BlastTarget::Player(k),
+                                            ar::firework_damage(f, d2.sqrt()),
+                                            from,
+                                            owner,
+                                        ));
+                                    }
+                                    for (uuid, feet, _, mob_id) in mob_targets.iter() {
+                                        if attached.map(|u| u.as_u128()) == Some(*uuid) {
+                                            continue;
+                                        }
+                                        let d2 = dist2(*feet);
+                                        if d2 > 25.0 || !visible(*feet) {
+                                            continue;
+                                        }
+                                        blasts.push((
+                                            BlastTarget::Mob(*mob_id),
+                                            ar::firework_damage(f, d2.sqrt()),
+                                            from,
+                                            owner,
+                                        ));
+                                    }
                                 }
                                 if let Some(owner) = a.attached
                                     && a.explosions > 0
@@ -9613,7 +9680,30 @@ impl PlayPlan {
             self.emit_vibration(pos, "minecraft:projectile_land");
         }
         for (owner, damage) in blasted {
-            self.push_control(owner, Control::Hurt(damage, Cause::Explosion, None, 0.0));
+            self.push_control(
+                owner,
+                Control::Hurt(damage, Cause::Fireworks(None), None, 0.0),
+            );
+        }
+        for (target, damage, pos, owner) in blasts {
+            match target {
+                BlastTarget::Player(k) => {
+                    let (uuid, _) = alive[k];
+                    let attacker = owner.filter(|o| *o != uuid).and_then(|o| {
+                        self.hub
+                            .players
+                            .lock()
+                            .unwrap()
+                            .values()
+                            .find(|p| p.entry.uuid == o)
+                            .map(|p| p.entry.name.clone())
+                    });
+                    let cause =
+                        Cause::Fireworks(attacker.as_deref().map(crate::survival::intern_name));
+                    self.push_control(uuid, Control::Hurt(damage, cause, Some(pos), 0.0));
+                }
+                BlastTarget::Mob(id) => self.firework_hurt_mob(id, damage, pos, owner),
+            }
         }
         for (id, rocket, pos) in broken {
             if rocket && !quiet.contains(&id) {
@@ -27866,6 +27956,7 @@ impl PlayPlan {
             Cause::Player(_) => Some(self.survival.damage_player_attack),
             Cause::MobArrow(_) => Some(self.survival.damage_arrow),
             Cause::MobExplosion(_) => Some(self.survival.damage_explosion),
+            Cause::Fireworks(_) => Some(self.survival.damage_explosion),
             Cause::Generic => None,
         };
         if let Some(t) = damage_type {
@@ -27956,6 +28047,9 @@ impl PlayPlan {
                     serde_json::json!({"translate": cause.death_key(), "with": [me.entry.name, {"translate": key}]})
                 }
                 Cause::Player(attacker) => {
+                    serde_json::json!({"translate": cause.death_key(), "with": [me.entry.name, attacker]})
+                }
+                Cause::Fireworks(Some(attacker)) => {
                     serde_json::json!({"translate": cause.death_key(), "with": [me.entry.name, attacker]})
                 }
                 _ => serde_json::json!({"translate": cause.death_key(), "with": [me.entry.name]}),

@@ -192,6 +192,11 @@ pub fn aim(yaw: f64, pitch: f64, yaw_offset: f64) -> [f64; 3] {
     [-y.sin() * p.cos(), -p.sin(), y.cos() * p.cos()]
 }
 
+/// `FireworkRocketEntity.dealExplosionDamage`: `f · √((5 − d) / 5)`.
+pub fn firework_damage(base: f32, distance: f64) -> f32 {
+    base * (((5.0 - distance) / 5.0).max(0.0)).sqrt() as f32
+}
+
 /// `AbstractArrow`: ⌈|v| × урон⌉, критический добавляет `0 .. ⌈урон/2⌉+1`.
 pub fn arrow_damage(speed: f64, base: f64, crit_roll: Option<u32>) -> f32 {
     let d = (speed * base).clamp(0.0, i32::MAX as f64).ceil() as i32;
@@ -492,6 +497,13 @@ pub fn in_cell(feet: [f64; 3], cell: [i32; 3]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn firework_damage_falls_off_with_distance() {
+        assert!((firework_damage(7.0, 0.0) - 7.0).abs() < 1e-6);
+        assert!(firework_damage(7.0, 5.0).abs() < 1e-6);
+        assert!((firework_damage(7.0, 1.25) - 7.0 * 0.75f64.sqrt() as f32).abs() < 1e-6);
+    }
 
     #[test]
     fn frame_hit_stops_the_arrow() {
