@@ -155,6 +155,8 @@ pub enum Control {
     /// Слот окна и стопка.
     Slot(usize, Slot),
     Selected(usize),
+    /// Переслать игроку актуальный инвентарь (`Player.updateInventory`).
+    Inventory,
     /// Телепорт: позиция, поворот.
     Teleport([f64; 3], f32, f32),
     /// Переход в другое измерение: `respawn` клиенту и новый поток чанков.
@@ -321,6 +323,7 @@ impl Control {
                 Control::Payload(channel, data)
             }
             "held" => Control::Selected(it.next()?.parse::<usize>().ok().filter(|&s| s <= 8)?),
+            "inventory" => Control::Inventory,
             "slot" => {
                 let window = bukkit_to_window(it.next()?.parse().ok()?)?;
                 // Остаток строки после номера — стопка (`-` — пусто).
@@ -352,6 +355,7 @@ impl Control {
             Control::GameMode(m) => live.game_mode = m,
             Control::Slot(w, s) => live.slots[w] = s,
             Control::Selected(s) => live.selected = s,
+            Control::Inventory => {}
             Control::Teleport(p, yaw, pitch) => {
                 live.pos = p;
                 live.yaw = yaw;

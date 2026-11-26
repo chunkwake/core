@@ -99,6 +99,11 @@ final class InventoryImpl {
 
     public ItemStack getItemInMainHand() { return airIfEmpty(contents()[getHeldItemSlot()]); }
     public void setItemInMainHand(ItemStack item) { setItem(getHeldItemSlot(), item); }
+    /** Устаревший алиас основной руки (плагины CraftBook/UltimateShop и др.). */
+    @Deprecated
+    public ItemStack getItemInHand() { return getItemInMainHand(); }
+    @Deprecated
+    public void setItemInHand(ItemStack item) { setItemInMainHand(item); }
     public ItemStack getItemInOffHand() { return airIfEmpty(contents()[OFFHAND]); }
     public ItemStack getItem(org.bukkit.inventory.EquipmentSlot slot) {
         return switch (slot) {
@@ -129,6 +134,15 @@ final class InventoryImpl {
     public void setChestplate(ItemStack s) { setItem(CHESTPLATE, s); }
     public void setLeggings(ItemStack s) { setItem(LEGGINGS, s); }
     public void setBoots(ItemStack s) { setItem(BOOTS, s); }
+
+    /** Порядок Bukkit: ботинки, штаны, нагрудник, шлем. */
+    public void setArmorContents(ItemStack[] items) {
+        ItemStack[] armor = items == null ? new ItemStack[0] : items;
+        setBoots(armor.length > 0 ? armor[0] : null);
+        setLeggings(armor.length > 1 ? armor[1] : null);
+        setChestplate(armor.length > 2 ? armor[2] : null);
+        setHelmet(armor.length > 3 ? armor[3] : null);
+    }
 
     public boolean contains(Material m) {
         for (ItemStack s : contents()) {

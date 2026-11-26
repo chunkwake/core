@@ -145,6 +145,26 @@ final class BlockImpl {
 
     public boolean isEmpty() { return getType().isAir(); }
 
+    public org.bukkit.Chunk getChunk() { return world.getChunkAt(x >> 4, z >> 4); }
+
+    public org.bukkit.block.Biome getBiome() {
+        String key = WorldImpl.request(world, "biome " + x + " " + y + " " + z).trim();
+        if (key.isEmpty()) {
+            return org.bukkit.block.Biome.PLAINS;
+        }
+        org.bukkit.NamespacedKey id = org.bukkit.NamespacedKey.fromString(key);
+        org.bukkit.block.Biome biome =
+                id == null ? null : org.bukkit.Registry.BIOME.get(id);
+        return biome == null ? org.bukkit.block.Biome.PLAINS : biome;
+    }
+
+    public boolean isPassable() { return !getType().isSolid(); }
+
+    public boolean isLiquid() {
+        Material type = getType();
+        return type == Material.WATER || type == Material.LAVA;
+    }
+
     public void setType(Material type) { setType(type, true); }
 
     /** Состояние по умолчанию для типа; с физикой соседи (редстоун) обновятся в тике. */
@@ -193,6 +213,10 @@ final class BlockImpl {
     }
 
     /** Дропы custom-блока через CE loot; для ванильного — сам блок. */
+    public java.util.Collection<org.bukkit.inventory.ItemStack> getDrops() {
+        return getDrops(new org.bukkit.inventory.ItemStack(Material.AIR));
+    }
+
     public java.util.Collection<org.bukkit.inventory.ItemStack> getDrops(
             org.bukkit.inventory.ItemStack tool) {
         Object custom = customState();
@@ -282,6 +306,10 @@ final class BlockImpl {
             // не Bukkit-предмет
         }
         return null;
+    }
+
+    public boolean breakNaturally() {
+        return breakNaturally(new org.bukkit.inventory.ItemStack(Material.AIR));
     }
 
     public boolean breakNaturally(org.bukkit.inventory.ItemStack tool) {

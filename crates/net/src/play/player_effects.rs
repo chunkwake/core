@@ -105,6 +105,10 @@ impl PlayPlan {
             );
             return Some("1".into());
         }
+        if command == "inventory" {
+            self.push_control(uuid, crate::live::Control::Inventory);
+            return Some("1".into());
+        }
         Some("0".into())
     }
 }

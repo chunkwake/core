@@ -8,6 +8,7 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.ComponentLike;
 import net.kyori.adventure.text.serializer.gson.GsonComponentSerializer;
 import org.bukkit.GameMode;
+import org.bukkit.Material;
 import org.bukkit.Server;
 import org.bukkit.World;
 import org.bukkit.entity.Player;
@@ -832,6 +833,9 @@ public final class PlayerImpl {
 
     public PlayerInventory getInventory() { return inventory.api; }
 
+    /** Переслать клиенту актуальный инвентарь (Bukkit {@code Player.updateInventory}). */
+    public void updateInventory() { playerEffect("inventory"); }
+
     /**
      * Устаревший {@code Player.getItemInHand()}: CraftHumanEntity
      * делегирует его в handle, поэтому метод должен быть здесь.
@@ -1274,6 +1278,42 @@ public final class PlayerImpl {
     }
 
     public org.bukkit.Location getEyeLocation() { return getLocation().add(0, 1.62, 0); }
+
+    public java.util.List<org.bukkit.entity.Entity> getNearbyEntities(double x, double y, double z) {
+        java.util.List<org.bukkit.entity.Entity> out = new java.util.ArrayList<>();
+        for (org.bukkit.entity.Entity e : getWorld().getNearbyEntities(getLocation(), x, y, z)) {
+            if (e != api && !e.equals(api)) {
+                out.add(e);
+            }
+        }
+        return out;
+    }
+
+    /** Упрощённый лучевой поиск блока: шаг 0.2 блока, без тонких форм. */
+    public org.bukkit.block.Block getTargetBlock(java.util.Set<Material> transparent, int maxDistance) {
+        org.bukkit.Location at = getEyeLocation();
+        org.bukkit.util.Vector step = at.getDirection().normalize().multiply(0.2);
+        int steps = Math.max(1, maxDistance * 5);
+        for (int i = 0; i < steps; i++) {
+            at.add(step);
+            org.bukkit.block.Block block = at.getBlock();
+            Material type = block.getType();
+            if (type.isAir() || (transparent != null && transparent.contains(type))) {
+                continue;
+            }
+            return block;
+        }
+        return null;
+    }
+
+    public java.util.concurrent.CompletableFuture<Boolean> teleportAsync(
+            org.bukkit.Location to, org.bukkit.event.player.PlayerTeleportEvent.TeleportCause cause) {
+        return java.util.concurrent.CompletableFuture.completedFuture(teleport(to, cause));
+    }
+
+    public boolean performCommand(String command) {
+        return command != null && server.dispatchCommand(api, command);
+    }
 
     public boolean teleport(org.bukkit.Location to) {
         return teleport(to, org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.PLUGIN);

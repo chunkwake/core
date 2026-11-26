@@ -110,6 +110,10 @@ public final class ChunkwakeTestPlugin extends JavaPlugin implements Listener {
             getServer().getPluginManager().registerEvents(new WorldFxProbe(this), this);
             return;
         }
+        if (System.getenv("CHUNKWAKE_PLAYER_MISC_PROBE") != null) {
+            getServer().getPluginManager().registerEvents(new PlayerMiscProbe(this), this);
+            return;
+        }
         String bench = System.getenv("CHUNKWAKE_BENCH_MOBS");
         if (bench != null) {
             benchMobs(Integer.parseInt(bench));

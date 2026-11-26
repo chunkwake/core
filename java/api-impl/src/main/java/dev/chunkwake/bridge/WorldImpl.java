@@ -261,6 +261,85 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
         return getChunkAt(location.getBlockX() >> 4, location.getBlockZ() >> 4);
     }
 
+    public java.util.concurrent.CompletableFuture<org.bukkit.Chunk> getChunkAtAsync(int x, int z) {
+        return java.util.concurrent.CompletableFuture.completedFuture(getChunkAt(x, z));
+    }
+
+    public java.util.concurrent.CompletableFuture<org.bukkit.Chunk> getChunkAtAsync(
+            int x, int z, boolean generate) {
+        return getChunkAtAsync(x, z);
+    }
+
+    public java.util.concurrent.CompletableFuture<org.bukkit.Chunk> getChunkAtAsync(
+            org.bukkit.Location location) {
+        return getChunkAtAsync(location.getBlockX() >> 4, location.getBlockZ() >> 4);
+    }
+
+    public java.util.concurrent.CompletableFuture<org.bukkit.Chunk> getChunkAtAsync(
+            org.bukkit.Location location, boolean generate) {
+        return getChunkAtAsync(location);
+    }
+
+    public java.util.concurrent.CompletableFuture<org.bukkit.Chunk> getChunkAtAsync(
+            org.bukkit.block.Block block) {
+        return getChunkAtAsync(block.getX() >> 4, block.getZ() >> 4);
+    }
+
+    public java.util.concurrent.CompletableFuture<org.bukkit.Chunk> getChunkAtAsync(
+            org.bukkit.block.Block block, boolean generate) {
+        return getChunkAtAsync(block);
+    }
+
+    public java.util.concurrent.CompletableFuture<org.bukkit.Chunk> getChunkAtAsyncUrgently(
+            int x, int z) {
+        return getChunkAtAsync(x, z);
+    }
+
+    public java.util.concurrent.CompletableFuture<org.bukkit.Chunk> getChunkAtAsyncUrgently(
+            int x, int z, boolean generate) {
+        return getChunkAtAsync(x, z);
+    }
+
+    public java.util.concurrent.CompletableFuture<org.bukkit.Chunk> getChunkAtAsyncUrgently(
+            org.bukkit.Location location) {
+        return getChunkAtAsync(location);
+    }
+
+    public java.util.concurrent.CompletableFuture<org.bukkit.Chunk> getChunkAtAsyncUrgently(
+            org.bukkit.Location location, boolean generate) {
+        return getChunkAtAsync(location);
+    }
+
+    public java.util.concurrent.CompletableFuture<org.bukkit.Chunk> getChunkAtAsyncUrgently(
+            org.bukkit.block.Block block) {
+        return getChunkAtAsync(block);
+    }
+
+    public java.util.concurrent.CompletableFuture<org.bukkit.Chunk> getChunkAtAsyncUrgently(
+            org.bukkit.block.Block block, boolean generate) {
+        return getChunkAtAsync(block);
+    }
+
+    public void getChunkAtAsync(int x, int z, org.bukkit.World.ChunkLoadCallback callback) {
+        if (callback != null) {
+            callback.onLoad(getChunkAt(x, z));
+        }
+    }
+
+    public void getChunkAtAsync(org.bukkit.Location location,
+            org.bukkit.World.ChunkLoadCallback callback) {
+        if (callback != null) {
+            callback.onLoad(getChunkAt(location));
+        }
+    }
+
+    public void getChunkAtAsync(org.bukkit.block.Block block,
+            org.bukkit.World.ChunkLoadCallback callback) {
+        if (callback != null) {
+            callback.onLoad(getChunkAt(block.getX() >> 4, block.getZ() >> 4));
+        }
+    }
+
     public org.bukkit.WorldBorder getWorldBorder() {
         WorldBorderImpl current = this.border;
         if (current == null) {
@@ -319,6 +398,8 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
         String value = request("gametime").trim();
         return value.isEmpty() ? 0L : Long.parseLong(value);
     }
+
+    public long getGameTime() { return getFullTime(); }
 
     public boolean isDayTime() {
         long time = getTime();

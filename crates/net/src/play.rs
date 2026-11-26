@@ -5665,6 +5665,15 @@ impl PlayPlan {
                 .map(|state| chunkwake_world::state_flags(state as u32).to_string())
                 .unwrap_or_default();
         }
+        // `biome <x> <y> <z>`: ключ биома (Bukkit `Block.getBiome`).
+        if let Some(rest) = line.strip_prefix("biome ") {
+            let f: Vec<&str> = rest.split(' ').collect();
+            let n = |i: usize| f.get(i).and_then(|v| v.parse::<i32>().ok());
+            return match (n(0), n(1), n(2)) {
+                (Some(x), Some(y), Some(z)) => self.biome_name_at([x, y, z]).unwrap_or_default(),
+                _ => String::new(),
+            };
+        }
         // `itemstack <item arg>`: ItemFactory#createItemStack (строка как в /give).
         if let Some(rest) = line.strip_prefix("itemstack ") {
             let Some(parsed) =
@@ -14419,6 +14428,13 @@ impl PlayPlan {
                             state.inv.selected = s;
                             eating = None;
                             conn.send(&chunkwake_protocol::inventory::set_held_slot(ids.set_held_slot, s as i32)).await?;
+                        }
+                        Control::Inventory => {
+                            if let Some(w) = window.as_ref() {
+                                self.send_window(conn, &mut state.inv, Some(w), w.id).await?;
+                            } else {
+                                self.send_inventory(conn, &mut state.inv).await?;
+                            }
                         }
                         Control::Furnace(pos, data, items) => {
                             if let Some(w) = window.as_mut().filter(|w| w.pos == pos) {
