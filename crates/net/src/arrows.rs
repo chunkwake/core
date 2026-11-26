@@ -92,6 +92,9 @@ pub struct Arrow {
     pub dealt_damage: bool,
     /// Предмет для подбора/возврата (`pickupItemStack`).
     pub trident_item: Option<Stack>,
+    /// `FireworkRocketEntity.DATA_ID_FIREWORKS_ITEM`: стек ракеты, по нему
+    /// клиент рисует звёзды взрыва.
+    pub firework_item: Option<Stack>,
 }
 
 impl Arrow {
@@ -145,6 +148,7 @@ impl Arrow {
             loyalty: 0,
             dealt_damage: false,
             trident_item: None,
+            firework_item: None,
         }
     }
 }

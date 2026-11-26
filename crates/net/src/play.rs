@@ -3082,6 +3082,8 @@ struct OwnedShot {
     punch: i32,
     pierce: i32,
     rocket: bool,
+    /// Стек ракеты (`FireworkRocketEntity.DATA_ID_FIREWORKS_ITEM`).
+    rocket_stack: Option<Stack>,
     /// Оружие, из которого выпущена стрела (`firedFromWeapon`).
     weapon: Option<Stack>,
     /// Стрела не подбирается (Бесконечность, креатив, `setConsumeItem(false)`).
@@ -10443,6 +10445,7 @@ impl PlayPlan {
         rocket.owner = Some(uuid);
         rocket.attached = Some(uuid);
         rocket.explosions = explosions.min(u8::MAX as usize) as u8;
+        rocket.firework_item = Some(stack);
         rocket.lifetime = crate::arrows::rocket_lifetime(flight, rand::random(), rand::random());
         let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
         self.sim().arrows.lock().unwrap().insert(id, rocket);
@@ -10467,6 +10470,14 @@ impl PlayPlan {
                 self.ids.set_entity_data,
                 id,
                 entity_id,
+            ),
+        );
+        self.hub.send(
+            None,
+            chunkwake_protocol::inventory::set_entity_item(
+                self.ids.set_entity_data,
+                id,
+                Some(stack),
             ),
         );
         self.play_sound(
@@ -10702,6 +10713,8 @@ impl PlayPlan {
     fn launch(&self, entity_type: i32, arrow: crate::arrows::Arrow) {
         let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
         let (pos, vel) = (arrow.pos, arrow.vel);
+        // Клиент рисует звёзды по стеку ракеты (`DATA_ID_FIREWORKS_ITEM`).
+        let firework_item = arrow.firework_item;
         self.sim().arrows.lock().unwrap().insert(id, arrow);
         // `Projectile.tick` посылает `PROJECTILE_SHOOT` один раз перед первым движением.
         self.emit_vibration(pos, "minecraft:projectile_shoot");
@@ -10721,6 +10734,16 @@ impl PlayPlan {
                 0,
             ),
         );
+        if let Some(stack) = firework_item {
+            self.hub.send(
+                None,
+                chunkwake_protocol::inventory::set_entity_item(
+                    self.ids.set_entity_data,
+                    id,
+                    Some(stack),
+                ),
+            );
+        }
     }
 
     fn collect_fires(&self, (cx, cz): (i32, i32), column: &ChunkColumn) -> Vec<[i32; 3]> {
@@ -13469,6 +13492,7 @@ impl PlayPlan {
         arrow.punch = shot.punch;
         arrow.pierce = shot.pierce;
         arrow.firework = shot.rocket;
+        arrow.firework_item = shot.rocket_stack;
         arrow.creative_only = shot.creative_only;
         let ty = if shot.rocket {
             self.survival.firework_entity_type
@@ -13619,6 +13643,7 @@ impl PlayPlan {
             punch,
             pierce: 0,
             rocket: false,
+            rocket_stack: None,
             creative_only: !consume,
             weapon: Some(stack),
         });
@@ -13741,6 +13766,7 @@ impl PlayPlan {
                     punch: 0,
                     pierce: if rocket { 0 } else { pierce },
                     rocket,
+                    rocket_stack: rocket.then_some(*ammo),
                     // Мультивыстрел: боковые стрелы не подбираются (`Projectile.pickup`).
                     creative_only: off != 0.0 || mode == 1,
                     weapon: Some(stack),
@@ -23417,6 +23443,7 @@ impl PlayPlan {
                 ];
                 let mut rocket = crate::arrows::Arrow::flight(at, vel, false);
                 rocket.firework = true;
+                rocket.firework_item = Some(Stack { count: 1, ..st });
                 self.launch(self.survival.firework_entity_type, rocket);
                 let dispenser = crate::redstone::step(front, facing ^ 1);
                 self.hub.send(
