@@ -39,6 +39,9 @@ public final class PlayerImpl {
     private float fallDistance;
     /** Последняя заданная скорость: клиент авторитетен, getVelocity возвращает её. */
     private volatile org.bukkit.util.Vector velocity = new org.bukkit.util.Vector();
+    /** Скрытые сущности: UUID -> набор плагинов (`*` — hidePlayer без плагина). */
+    private final java.util.Map<UUID, Set<String>> hidden =
+            new java.util.concurrent.ConcurrentHashMap<>();
     /** `Player.setSleepingIgnored`: не мешать спать (Essentials). */
     private boolean sleepingIgnored;
     /** `Player.getLocale`: клиентский язык (по умолчанию `en_us`). */
@@ -1421,6 +1424,59 @@ public final class PlayerImpl {
         velocity = v.clone();
         control("velocity " + v.getX() + " " + v.getY() + " " + v.getZ());
     }
+
+    private static String hideKey(Plugin plugin) {
+        return plugin == null ? "*" : plugin.getName();
+    }
+
+    public void hideEntity(Plugin plugin, org.bukkit.entity.Entity entity) {
+        if (entity == null) {
+            return;
+        }
+        hidden.computeIfAbsent(entity.getUniqueId(),
+                ignored -> java.util.concurrent.ConcurrentHashMap.newKeySet()).add(hideKey(plugin));
+        if (entity instanceof Player) {
+            playerEffect("hideplayer " + entity.getUniqueId());
+        } else {
+            playerEffect("hideentity " + entity.getEntityId());
+        }
+    }
+
+    public void showEntity(Plugin plugin, org.bukkit.entity.Entity entity) {
+        if (entity == null) {
+            return;
+        }
+        Set<String> keys = hidden.get(entity.getUniqueId());
+        if (keys != null) {
+            keys.remove(hideKey(plugin));
+            if (keys.isEmpty()) {
+                hidden.remove(entity.getUniqueId(), keys);
+            }
+        }
+        if (keys != null && !keys.isEmpty()) {
+            return;
+        }
+        if (entity instanceof Player) {
+            playerEffect("showplayer " + entity.getUniqueId());
+        } else {
+            playerEffect("showentity " + entity.getEntityId());
+        }
+    }
+
+    public void hidePlayer(Player player) { hideEntity(null, player); }
+    public void hidePlayer(Plugin plugin, Player player) { hideEntity(plugin, player); }
+    public void showPlayer(Plugin plugin, Player player) { showEntity(plugin, player); }
+    public void showPlayer(Player player) { showEntity(null, player); }
+
+    public boolean canSee(org.bukkit.entity.Entity entity) {
+        if (entity == null || (entity instanceof Player p && !p.isOnline())) {
+            return false;
+        }
+        Set<String> keys = hidden.get(entity.getUniqueId());
+        return keys == null || keys.isEmpty();
+    }
+
+    public boolean canSee(Player player) { return canSee((org.bukkit.entity.Entity) player); }
 
     public java.util.List<org.bukkit.entity.Entity> getNearbyEntities(double x, double y, double z) {
         java.util.List<org.bukkit.entity.Entity> out = new java.util.ArrayList<>();

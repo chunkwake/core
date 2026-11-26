@@ -25,6 +25,66 @@ impl PlayPlan {
             self.send_to(uuid, packet);
             return Some("1".into());
         }
+        if let Some(rest) = command.strip_prefix("hideplayer ") {
+            let Ok(target) = Uuid::parse_str(rest.trim()) else {
+                return Some("0".into());
+            };
+            let entity = self
+                .hub
+                .players
+                .lock()
+                .unwrap()
+                .values()
+                .find(|p| p.entry.uuid == target)
+                .map(|p| p.entity_id);
+            if let Some(id) = entity {
+                self.send_to(uuid, play::remove_entities(self.ids.remove_entities, &[id]));
+                return Some("1".into());
+            }
+            return Some("0".into());
+        }
+        if let Some(rest) = command.strip_prefix("showplayer ") {
+            let Ok(target) = Uuid::parse_str(rest.trim()) else {
+                return Some("0".into());
+            };
+            let player = self
+                .hub
+                .players
+                .lock()
+                .unwrap()
+                .values()
+                .find(|p| p.entry.uuid == target)
+                .map(|p| (p.entity_id, p.pos, p.yaw, p.pitch));
+            if let Some((id, pos, yaw, pitch)) = player {
+                self.send_to(
+                    uuid,
+                    play::add_entity_moving(
+                        self.ids.add_entity,
+                        id,
+                        target,
+                        self.player_type,
+                        pos,
+                        [0.0; 3],
+                        yaw,
+                        pitch,
+                        0,
+                    ),
+                );
+                return Some("1".into());
+            }
+            return Some("0".into());
+        }
+        if let Some(rest) = command.strip_prefix("hideentity ") {
+            let Ok(id) = rest.trim().parse::<i32>() else {
+                return Some("0".into());
+            };
+            self.send_to(uuid, play::remove_entities(self.ids.remove_entities, &[id]));
+            return Some("1".into());
+        }
+        if command.strip_prefix("showentity ").is_some() {
+            // Не-игровые сущности пока не восстанавливаем: нужен add_entity с типом/позой.
+            return Some("0".into());
+        }
         if let Some(rest) = command.strip_prefix("title ") {
             let (part, json) = rest.split_once(' ')?;
             let Ok(component) = serde_json::from_str(json) else {

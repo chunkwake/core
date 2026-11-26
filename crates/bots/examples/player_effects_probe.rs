@@ -42,6 +42,8 @@ async fn main() {
         "container_set_content",
         "level_particles",
         "set_entity_motion",
+        "remove_entities",
+        "add_entity",
     ];
     let mut capture = Vec::new();
     let mut by_id = BTreeMap::new();
@@ -52,7 +54,8 @@ async fn main() {
         }
     }
 
-    let mut c = Client::connect(&a[1], "effects", ids, 777, "26.3")
+    let name = a.get(3).map(String::as_str).unwrap_or("effects");
+    let mut c = Client::connect(&a[1], name, ids, 777, "26.3")
         .await
         .unwrap();
     c.capture_also = capture;
