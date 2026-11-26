@@ -1529,6 +1529,13 @@ pub fn change_difficulty(id: i32, difficulty: u8, locked: bool) -> Vec<u8> {
     w.buf
 }
 
+/// `ClientboundPongResponsePacket`: ответ на `ping_request` тем же временем.
+pub fn pong_response(id: i32, payload: i64) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).i64(payload);
+    w.buf
+}
+
 /// `ClientboundBlockDestructionPacket`: трещины на блоке; стадия вне 0..=9 убирает их.
 pub fn block_destruction(id: i32, entity: i32, pos: [i32; 3], stage: i8) -> Vec<u8> {
     let mut w = Writer::new();

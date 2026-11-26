@@ -136,6 +136,7 @@ struct Ids {
     block_update: i32,
     block_entity_data: i32,
     tag_query: i32,
+    pong_response: i32,
     block_destruction: i32,
     section_blocks_update: i32,
     block_changed_ack: i32,
@@ -149,6 +150,8 @@ struct Ids {
     sb_entity_tag_query: i32,
     sb_change_difficulty: i32,
     sb_lock_difficulty: i32,
+    sb_ping_request: i32,
+    sb_set_game_rule: i32,
     sb_change_game_mode: i32,
     sb_set_carried_item: i32,
     sb_set_beacon: i32,
@@ -3495,6 +3498,7 @@ impl PlayPlan {
                 block_update: cb("block_update")?,
                 block_entity_data: cb("block_entity_data")?,
                 tag_query: cb("tag_query")?,
+                pong_response: cb("pong_response")?,
                 block_destruction: cb("block_destruction")?,
                 section_blocks_update: cb("section_blocks_update")?,
                 block_changed_ack: cb("block_changed_ack")?,
@@ -3508,6 +3512,8 @@ impl PlayPlan {
                 sb_entity_tag_query: sb("entity_tag_query")?,
                 sb_change_difficulty: sb("change_difficulty")?,
                 sb_lock_difficulty: sb("lock_difficulty")?,
+                sb_ping_request: sb("ping_request")?,
+                sb_set_game_rule: sb("set_game_rule")?,
                 sb_change_game_mode: sb("change_game_mode")?,
                 sb_set_carried_item: sb("set_carried_item")?,
                 sb_set_beacon: sb("set_beacon")?,
@@ -15683,6 +15689,54 @@ impl PlayPlan {
                                 }
                                 w.data[..3].copy_from_slice(&data[..3]);
                                 self.send_window(conn, &mut state.inv, Some(w), w.id).await?;
+                            }
+                        }
+                        continue;
+                    }
+                    if id == ids.sb_ping_request {
+                        // `ClientboundPongResponsePacket` тем же временем.
+                        let payload = r.i64()?;
+                        conn.send(&play::pong_response(ids.pong_response, payload))
+                            .await?;
+                        continue;
+                    }
+                    if id == ids.sb_set_game_rule {
+                        // `handleSetGameRule`: права 2, список (ключ, значение).
+                        let n = r.var_int()?;
+                        if self.op_level(uuid) >= 2 && (0..=64).contains(&n) {
+                            for _ in 0..n {
+                                let key = r.string(32767)?.to_owned();
+                                let text = r.string(32767)?.to_owned();
+                                let name = key.strip_prefix("minecraft:").unwrap_or(&key);
+                                let Some(current) = self.vars.rule(name) else {
+                                    continue;
+                                };
+                                let Some(value) = current.parse_like(&text) else {
+                                    continue;
+                                };
+                                let shown = value.render();
+                                if self.vars.set_rule(name, value).is_some() {
+                                    // `broadcastGameRuleChangeToOperators`.
+                                    let message = serde_json::json!({
+                                        "translate": "commands.gamerule.set",
+                                        "with": [{"text": name}, {"text": shown}],
+                                    })
+                                    .to_string();
+                                    let packet =
+                                        play::system_chat(ids.system_chat, &message, false);
+                                    let players: Vec<Uuid> = self
+                                        .hub
+                                        .players
+                                        .lock()
+                                        .unwrap()
+                                        .values()
+                                        .filter(|p| self.op_level(p.entry.uuid) >= 2)
+                                        .map(|p| p.entry.uuid)
+                                        .collect();
+                                    for player in players {
+                                        self.send_to(player, packet.clone());
+                                    }
+                                }
                             }
                         }
                         continue;
