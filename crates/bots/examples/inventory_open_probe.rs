@@ -5,8 +5,8 @@
 
 use chunkwake_bots::{Client, Event, Ids};
 use chunkwake_data::packets::{Direction, PacketTable, State};
-use chunkwake_protocol::play::pack_block_pos;
 use chunkwake_protocol::Writer;
+use chunkwake_protocol::play::pack_block_pos;
 use std::time::Duration;
 
 async fn joined(c: &mut Client) {
@@ -31,11 +31,7 @@ async fn main() {
     }
     let table = PacketTable::load(a[2].as_ref()).unwrap();
     let ids = Ids::load(&table).unwrap();
-    let id = |name| {
-        table
-            .id(State::Play, Direction::Clientbound, name)
-            .unwrap()
-    };
+    let id = |name| table.id(State::Play, Direction::Clientbound, name).unwrap();
     let open = id("open_screen");
     let close = id("container_close");
     let use_on = table

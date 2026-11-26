@@ -787,12 +787,7 @@ pub fn player_abilities(id: i32, game_mode: u8, allow_flight: bool) -> Vec<u8> {
 }
 
 /// `player_abilities` с явным флагом полёта (Bukkit `setFlying`).
-pub fn player_abilities_state(
-    id: i32,
-    game_mode: u8,
-    allow_flight: bool,
-    flying: bool,
-) -> Vec<u8> {
+pub fn player_abilities_state(id: i32, game_mode: u8, allow_flight: bool, flying: bool) -> Vec<u8> {
     let mut flags: u8 = match game_mode {
         1 => 0x01 | 0x04 | 0x08,
         3 => 0x01 | 0x02 | 0x04,
