@@ -247,7 +247,7 @@ impl PlayPlan {
         let mut packets: Vec<Vec<u8>> = Vec::new();
         let mut blasts: Vec<[f64; 3]> = Vec::new();
         let mut hits: Vec<(Uuid, [f64; 3])> = Vec::new();
-        let mut mob_hits: Vec<(u128, [f64; 3])> = Vec::new();
+        let mut mob_hits: Vec<(u128, [f64; 3], u128)> = Vec::new();
         for id in ids {
             let (pos, vel, owner, life) = {
                 let map = self.sim().wither_skulls.lock().unwrap();
@@ -284,7 +284,7 @@ impl PlayPlan {
                     hits.push((*uuid, next));
                 }
                 if let Some((uuid, _, _)) = mob {
-                    mob_hits.push((*uuid, next));
+                    mob_hits.push((*uuid, next, owner));
                 }
                 if solid || player.is_some() || mob.is_some() {
                     blasts.push(next);
@@ -315,16 +315,66 @@ impl PlayPlan {
         for (uuid, at) in hits {
             self.push_control(uuid, Control::Hurt(8.0, Cause::Magic, Some(at), 0.0));
         }
+        let mut roses: Vec<[f64; 3]> = Vec::new();
         if !mob_hits.is_empty() {
             let mut mobs = self.sim().mobs.lock().unwrap();
-            for (uuid, at) in mob_hits {
+            let withers: HashSet<u128> = mobs
+                .values()
+                .filter(|e| e.mob.species == crate::mobs::Species::Wither)
+                .map(|e| e.mob.uuid)
+                .collect();
+            for (uuid, at, owner) in mob_hits {
                 if let Some(e) = mobs.values_mut().find(|e| e.mob.uuid == uuid) {
-                    crate::mobs::hurt(&mut e.mob, 8.0, crate::mobs::Source::at(at, None), 0.0);
+                    let died = crate::mobs::hurt(
+                        &mut e.mob,
+                        8.0,
+                        crate::mobs::Source::at(at, Some(owner)),
+                        0.0,
+                    )
+                    .is_some_and(|dead| dead);
+                    // `LivingEntity.createWitherRose`: гибель от визера.
+                    if died && withers.contains(&owner) {
+                        roses.push(e.mob.pos);
+                    }
                 }
             }
         }
         for at in blasts {
             self.explode_mob(at, 1.0, "minecraft:wither_skull");
+        }
+        for at in roses {
+            self.create_wither_rose(at);
+        }
+    }
+
+    /// `LivingEntity.createWitherRose`: посадить розу на блок из
+    /// `#supports_wither_rose` или выронить её, если поставить некуда
+    /// или выключен `mob_griefing`.
+    fn create_wither_rose(&self, at: [f64; 3]) {
+        let pos = [
+            at[0].floor() as i32,
+            at[1].floor() as i32,
+            at[2].floor() as i32,
+        ];
+        let placed = if self.vars.flag("mob_griefing")
+            && self
+                .block(pos)
+                .is_some_and(|s| self.state_name(s).ends_with(":air"))
+            && self.block([pos[0], pos[1] - 1, pos[2]]).is_some_and(|s| {
+                self.survival
+                    .block_tags
+                    .get("minecraft:supports_wither_rose")
+                    .is_some_and(|set| set.contains(self.state_name(s)))
+            })
+            && let Some(&rose) = self.survival.block_defaults.get("minecraft:wither_rose")
+        {
+            self.set_block(pos, rose);
+            true
+        } else {
+            false
+        };
+        if !placed && let Some(item) = self.item_id("minecraft:wither_rose") {
+            self.drop_item(at, [0.0; 3], Stack::new(item, 1), Duration::ZERO);
         }
     }
 }
