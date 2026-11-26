@@ -23431,10 +23431,16 @@ impl PlayPlan {
                     }
                     found.map(|f| f.0)
                 };
-                let uuid = target?;
-                self.push_control(uuid, Control::Slot(slot, Some(Stack { count: 1, ..st })));
-                crate::hoppers::take_one(&mut me.slots, i);
-                Some(true)
+                if let Some(uuid) = target {
+                    self.push_control(uuid, Control::Slot(slot, Some(Stack { count: 1, ..st })));
+                    crate::hoppers::take_one(&mut me.slots, i);
+                    Some(true)
+                } else if self.dispense_equip_stand(front, Stack { count: 1, ..st }) {
+                    crate::hoppers::take_one(&mut me.slots, i);
+                    Some(true)
+                } else {
+                    None
+                }
             }
             // Огниво: огонь в пустоте перед раздатчиком, −1 прочности.
             "minecraft:flint_and_steel" => {

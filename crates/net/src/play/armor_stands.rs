@@ -396,6 +396,56 @@ impl PlayPlan {
         })
     }
 
+    /// `EquipmentDispenseItemBehavior.dispenseEquipment` для стойки: первый
+    /// подходящий `ArmorStand` в клетке перед раздатчиком получает предмет в
+    /// пустой слот (`canUseSlot`). Возвращает `true`, если предмет надет.
+    pub(super) fn dispense_equip_stand(&self, front: [i32; 3], stack: Stack) -> bool {
+        let Some(slot) = self.equip_slot(stack.item) else {
+            return false;
+        };
+        // `new AABB(front)`: ровно клетка перед раздатчиком.
+        let cell = [
+            [front[0] as f64, front[1] as f64, front[2] as f64],
+            [
+                front[0] as f64 + 1.0,
+                front[1] as f64 + 1.0,
+                front[2] as f64 + 1.0,
+            ],
+        ];
+        let target = {
+            let mut stands = self.sim().armor_stands.lock().unwrap();
+            let found = stands
+                .iter()
+                .find(|(_, st)| {
+                    !st.marker
+                        && intersects(st.boxed(), cell)
+                        && !st.is_disabled(slot)
+                        && st.items[slot].is_none()
+                })
+                .map(|(&id, _)| id);
+            let Some(id) = found else {
+                return false;
+            };
+            let st = stands.get_mut(&id).unwrap();
+            st.items[slot] = Some(Stack { count: 1, ..stack });
+            (id, st.items[slot], st.center())
+        };
+        let (id, item, center) = target;
+        self.hub.send_about(
+            id,
+            play::set_equipment(self.ids.set_equipment, id, &[(slot as u8, item)]),
+        );
+        self.play_sound(
+            None,
+            "minecraft:item.armor.equip_generic",
+            crate::sounds::PLAYERS,
+            center,
+            1.0,
+            1.0,
+        );
+        true
+    }
+
     /// `ArmorStand.interactAt`: надеть, снять или обменять предмет.
     /// Возвращает слоты инвентаря игрока, которые нужно переслать.
     pub(super) fn use_armor_stand(
