@@ -18,11 +18,45 @@ pub enum Precipitation {
 }
 
 impl BiomeWeather {
+    /// `Biome.getHeightAdjustedTemperature` в точке: высотный шум и
+    /// `temperature_modifier: frozen` из 26.3.
+    pub fn temperature_at(self, pos: [i32; 3], sea_level: i32) -> f32 {
+        chunkwake_worldgen::feature::height_adjusted_temperature(
+            self.temperature as f32,
+            self.frozen,
+            pos,
+            sea_level,
+        )
+    }
+
+    /// `Biome.coldEnoughToSnow` в точке.
+    pub fn cold_enough_to_snow(self, pos: [i32; 3], sea_level: i32) -> bool {
+        let t = self.temperature_at(pos, sea_level);
+        // Как `!(t >= 0.15)`: NaN тоже считается снегом.
+        !matches!(
+            t.partial_cmp(&0.15),
+            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+        )
+    }
+
+    /// `Biome.getPrecipitationAt(pos, seaLevel)`.
+    pub fn precipitation_at(self, pos: [i32; 3], sea_level: i32) -> Precipitation {
+        if !self.has_precipitation {
+            return Precipitation::None;
+        }
+        if self.cold_enough_to_snow(pos, sea_level) {
+            Precipitation::Snow
+        } else {
+            Precipitation::Rain
+        }
+    }
+
+    /// Приблизительный вариант по высоте без координат (оставлен для
+    /// старых тестов; в тике погоды используется [`Self::precipitation_at`]).
     pub fn at(self, y: i32) -> Precipitation {
         if !self.has_precipitation {
             return Precipitation::None;
         }
-        // Above Y=80 biome temperature falls by approximately 0.00125 per block.
         let temperature = self.temperature - (y - 80).max(0) as f64 * 0.00125;
         if temperature < 0.15 {
             Precipitation::Snow
@@ -80,6 +114,30 @@ mod tests {
         assert_eq!(plains.at(64), Precipitation::Rain);
         assert_eq!(mountains.at(64), Precipitation::Rain);
         assert_eq!(mountains.at(128), Precipitation::Snow);
+    }
+
+    #[test]
+    fn precipitation_uses_position_and_height() {
+        let plains = BiomeWeather {
+            temperature: 0.8,
+            has_precipitation: true,
+            frozen: false,
+        };
+        let cold = BiomeWeather {
+            temperature: 0.1,
+            has_precipitation: true,
+            frozen: false,
+        };
+        assert_eq!(plains.precipitation_at([0, 64, 0], 64), Precipitation::Rain);
+        assert_eq!(cold.precipitation_at([0, 64, 0], 64), Precipitation::Snow);
+        assert_eq!(
+            BiomeWeather {
+                has_precipitation: false,
+                ..plains
+            }
+            .precipitation_at([0, 64, 0], 64),
+            Precipitation::None
+        );
     }
 
     #[test]

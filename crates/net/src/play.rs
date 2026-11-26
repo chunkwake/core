@@ -11592,120 +11592,298 @@ impl PlayPlan {
         }
     }
 
-    /// One exposed surface per simulated chunk while rain or snow is active.
+    /// `ServerLevel.tickChunk`: `random_tick_speed` проверок на чанк, каждая
+    /// с шансом 1/48. Затем `tickPrecipitation` по `MOTION_BLOCKING` и
+    /// ванильным `shouldFreeze`/`shouldSnow`/`handlePrecipitation`.
     fn tick_precipitation(&self) {
-        if !self.vars.weather().rain || self.game_time.load(Ordering::Relaxed) % 16 != 0 {
+        #[derive(Clone, Copy)]
+        struct PrecipitationSample {
+            top: [i32; 3],
+            top_state: u32,
+            below_state: u32,
+            biome: u32,
+            top_light: u8,
+            below_light: u8,
+            below_water: bool,
+            around_water: bool,
+        }
+        let speed = self.vars.number("random_tick_speed").clamp(0, 4096) as usize;
+        let simulated = self.block_ticking_set();
+        if simulated.is_empty() {
             return;
         }
-        let simulated = self.block_ticking_set();
-        let mut surfaces = Vec::new();
-        {
-            let world = self.dim_state().edited.read().unwrap();
+        let sea_level = self.login.spawn.sea_level;
+        let max_snow = self.vars.number("max_snow_accumulation_height").clamp(0, 8) as u8;
+        let rain = self.vars.weather().rain;
+        let mut rng = rand::thread_rng();
+        let samples = self.with_world(|w| {
+            let min_y = w.min_y;
+            let max_y = min_y + w.template.height() as i32;
+            let water = |p: [i32; 3]| {
+                w.block(p).is_some_and(|state| {
+                    self.state_name(state) == "minecraft:water"
+                        || self.survival.placement.prop(state, "waterlogged") == Some("true")
+                })
+            };
+            let mut out = Vec::new();
             for &(cx, cz) in simulated.iter() {
-                let Some((column, _)) = world.get(&(cx, cz)) else {
-                    continue;
-                };
-                let x = rand::random::<usize>() % 16;
-                let z = rand::random::<usize>() % 16;
-                let Some(ry) = (0..column.height().saturating_sub(1))
-                    .rev()
-                    .find(|&ry| !self.state_name(column.block(x, ry, z)).ends_with(":air"))
-                else {
-                    continue;
-                };
-                let biome = column.sections[ry / 16].biome_at(x / 4, ry % 16 / 4, z / 4);
-                let ground = [
-                    cx * 16 + x as i32,
-                    self.min_y() + ry as i32,
-                    cz * 16 + z as i32,
-                ];
-                let precipitation = self
-                    .survival
-                    .weather_biomes
-                    .get(biome as usize)
-                    .copied()
-                    .unwrap_or_default()
-                    .at(ground[1]);
-                surfaces.push((ground, precipitation));
+                for _ in 0..speed {
+                    if rand::Rng::gen_range(&mut rng, 0..48) != 0 {
+                        continue;
+                    }
+                    let x = cx * 16 + rand::Rng::gen_range(&mut rng, 0..16);
+                    let z = cz * 16 + rand::Rng::gen_range(&mut rng, 0..16);
+                    let top_y = (min_y..max_y)
+                        .rev()
+                        .find(|&y| {
+                            w.block([x, y, z]).is_some_and(|state| {
+                                let name = self.state_name(state);
+                                chunkwake_world::has_flag(state, chunkwake_world::flags::SOLID)
+                                    || matches!(
+                                        name,
+                                        "minecraft:water"
+                                            | "minecraft:lava"
+                                            | "minecraft:bubble_column"
+                                    )
+                                    || self.survival.placement.prop(state, "waterlogged")
+                                        == Some("true")
+                            })
+                        })
+                        .map_or(min_y, |y| y + 1);
+                    if top_y <= min_y || top_y > max_y {
+                        continue;
+                    }
+                    let top = [x, top_y, z];
+                    let below = [x, top_y - 1, z];
+                    let (Some(top_state), Some(below_state)) = (w.block(top), w.block(below))
+                    else {
+                        continue;
+                    };
+                    let below_water = self.state_name(below_state) == "minecraft:water";
+                    let Some(column) = w
+                        .columns
+                        .get(&(x >> 4, z >> 4))
+                        .map(|(column, _)| column)
+                        .or_else(|| w.flat.then_some(w.template))
+                    else {
+                        continue;
+                    };
+                    let ry = (top_y - min_y) as usize;
+                    let Some(section) = column.sections.get(ry / 16) else {
+                        continue;
+                    };
+                    let biome = section.biome_at(
+                        (x & 15) as usize / 4,
+                        (ry % 16) / 4,
+                        (z & 15) as usize / 4,
+                    );
+                    let around_water = [[1, 0], [-1, 0], [0, 1], [0, -1]]
+                        .iter()
+                        .all(|[dx, dz]| water([x + dx, top_y - 1, z + dz]));
+                    out.push(PrecipitationSample {
+                        top,
+                        top_state,
+                        below_state,
+                        biome,
+                        top_light: w.block_light_at(top).unwrap_or(0),
+                        below_light: w.block_light_at(below).unwrap_or(0),
+                        below_water,
+                        around_water,
+                    });
+                }
             }
-        }
-        for (ground, precipitation) in surfaces {
+            out
+        });
+        for sample in samples {
+            let weather = self
+                .survival
+                .weather_biomes
+                .get(sample.biome as usize)
+                .copied()
+                .unwrap_or_default();
+            // `Biome.shouldFreeze`: холодно, темно, вода и хотя бы один
+            // сосед не вода. Иначе открытый океан замёрз бы целиком.
+            if sample.below_water
+                && !sample.around_water
+                && sample.below_light < 10
+                && weather.cold_enough_to_snow(
+                    [sample.top[0], sample.top[1] - 1, sample.top[2]],
+                    sea_level,
+                )
+                && let Some(&ice) = self.survival.block_defaults.get("minecraft:ice")
+            {
+                self.set_block([sample.top[0], sample.top[1] - 1, sample.top[2]], ice);
+            }
+            if rain && max_snow > 0 {
+                let name = self.state_name(sample.top_state);
+                let snows = weather.precipitation_at(sample.top, sea_level)
+                    == crate::weather::Precipitation::Snow;
+                // `SnowLayerBlock.canSurvive`: теги `cannot_support_snow_layer`
+                // и `support_override_snow_layer`, иначе полная верхняя грань.
+                let below_name = self.state_name(sample.below_state);
+                let survives = if matches!(
+                    below_name,
+                    "minecraft:ice" | "minecraft:packed_ice" | "minecraft:barrier"
+                ) {
+                    false
+                } else {
+                    matches!(
+                        below_name,
+                        "minecraft:honey_block" | "minecraft:soul_sand" | "minecraft:mud"
+                    ) || below_name == "minecraft:snow"
+                        || self.survival.placement.sturdy(sample.below_state, 1)
+                };
+                let can_place = (name == "minecraft:snow" || name.ends_with(":air")) && survives;
+                if snows && sample.top_light < 10 && can_place {
+                    if name == "minecraft:snow" {
+                        let layers = self
+                            .survival
+                            .placement
+                            .prop(sample.top_state, "layers")
+                            .and_then(|v| v.parse::<u8>().ok())
+                            .unwrap_or(1);
+                        if layers < max_snow.min(8)
+                            && let Some(next) = self.survival.placement.with_prop(
+                                sample.top_state,
+                                "layers",
+                                &(layers + 1).to_string(),
+                            )
+                        {
+                            self.set_block(sample.top, next);
+                        }
+                    } else if let Some(&snow) = self.survival.block_defaults.get("minecraft:snow") {
+                        self.set_block(sample.top, snow);
+                    }
+                }
+            }
+            let precipitation = weather
+                .precipitation_at([sample.top[0], sample.top[1] - 1, sample.top[2]], sea_level);
             if precipitation == crate::weather::Precipitation::None {
                 continue;
             }
-            let above = [ground[0], ground[1] + 1, ground[2]];
-            if self.with_world(|w| w.sky_light_at(above).unwrap_or(0)) < 15 {
-                continue;
-            }
-            if self.vars.weather().thunder && rand::random::<u32>().is_multiple_of(6_250) {
-                self.thunder_strike(above);
-            }
-            let Some(state) = self.block(ground) else {
-                continue;
+            let below = [sample.top[0], sample.top[1] - 1, sample.top[2]];
+            let name = self.state_name(sample.below_state);
+            let level = |state| {
+                self.survival
+                    .placement
+                    .prop(state, "level")
+                    .and_then(|v| v.parse::<u8>().ok())
+                    .unwrap_or(1)
             };
-            let name = self.state_name(state);
-            if precipitation == crate::weather::Precipitation::Snow {
-                if name == "minecraft:water"
-                    && self.survival.placement.prop(state, "level") == Some("0")
+            let next = match (name, precipitation) {
+                ("minecraft:cauldron", crate::weather::Precipitation::Rain)
+                    if rand::random::<f32>() < 0.05 =>
                 {
-                    let edge = (0..4).any(|d| {
-                        self.block(offset(ground, d))
-                            .is_some_and(|s| self.state_name(s).ends_with(":air"))
-                    });
-                    if edge && let Some(&ice) = self.survival.block_defaults.get("minecraft:ice") {
-                        self.set_block(ground, ice);
-                    }
-                } else if name == "minecraft:snow" {
-                    let layers = self
-                        .survival
-                        .placement
-                        .prop(state, "layers")
-                        .and_then(|v| v.parse::<u8>().ok())
-                        .unwrap_or(1);
-                    if layers < 8
-                        && let Some(next) = self.survival.placement.with_prop(
-                            state,
-                            "layers",
-                            &(layers + 1).to_string(),
-                        )
-                    {
-                        self.set_block(ground, next);
-                    }
-                } else if self.survival.placement.sturdy(state, 1)
-                    && self
-                        .block(above)
-                        .is_some_and(|s| self.state_name(s).ends_with(":air"))
-                    && let Some(&snow) = self.survival.block_defaults.get("minecraft:snow")
-                {
-                    self.set_block(above, snow);
-                }
-            } else if name == "minecraft:cauldron" || name == "minecraft:water_cauldron" {
-                if !rand::random::<u8>().is_multiple_of(20) {
-                    continue;
-                }
-                let next = if name == "minecraft:cauldron" {
                     self.survival
                         .block_defaults
                         .get("minecraft:water_cauldron")
                         .copied()
-                } else {
-                    let level = self
-                        .survival
-                        .placement
-                        .prop(state, "level")
-                        .and_then(|v| v.parse::<u8>().ok())
-                        .unwrap_or(1);
+                }
+                ("minecraft:cauldron", crate::weather::Precipitation::Snow)
+                    if rand::random::<f32>() < 0.1 =>
+                {
+                    self.survival
+                        .block_defaults
+                        .get("minecraft:powder_snow_cauldron")
+                        .copied()
+                }
+                ("minecraft:water_cauldron", crate::weather::Precipitation::Rain)
+                    if level(sample.below_state) < 3 && rand::random::<f32>() < 0.05 =>
+                {
                     self.survival.placement.with_prop(
-                        state,
+                        sample.below_state,
                         "level",
-                        &(level + 1).min(3).to_string(),
+                        &(level(sample.below_state) + 1).to_string(),
                     )
-                };
-                if let Some(next) = next {
-                    self.set_block(ground, next);
+                }
+                ("minecraft:powder_snow_cauldron", crate::weather::Precipitation::Snow)
+                    if level(sample.below_state) < 3 && rand::random::<f32>() < 0.1 =>
+                {
+                    self.survival.placement.with_prop(
+                        sample.below_state,
+                        "level",
+                        &(level(sample.below_state) + 1).to_string(),
+                    )
+                }
+                _ => None,
+            };
+            if let Some(next) = next {
+                self.set_block(below, next);
+            }
+        }
+        // `ServerLevel.tickChunk`: молния проверяется вне осадков, раз в
+        // чанк с шансом 1/100000.
+        if rain && self.vars.weather().thunder {
+            for &(cx, cz) in simulated.iter() {
+                if !rand::random::<u32>().is_multiple_of(100_000) {
+                    continue;
+                }
+                let x = cx * 16 + (rand::random::<usize>() & 15) as i32;
+                let z = cz * 16 + (rand::random::<usize>() & 15) as i32;
+                if let Some(y) = self.motion_blocking_top(x, z)
+                    && self.raining_at([x, y, z])
+                {
+                    self.thunder_strike([x, y, z]);
                 }
             }
         }
+    }
+
+    /// Верх `MOTION_BLOCKING` для случайной молнии.
+    fn motion_blocking_top(&self, x: i32, z: i32) -> Option<i32> {
+        self.with_world(|w| {
+            let max_y = w.min_y + w.template.height() as i32;
+            for y in (w.min_y..max_y).rev() {
+                if w.block([x, y, z]).is_some_and(|state| {
+                    let name = self.state_name(state);
+                    chunkwake_world::has_flag(state, chunkwake_world::flags::SOLID)
+                        || matches!(
+                            name,
+                            "minecraft:water" | "minecraft:lava" | "minecraft:bubble_column"
+                        )
+                        || self.survival.placement.prop(state, "waterlogged") == Some("true")
+                }) {
+                    return Some(y + 1);
+                }
+            }
+            Some(w.min_y)
+        })
+    }
+
+    /// `Level.isRainingAt`: небо видно (`canSeeSky`) и в биоме именно дождь.
+    fn raining_at(&self, [x, y, z]: [i32; 3]) -> bool {
+        let Some(sky) = self.with_world(|w| w.sky_light_at([x, y, z])) else {
+            return false;
+        };
+        if sky < 15 {
+            return false;
+        }
+        let biome = self.with_world(|w| {
+            let ry = y - w.min_y;
+            if ry < 0 {
+                return None;
+            }
+            let column = w
+                .columns
+                .get(&(x >> 4, z >> 4))
+                .map(|(column, _)| column)
+                .or_else(|| w.flat.then_some(w.template))?;
+            let section = column.sections.get(ry as usize / 16)?;
+            Some(section.biome_at(
+                (x & 15) as usize / 4,
+                (ry as usize % 16) / 4,
+                (z & 15) as usize / 4,
+            ))
+        });
+        biome.is_some_and(|biome| {
+            self.survival
+                .weather_biomes
+                .get(biome as usize)
+                .copied()
+                .unwrap_or_default()
+                .precipitation_at([x, y, z], self.login.spawn.sea_level)
+                == crate::weather::Precipitation::Rain
+        })
     }
 
     pub(crate) fn thunder_strike(&self, at: [i32; 3]) -> [i32; 3] {
