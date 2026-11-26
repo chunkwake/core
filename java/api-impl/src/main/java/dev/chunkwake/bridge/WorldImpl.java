@@ -155,13 +155,23 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
     /** Запрос с большим ответом (hex-снимок чанка). */
     String requestLarge(String line) {
         byte[] bytes = Bridge.worldBytes("@" + dim + " " + line, 4 << 20);
-        return new String(bytes, java.nio.charset.StandardCharsets.US_ASCII);
+        return new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
     }
 
     /** Запрос к миру, которому принадлежит {@code w} (чужой {@link World} — как к оверворлду). */
     static String request(World w, String line) {
         WorldImpl impl = of(w);
         return impl != null ? impl.request(line) : Bridge.world("@" + OVERWORLD + " " + line);
+    }
+
+    /** Большой ответ (сундук 54 слота с NBT); вне мира — обычный запрос. */
+    static String requestLarge(World w, String line) {
+        WorldImpl impl = of(w);
+        if (impl != null) {
+            return impl.requestLarge(line);
+        }
+        byte[] bytes = Bridge.worldBytes("@" + OVERWORLD + " " + line, 4 << 20);
+        return new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
     }
 
     public static WorldImpl of(World w) {

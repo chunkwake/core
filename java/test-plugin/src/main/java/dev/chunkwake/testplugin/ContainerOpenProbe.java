@@ -43,6 +43,54 @@ final class ContainerOpenProbe implements Listener {
             plugin.getLogger().info("CONTAINER_OPEN placed " + block.getType()
                     + " at " + block.getLocation() + " player=" + event.getPlayer().getLocation()
                     + " reach=" + event.getPlayer().getLocation().distance(block.getLocation()));
+
+            // Container/BlockState API: getState().getInventory() читает/пишет block entity.
+            var chestBlock = world.getBlockAt(X + 2, Y, Z);
+            chestBlock.setType(Material.CHEST);
+            var chestState = chestBlock.getState();
+            check(chestState instanceof org.bukkit.block.Chest, "state-chest");
+            if (chestState instanceof org.bukkit.block.Container container) {
+                var inv = container.getInventory();
+                check(inv.getSize() == 27, "state-size");
+                check(inv.getHolder() instanceof org.bukkit.block.Chest, "state-holder");
+                check(inv.getLocation().equals(chestBlock.getLocation()), "state-location");
+                inv.setItem(0, new ItemStack(Material.DIAMOND, 5));
+                var got = inv.getItem(0);
+                check(got != null && got.getType() == Material.DIAMOND
+                        && got.getAmount() == 5, "state-roundtrip");
+                inv.clear(0);
+            }
+
+            var barrelBlock = world.getBlockAt(X + 2, Y, Z + 2);
+            barrelBlock.setType(Material.BARREL);
+            var barrelState = barrelBlock.getState();
+            check(barrelState instanceof org.bukkit.block.Barrel, "state-barrel");
+            if (barrelState instanceof org.bukkit.block.Container container) {
+                var inv = container.getInventory();
+                check(inv.getSize() == 27, "state-barrel-size");
+                inv.setItem(1, new ItemStack(Material.APPLE, 4));
+                var got = inv.getItem(1);
+                check(got != null && got.getType() == Material.APPLE
+                        && got.getAmount() == 4, "state-barrel-roundtrip");
+                inv.clear(1);
+            }
+
+            var furnaceBlock = world.getBlockAt(X + 2, Y, Z - 2);
+            furnaceBlock.setType(Material.FURNACE);
+            var furnaceState = furnaceBlock.getState();
+            check(furnaceState instanceof org.bukkit.block.Furnace, "state-furnace");
+            if (furnaceState instanceof org.bukkit.block.Furnace furnace) {
+                var inv = furnace.getInventory();
+                check(inv instanceof org.bukkit.inventory.FurnaceInventory,
+                        "state-furnace-inventory");
+                inv.setSmelting(new ItemStack(Material.IRON_ORE, 3));
+                var got = inv.getSmelting();
+                check(got != null && got.getType() == Material.IRON_ORE
+                        && got.getAmount() == 3, "state-furnace-roundtrip");
+                inv.setSmelting(null);
+            }
+            plugin.getLogger().info(
+                    "CONTAINER_OPEN state ok=" + ok + " bad=" + bad);
         });
     }
 

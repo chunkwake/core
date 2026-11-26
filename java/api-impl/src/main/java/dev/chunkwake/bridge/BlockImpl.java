@@ -366,10 +366,16 @@ final class BlockImpl {
         WorldImpl.request(world, "set " + x + " " + y + " " + z + " " + data.getAsString() + (physics ? " 1" : " 0"));
     }
 
-    /** Снимок блока: у табличек — {@link org.bukkit.block.Sign}, иначе простой {@code BlockState}. */
+    /** Снимок блока: табличка, контейнер или простой {@code BlockState}. */
     public org.bukkit.block.BlockState getState() {
+        ensureChunk();
         org.bukkit.block.Sign sign = SignImpl.of(api);
-        return sign != null ? sign : Stub.of(org.bukkit.block.BlockState.class, new Events.StateImpl(api));
+        if (sign != null) {
+            return sign;
+        }
+        org.bukkit.block.BlockState container = ContainerStateImpl.of(api);
+        return container != null ? container
+                : Stub.of(org.bukkit.block.BlockState.class, new Events.StateImpl(api));
     }
 
     public org.bukkit.block.BlockState getState(boolean useSnapshot) { return getState(); }

@@ -5985,6 +5985,9 @@ impl PlayPlan {
         if let Some(rest) = line.strip_prefix("sign ") {
             return self.sign_request(rest);
         }
+        if let Some(rest) = line.strip_prefix("container ") {
+            return self.container_request(rest);
+        }
         if let Some(rest) = line.strip_prefix("inv ") {
             return self.plugin_inv_request(rest);
         }
@@ -25419,6 +25422,177 @@ impl PlayPlan {
         }
         // Компараторы рядом читают заполненность.
         self.redstone_update(&crate::redstone::around(pos));
+    }
+
+    /// Позиции одного инвентаря: двойной сундук — обе половины, левая первой.
+    fn container_positions(&self, pos: [i32; 3]) -> Vec<[i32; 3]> {
+        match self.chest_partner(pos) {
+            Some((partner, clicked_right)) => {
+                if clicked_right {
+                    vec![pos, partner]
+                } else {
+                    vec![partner, pos]
+                }
+            }
+            None => vec![pos],
+        }
+    }
+
+    /// Живое содержимое контейнера для `Container.getInventory()`.
+    fn container_slots_for_block(&self, pos: [i32; 3]) -> Vec<Slot> {
+        let name = self
+            .block(pos)
+            .map_or("minecraft:air", |state| self.state_name(state));
+        if furnace_kind(name).is_some() {
+            return self
+                .with_furnace(pos, |entry| entry.f.slots.to_vec())
+                .unwrap_or_else(|| vec![None; 3]);
+        }
+        if name == "minecraft:brewing_stand" {
+            return self
+                .brewing_stand(pos)
+                .map_or_else(|| vec![None; 5], |stand| stand.slots.to_vec());
+        }
+        self.container_positions(pos)
+            .iter()
+            .flat_map(|&part| self.container_items(part))
+            .collect()
+    }
+
+    /// Записать содержимое из `Container.getInventory()` в block entity/кэш.
+    fn set_container_slots_for_block(&self, pos: [i32; 3], slots: &[Slot]) -> bool {
+        let name = self
+            .block(pos)
+            .map_or("minecraft:air", |state| self.state_name(state));
+        if furnace_kind(name).is_some() {
+            if slots.len() < 3 {
+                return false;
+            }
+            self.set_furnace_slots(pos, [slots[0], slots[1], slots[2]], Uuid::nil());
+            return true;
+        }
+        if name == "minecraft:brewing_stand" {
+            if slots.len() < 5 {
+                return false;
+            }
+            self.save_brewing_slots(
+                pos,
+                [slots[0], slots[1], slots[2], slots[3], slots[4]],
+                Uuid::nil(),
+            );
+            return true;
+        }
+        let positions = self.container_positions(pos);
+        let Some(per) = slots
+            .len()
+            .checked_div(positions.len())
+            .filter(|&size| size > 0)
+        else {
+            return false;
+        };
+        for (i, &part) in positions.iter().enumerate() {
+            self.save_container(part, &slots[i * per..(i + 1) * per]);
+        }
+        true
+    }
+
+    /// `container ...` — block state inventory (`Chest/Barrel/Furnace.getInventory`).
+    fn container_request(&self, line: &str) -> String {
+        let (cmd, rest) = line.split_once(' ').unwrap_or((line, ""));
+        fn split_pos(text: &str) -> Option<([i32; 3], &str)> {
+            let mut it = text.splitn(4, ' ');
+            let x = it.next()?.trim().parse::<i32>().ok()?;
+            let y = it.next()?.trim().parse::<i32>().ok()?;
+            let z = it.next()?.trim().parse::<i32>().ok()?;
+            Some(([x, y, z], it.next().unwrap_or("")))
+        }
+        match cmd {
+            "slots" => {
+                let mut it = rest.split_whitespace();
+                let parse = |value: Option<&str>| value.and_then(|v| v.parse::<i32>().ok());
+                let (Some(x), Some(y), Some(z)) =
+                    (parse(it.next()), parse(it.next()), parse(it.next()))
+                else {
+                    return String::new();
+                };
+                let slots = self.container_slots_for_block([x, y, z]);
+                let mut out = slots.len().to_string();
+                for slot in slots {
+                    out.push('\n');
+                    out.push_str(&self.slot_line(slot));
+                }
+                out
+            }
+            "get" => {
+                let Some((pos, tail)) = split_pos(rest) else {
+                    return String::new();
+                };
+                let Some(index) = tail.trim().parse::<usize>().ok() else {
+                    return String::new();
+                };
+                self.container_slots_for_block(pos)
+                    .get(index)
+                    .map_or_else(|| "-".to_owned(), |slot| self.slot_line(*slot))
+            }
+            "set" => {
+                let Some((pos, tail)) = split_pos(rest) else {
+                    return String::new();
+                };
+                let Some((index, data)) = tail.split_once(' ') else {
+                    return String::new();
+                };
+                let Ok(index) = index.trim().parse::<usize>() else {
+                    return String::new();
+                };
+                let mut slots = self.container_slots_for_block(pos);
+                if index >= slots.len() {
+                    return "0".into();
+                }
+                let slot = match data.trim() {
+                    "-" => None,
+                    data => match crate::stack_nbt::from_line(data, |name| self.item_id(name)) {
+                        Some(stack) => Some(stack),
+                        None => return "0".into(),
+                    },
+                };
+                slots[index] = slot;
+                if self.set_container_slots_for_block(pos, &slots) {
+                    "1".into()
+                } else {
+                    "0".into()
+                }
+            }
+            "setall" => {
+                let Some((head, body)) = rest.split_once('\n') else {
+                    return String::new();
+                };
+                let Some((pos, _)) = split_pos(head) else {
+                    return String::new();
+                };
+                let mut slots = Vec::new();
+                for data in body.lines() {
+                    let slot = match data.trim() {
+                        "-" => None,
+                        data => {
+                            match crate::stack_nbt::from_line(data, |name| self.item_id(name)) {
+                                Some(stack) => Some(stack),
+                                None => return "0".into(),
+                            }
+                        }
+                    };
+                    slots.push(slot);
+                }
+                if slots.len() != self.container_slots_for_block(pos).len() {
+                    return "0".into();
+                }
+                if self.set_container_slots_for_block(pos, &slots) {
+                    "1".into()
+                } else {
+                    "0".into()
+                }
+            }
+            _ => String::new(),
+        }
     }
 
     /// `Items` контейнера: непустые слоты с номерами.
