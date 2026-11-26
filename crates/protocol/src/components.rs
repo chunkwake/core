@@ -59,6 +59,8 @@ pub struct Extra {
     pub tooltip_style: Option<String>,
     /// `minecraft:note_block_sound`: звук головы над нотным блоком.
     pub note_block_sound: Option<String>,
+    /// `minecraft:rarity`: 0 common, 1 uncommon, 2 rare, 3 epic.
+    pub rarity: Option<u8>,
     /// `minecraft:hide_tooltip`: skryt podskazku.
     pub hide_tooltip: bool,
     /// `minecraft:enchantment_glint_override`: prinuditelnyy blesk.
@@ -158,6 +160,7 @@ impl Extra {
             && self.item_model.is_none()
             && self.tooltip_style.is_none()
             && self.note_block_sound.is_none()
+            && self.rarity.is_none()
             && !self.hide_tooltip
             && self.glint_override.is_none()
             && self.potion.is_none()
@@ -260,6 +263,10 @@ pub static ITEM_MODEL_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static TOOLTIP_STYLE_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 /// `minecraft:note_block_sound`: звук головы над нотным блоком.
 pub static NOTE_BLOCK_SOUND_COMPONENT: AtomicI32 = AtomicI32::new(-1);
+/// `minecraft:rarity`: редкость (цвет имени).
+pub static RARITY_COMPONENT: AtomicI32 = AtomicI32::new(-1);
+/// Имена `Rarity` по id (0 common … 3 epic).
+pub const RARITY_NAMES: [&str; 4] = ["common", "uncommon", "rare", "epic"];
 pub static TOOLTIP_DISPLAY_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static GLINT_OVERRIDE_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 /// `minecraft:custom_model_data`: целочисленный legacy-CMD (floats[0]).

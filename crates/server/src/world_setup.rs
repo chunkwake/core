@@ -859,6 +859,7 @@ fn survival_data(
         c::ITEM_MODEL_COMPONENT.store(component("minecraft:item_model")?, order);
         c::TOOLTIP_STYLE_COMPONENT.store(component("minecraft:tooltip_style")?, order);
         c::NOTE_BLOCK_SOUND_COMPONENT.store(component("minecraft:note_block_sound")?, order);
+        c::RARITY_COMPONENT.store(component("minecraft:rarity")?, order);
         c::TOOLTIP_DISPLAY_COMPONENT.store(component("minecraft:tooltip_display")?, order);
         c::GLINT_OVERRIDE_COMPONENT
             .store(component("minecraft:enchantment_glint_override")?, order);

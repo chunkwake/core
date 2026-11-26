@@ -102,6 +102,11 @@ pub fn named_nbt(
             Tag::String(sound.clone()),
         );
     }
+    if let Some(rarity) = e.rarity
+        && let Some(name) = components::RARITY_NAMES.get(rarity as usize)
+    {
+        comps.insert("minecraft:rarity".into(), Tag::String((*name).to_owned()));
+    }
     if !e.enchantments.is_empty() {
         let levels: Compound = e
             .enchantments
@@ -321,6 +326,11 @@ fn from_nbt_ref(c: &Compound, item_id: &dyn Fn(&str) -> Option<i32>, depth: u32)
             .get("minecraft:note_block_sound")
             .and_then(Tag::as_str)
             .map(str::to_owned);
+        e.rarity = m
+            .get("minecraft:rarity")
+            .and_then(Tag::as_str)
+            .and_then(|name| components::RARITY_NAMES.iter().position(|&n| n == name))
+            .map(|i| i as u8);
         s.damage = m
             .get("minecraft:damage")
             .and_then(Tag::as_i64)
@@ -676,6 +686,11 @@ pub fn to_line(s: Stack, name: &str) -> String {
     if let Some(sound) = &e.note_block_sound {
         j.insert("note_block_sound".into(), Value::from(sound.clone()));
     }
+    if let Some(rarity) = e.rarity
+        && let Some(name) = components::RARITY_NAMES.get(rarity as usize)
+    {
+        j.insert("rarity".into(), Value::from(*name));
+    }
     if !e.enchantments.is_empty() {
         let levels = e
             .enchantments
@@ -837,6 +852,11 @@ pub fn from_line(line: &str, item_id: impl Fn(&str) -> Option<i32>) -> Option<St
             .get("note_block_sound")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        e.rarity = j
+            .get("rarity")
+            .and_then(Value::as_str)
+            .and_then(|name| components::RARITY_NAMES.iter().position(|&n| n == name))
+            .map(|i| i as u8);
         if let Some(Value::Object(levels)) = j.get("enchantments") {
             for (name, lvl) in levels {
                 if let (Some(id), Some(lvl)) = (components::enchantment_id(name), lvl.as_i64()) {
@@ -1211,6 +1231,20 @@ mod tests {
     }
 
     #[test]
+    fn rarity_round_trips_through_playerdata() {
+        let stack = Stack {
+            extra: components::intern(Extra {
+                rarity: Some(3),
+                ..Default::default()
+            }),
+            ..Stack::new(1, 1)
+        };
+        let nbt = to_nbt(stack, "minecraft:diamond_sword").unwrap();
+        let back = from_nbt(&nbt, |n| (n == "minecraft:diamond_sword").then_some(1)).unwrap();
+        assert_eq!(back, stack);
+    }
+
+    #[test]
     fn note_block_sound_round_trips_through_playerdata() {
         let stack = Stack {
             extra: components::intern(Extra {
@@ -1441,6 +1475,7 @@ mod tests {
             item_model: Some("minecraft:apple".into()),
             tooltip_style: Some("minecraft:default".into()),
             note_block_sound: None,
+            rarity: None,
             hide_tooltip: true,
             glint_override: Some(false),
             potion: Some(0),

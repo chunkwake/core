@@ -185,6 +185,19 @@ fn apply_one(extra: &mut Extra, damage: &mut Option<i32>, key: &str, value: Tag)
             });
             true
         }
+        "rarity" => {
+            let Some(name) = value.as_str() else {
+                return false;
+            };
+            let Some(id) = chunkwake_protocol::components::RARITY_NAMES
+                .iter()
+                .position(|&n| n == name)
+            else {
+                return false;
+            };
+            extra.rarity = Some(id as u8);
+            true
+        }
         "custom_data" => {
             let Some(map) = value.as_compound() else {
                 return false;
