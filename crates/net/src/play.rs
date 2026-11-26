@@ -4302,6 +4302,20 @@ impl PlayPlan {
         with_dim(dim, || self.set_block(pos, state))
     }
 
+    /// `ServerLevel.sendBlockUpdated` по `navigatingMobs`: моб с путём рядом
+    /// с изменённым блоком помечает навигацию на пересчёт.
+    fn wake_navigations(&self, at: [i32; 3]) {
+        let Ok(mut mobs) = self.sim().mobs.try_lock() else {
+            return;
+        };
+        for entry in mobs.values_mut() {
+            let pos = entry.mob.pos;
+            if entry.mob.nav.should_recompute(at, pos) {
+                entry.mob.nav.request_recompute();
+            }
+        }
+    }
+
     fn set_block(&self, [x, y, z]: [i32; 3], state: u32) -> Option<u32> {
         let ry = y - self.min_y();
         if ry < 0 || ry as usize >= self.template().height() {
@@ -4353,6 +4367,11 @@ impl PlayPlan {
             self.dim_state().dirty.lock().unwrap().insert(key);
             (old, inserted)
         };
+        // `ServerLevel.sendBlockUpdated`: изменилась форма коллизии — мобы с
+        // путём рядом с блоком пересчитают его на ближайшем тике.
+        if self.shape_at(Some(old), [x, y, z]) != self.shape_at(Some(state), [x, y, z]) {
+            self.wake_navigations([x, y, z]);
+        }
         // `LevelChunk.setBlockState`: старый маяк больше не актуален, даже
         // если блок-сущность ещё не успели удалить.
         let beacon = self.state_name(state) == "minecraft:beacon";

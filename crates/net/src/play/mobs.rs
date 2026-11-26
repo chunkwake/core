@@ -1839,7 +1839,7 @@ impl PlayPlan {
     /// Формы берутся из отчёта `shapes.csv` (`BlockPhysics`), а без него —
     /// старый грубый вариант: всё твёрдое — полный куб, жидкости и
     /// заменяемое — ничего.
-    fn shape_at(&self, s: Option<u32>, c: [i32; 3]) -> &[[f64; 6]] {
+    pub(super) fn shape_at(&self, s: Option<u32>, c: [i32; 3]) -> &[[f64; 6]] {
         let Some(s) = s else {
             return if c[1] < self.min_y() { mb::FULL } else { &[] };
         };

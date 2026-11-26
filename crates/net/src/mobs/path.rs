@@ -1973,7 +1973,7 @@ impl Navigation {
     }
 
     /// `shouldRecomputePath`: блок изменился рядом с оставшимся путём.
-    pub fn should_recompute(&self, at: [i32; 3], m: &Walker) -> bool {
+    pub fn should_recompute(&self, at: [i32; 3], pos: [f64; 3]) -> bool {
         if self.delayed_recompute {
             return false;
         }
@@ -1985,13 +1985,19 @@ impl Navigation {
         }
         let end = path.end().expect("непустой путь");
         let mid = [
-            (end[0] as f64 + m.pos[0]) / 2.0,
-            (end[1] as f64 + m.pos[1]) / 2.0,
-            (end[2] as f64 + m.pos[2]) / 2.0,
+            (end[0] as f64 + pos[0]) / 2.0,
+            (end[1] as f64 + pos[1]) / 2.0,
+            (end[2] as f64 + pos[2]) / 2.0,
         ];
         let r = (path.nodes.len() - path.next) as f64;
         let c = [at[0] as f64 + 0.5, at[1] as f64 + 0.5, at[2] as f64 + 0.5];
         d2(c, mid) < r * r
+    }
+
+    /// `ServerLevel.sendBlockUpdated` → `recomputePath`: ближайший тик
+    /// перестроит путь к прежней цели.
+    pub fn request_recompute(&mut self) {
+        self.delayed_recompute = true;
     }
 
     /// `PathNavigation.tick`: куда идти (`MoveControl.setWantedPosition`).
@@ -2829,5 +2835,25 @@ mod tests {
         assert!(p.reached, "{p:?}");
         assert!(cells(&p).iter().all(|c| water(*c)), "dry node: {p:?}");
         assert!(cells(&p).contains(&[0, 68, 0]), "{p:?}");
+    }
+
+    /// `PathNavigation.shouldRecomputePath`: изменение блока у середины пути
+    /// требует пересчёта, далёкое — нет; после заявки — уже нет.
+    #[test]
+    fn block_change_requests_recompute_near_path() {
+        let mut nav = Navigation::default();
+        nav.path = Some(Path::new(
+            vec![
+                ([0, 64, 0], PathType::Walkable),
+                ([10, 64, 0], PathType::Walkable),
+            ],
+            [10, 64, 0],
+            true,
+        ));
+        assert!(nav.should_recompute([5, 64, 0], [0.5, 64.0, 0.5]));
+        assert!(!nav.should_recompute([20, 64, 0], [0.5, 64.0, 0.5]));
+        nav.request_recompute();
+        assert!(!nav.should_recompute([5, 64, 0], [0.5, 64.0, 0.5]));
+        assert!(nav.delayed_recompute);
     }
 }
