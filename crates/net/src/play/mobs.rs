@@ -5086,17 +5086,19 @@ impl PlayPlan {
                 cz * 16 + rng.gen_range(0..16),
             );
             let (x0, z0) = (x, z);
-            for _ in 0..count {
+            for i in 0..count {
                 // Разброс группы ±5 блоков внутри чанка.
                 for _ in 0..4 {
                     let Some(y) = self.top_solid(x, z) else { break };
                     if self.is_grass([x, y, z]) {
                         let pos = [x as f64 + 0.5, (y + 1) as f64, z as f64 + 0.5];
+                        // `AgeableMobGroupData(0.05)`: кроме первого в группе —
+                        // 5 % детёнышей.
                         self.spawn_mob(
                             species,
                             pos,
                             rng.r#gen::<f32>() * 360.0,
-                            false,
+                            i > 0 && rng.r#gen::<f64>() < 0.05,
                             Some("CHUNK_GEN"),
                         );
                         break;
@@ -5900,9 +5902,20 @@ impl PlayPlan {
             }
         });
         for (species, at) in plan {
-            // `Zombie.getSpawnAsBabyOdds`: 5 %.
-            let baby =
-                matches!(species, Species::Zombie | Species::Drowned) && rng.r#gen::<f64>() < 0.05;
+            // `Zombie.getSpawnAsBabyOdds` и `AgeableMobGroupData(0.05)`:
+            // 5 % детёнышей у зомби/утопленников и животных.
+            let animal = matches!(
+                species,
+                Species::Cow
+                    | Species::Pig
+                    | Species::Sheep
+                    | Species::Chicken
+                    | Species::Wolf
+                    | Species::Cat
+                    | Species::Parrot
+            );
+            let baby = (animal || matches!(species, Species::Zombie | Species::Drowned))
+                && rng.r#gen::<f64>() < 0.05;
             let pos = [
                 f64::from(at[0]) + 0.5,
                 f64::from(at[1]),
