@@ -860,6 +860,7 @@ fn survival_data(
         c::TOOLTIP_STYLE_COMPONENT.store(component("minecraft:tooltip_style")?, order);
         c::NOTE_BLOCK_SOUND_COMPONENT.store(component("minecraft:note_block_sound")?, order);
         c::RARITY_COMPONENT.store(component("minecraft:rarity")?, order);
+        c::BLOCK_ENTITY_DATA_COMPONENT.store(component("minecraft:block_entity_data")?, order);
         c::TOOLTIP_DISPLAY_COMPONENT.store(component("minecraft:tooltip_display")?, order);
         c::GLINT_OVERRIDE_COMPONENT
             .store(component("minecraft:enchantment_glint_override")?, order);
@@ -888,8 +889,23 @@ fn survival_data(
         );
         c::set_enchantments(loaded.enchantment_names.clone());
     }
-    let _ = chunkwake_world::BLOCK_ENTITY_TYPES
-        .set(chunkwake_data::registries::builtin_ids_of(builtin, "block_entity_type").map_err(s)?);
+    let block_entity_types =
+        chunkwake_data::registries::builtin_ids_of(builtin, "block_entity_type").map_err(s)?;
+    let mut block_entity_names = vec![
+        String::new();
+        block_entity_types
+            .values()
+            .copied()
+            .max()
+            .map_or(0, |id| id.max(0) as usize + 1)
+    ];
+    for (name, &id) in &block_entity_types {
+        if let Some(slot) = block_entity_names.get_mut(id as usize) {
+            *slot = name.clone();
+        }
+    }
+    chunkwake_protocol::components::set_block_entity_types(block_entity_names);
+    let _ = chunkwake_world::BLOCK_ENTITY_TYPES.set(block_entity_types);
     // Сундуки: свойства `facing`/`type`/`waterlogged` каждого состояния.
     let chests = chest_states(blocks);
     let furnace_lit = furnace_states(blocks);

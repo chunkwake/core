@@ -239,14 +239,20 @@ fn apply_one(extra: &mut Extra, damage: &mut Option<i32>, key: &str, value: Tag)
             let Some(Tag::String(id)) = map.get("id") else {
                 return false;
             };
-            let mut map = map.clone();
             let id = if id.contains(':') {
                 id.clone()
             } else {
                 format!("minecraft:{id}")
             };
-            map.insert("id".into(), Tag::String(id));
-            extra.block_entity_data = Some(snbt::format_tag(&Tag::Compound(map)));
+            let Some(kind) = components::block_entity_type_id(&id) else {
+                return false;
+            };
+            let mut data = map.clone();
+            data.remove("id");
+            extra.block_entity_data = Some(components::BlockEntityData {
+                kind,
+                tag: crate::stack_nbt::compound_to_net(&data),
+            });
             true
         }
         "custom_data" => {

@@ -118,9 +118,11 @@ pub fn named_nbt(
         comps.insert("minecraft:container_loot".into(), tag);
     }
     if let Some(data) = &e.block_entity_data
-        && let Some(tag) = crate::play::commands::snbt::parse_value(data)
+        && let Some(block) = components::block_entity_type_name(data.kind)
+        && let Some(mut c) = net_to_compound(&data.tag)
     {
-        comps.insert("minecraft:block_entity_data".into(), tag);
+        c.insert("id".into(), Tag::String(block.to_owned()));
+        comps.insert("minecraft:block_entity_data".into(), Tag::Compound(c));
     }
     if !e.enchantments.is_empty() {
         let levels: Compound = e
@@ -354,7 +356,16 @@ fn from_nbt_ref(c: &Compound, item_id: &dyn Fn(&str) -> Option<i32>, depth: u32)
             .map(crate::play::commands::snbt::format_tag);
         e.block_entity_data = m
             .get("minecraft:block_entity_data")
-            .map(crate::play::commands::snbt::format_tag);
+            .and_then(Tag::as_compound)
+            .and_then(|c| {
+                let kind = components::block_entity_type_id(c.get("id")?.as_str()?)?;
+                let mut data = c.clone();
+                data.remove("id");
+                Some(components::BlockEntityData {
+                    kind,
+                    tag: compound_to_net(&data),
+                })
+            });
         s.damage = m
             .get("minecraft:damage")
             .and_then(Tag::as_i64)
@@ -730,8 +741,11 @@ pub fn to_line(s: Stack, name: &str) -> String {
     if let Some(value) = e.container_loot.as_deref().and_then(snbt_to_json) {
         j.insert("container_loot".into(), value);
     }
-    if let Some(value) = e.block_entity_data.as_deref().and_then(snbt_to_json) {
-        j.insert("block_entity_data".into(), value);
+    if let Some(data) = &e.block_entity_data {
+        j.insert(
+            "block_entity_data".into(),
+            serde_json::json!({"kind": data.kind, "tag": hex(&data.tag)}),
+        );
     }
     if !e.enchantments.is_empty() {
         let levels = e
@@ -901,7 +915,12 @@ pub fn from_line(line: &str, item_id: impl Fn(&str) -> Option<i32>) -> Option<St
             .map(|i| i as u8);
         e.lock = j.get("lock").map(json_to_snbt);
         e.container_loot = j.get("container_loot").map(json_to_snbt);
-        e.block_entity_data = j.get("block_entity_data").map(json_to_snbt);
+        e.block_entity_data = j.get("block_entity_data").and_then(|v| {
+            Some(components::BlockEntityData {
+                kind: v.get("kind")?.as_i64()? as i32,
+                tag: unhex(v.get("tag")?.as_str()?)?,
+            })
+        });
         if let Some(Value::Object(levels)) = j.get("enchantments") {
             for (name, lvl) in levels {
                 if let (Some(id), Some(lvl)) = (components::enchantment_id(name), lvl.as_i64()) {
@@ -1491,13 +1510,23 @@ mod tests {
 
     #[test]
     fn block_entity_data_round_trips_through_nbt_and_line() {
-        let text = r#"{id:"minecraft:jukebox",RecordItem:{id:"minecraft:music_disc_cat",count:1}}"#;
-        let canonical = crate::play::commands::snbt::format_tag(
-            &crate::play::commands::snbt::parse_value(text).unwrap(),
-        );
+        components::set_block_entity_types(vec![
+            "minecraft:jukebox".into(),
+            "minecraft:chest".into(),
+        ]);
+        let data = Compound::from([(
+            "RecordItem".into(),
+            Tag::Compound(Compound::from([
+                ("id".into(), Tag::String("minecraft:music_disc_cat".into())),
+                ("count".into(), Tag::Int(1)),
+            ])),
+        )]);
         let stack = Stack {
             extra: components::intern(Extra {
-                block_entity_data: Some(canonical.clone()),
+                block_entity_data: Some(components::BlockEntityData {
+                    kind: 0,
+                    tag: compound_to_net(&data),
+                }),
                 ..Default::default()
             }),
             ..Stack::new(7, 1)
@@ -1505,12 +1534,15 @@ mod tests {
         let id = |n: &str| (n == "minecraft:jukebox").then_some(7);
         let nbt = to_nbt(stack, "minecraft:jukebox").unwrap();
         let comps = nbt.get("components").and_then(Tag::as_compound).unwrap();
+        let tag = comps
+            .get("minecraft:block_entity_data")
+            .and_then(Tag::as_compound)
+            .unwrap();
         assert_eq!(
-            comps
-                .get("minecraft:block_entity_data")
-                .map(crate::play::commands::snbt::format_tag),
-            Some(canonical)
+            tag.get("id").and_then(Tag::as_str),
+            Some("minecraft:jukebox")
         );
+        assert_eq!(tag.get("RecordItem"), data.get("RecordItem"));
         assert_eq!(from_nbt(&nbt, id).unwrap(), stack);
         let line = to_line(stack, "minecraft:jukebox");
         assert_eq!(from_line(&line, id).unwrap(), stack);

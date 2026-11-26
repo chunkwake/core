@@ -2770,19 +2770,12 @@ fn is_randomizable_container(block: &str) -> bool {
         || matches!(block, "minecraft:dispenser" | "minecraft:dropper")
 }
 
-/// `minecraft:block_entity_data`: NBT с `id` → тип и данные без `id`.
-fn block_entity_data_nbt(text: &str) -> Option<(String, Compound)> {
-    let mut c = crate::play::commands::snbt::parse_value(text)?
-        .as_compound()?
-        .clone();
-    let id = c.get("id").and_then(Tag::as_str)?;
-    let id = if id.contains(':') {
-        id.to_owned()
-    } else {
-        format!("minecraft:{id}")
-    };
-    c.remove("id");
-    Some((id, c))
+/// `minecraft:block_entity_data`: тип блок-сущности и NBT без `id`.
+fn block_entity_data_nbt(
+    data: &chunkwake_protocol::components::BlockEntityData,
+) -> Option<(String, Compound)> {
+    let id = chunkwake_protocol::components::block_entity_type_name(data.kind)?.to_owned();
+    Some((id, crate::stack_nbt::net_to_compound(&data.tag)?))
 }
 
 /// `BaseContainerBlockEntity.applyImplicitComponents`: имя, замок и добыча.
@@ -18687,7 +18680,7 @@ impl PlayPlan {
                                         .map(|s| s.extra)
                                     && let Some((bed_id, data)) = chunkwake_protocol::components::get(extra)
                                         .block_entity_data
-                                        .as_deref()
+                                        .as_ref()
                                         .and_then(block_entity_data_nbt)
                                     && bed_id == jukebox::JUKEBOX
                                 {
@@ -28713,6 +28706,7 @@ mod tests {
         update_container_viewers, within_pick_range,
     };
     use crate::survival::PlayerState;
+    use chunkwake_world::nbt::{Compound, Tag};
     use uuid::Uuid;
 
     /// `hasClientLoaded`: таймер после входа/респауна, экран смерти и
@@ -29182,14 +29176,25 @@ mod tests {
     /// `TypedEntityData` отделяет тип от данных (`stripId`).
     #[test]
     fn block_entity_data_splits_type_and_payload() {
-        let (id, data) = block_entity_data_nbt(
-            r#"{id:"minecraft:jukebox",RecordItem:{id:"minecraft:music_disc_cat",count:1b}}"#,
-        )
-        .unwrap();
+        chunkwake_protocol::components::set_block_entity_types(vec![
+            "minecraft:jukebox".into(),
+            "minecraft:chest".into(),
+        ]);
+        let data = Compound::from([(
+            "RecordItem".into(),
+            Tag::Compound(Compound::from([
+                ("id".into(), Tag::String("minecraft:music_disc_cat".into())),
+                ("count".into(), Tag::Int(1)),
+            ])),
+        )]);
+        let payload = chunkwake_protocol::components::BlockEntityData {
+            kind: 0,
+            tag: crate::stack_nbt::compound_to_net(&data),
+        };
+        let (id, back) = block_entity_data_nbt(&payload).unwrap();
         assert_eq!(id, "minecraft:jukebox");
-        assert!(!data.contains_key("id"));
-        assert!(data.contains_key("RecordItem"));
-        assert!(block_entity_data_nbt(r#"{RecordItem:{}}"#).is_none());
+        assert!(!back.contains_key("id"));
+        assert_eq!(back.get("RecordItem"), data.get("RecordItem"));
     }
 
     /// `DaylightDetectorBlock.updateSignalStrength`: сигнал — небесный свет,

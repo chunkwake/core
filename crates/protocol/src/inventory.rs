@@ -233,7 +233,11 @@ fn write_patch(w: &mut Writer, s: &Stack) {
         let banner =
             (!e.banner_patterns.is_empty() && banner_id >= 0).then_some(&e.banner_patterns);
         let base = e.base_color.filter(|_| base_id >= 0);
-        if trim.is_some() || banner.is_some() || base.is_some() {
+        let bed = e
+            .block_entity_data
+            .as_ref()
+            .filter(|_| id_of(&crate::components::BLOCK_ENTITY_DATA_COMPONENT) >= 0);
+        if trim.is_some() || banner.is_some() || base.is_some() || bed.is_some() {
             let mut r = Reader::new(raw);
             if let (Ok(added), Ok(removed)) = (r.var_int(), r.var_int())
                 && added >= 0
@@ -278,7 +282,8 @@ fn write_patch(w: &mut Writer, s: &Stack) {
                     added - skipped
                         + i32::from(trim.is_some())
                         + i32::from(banner.is_some())
-                        + i32::from(base.is_some()),
+                        + i32::from(base.is_some())
+                        + i32::from(bed.is_some()),
                 )
                 .var_int(removed);
                 if let Some((material, pattern)) = trim {
@@ -294,6 +299,11 @@ fn write_patch(w: &mut Writer, s: &Stack) {
                 }
                 if let Some(color) = base {
                     w.var_int(base_id).var_int(color);
+                }
+                if let Some(bed) = bed {
+                    w.var_int(id_of(&crate::components::BLOCK_ENTITY_DATA_COMPONENT))
+                        .var_int(bed.kind);
+                    w.buf.extend_from_slice(&bed.tag);
                 }
                 w.buf.extend_from_slice(&raw[tail..]);
                 return;
@@ -339,6 +349,8 @@ fn write_patch(w: &mut Writer, s: &Stack) {
         e.base_color.is_some() && id_of(&crate::components::BASE_COLOR_COMPONENT) >= 0,
         e.note_block_sound.is_some() && id_of(&crate::components::NOTE_BLOCK_SOUND_COMPONENT) >= 0,
         e.rarity.is_some() && id_of(&crate::components::RARITY_COMPONENT) >= 0,
+        e.block_entity_data.is_some()
+            && id_of(&crate::components::BLOCK_ENTITY_DATA_COMPONENT) >= 0,
     ];
 
     w.var_int(parts.iter().filter(|&&p| p).count() as i32)
@@ -496,6 +508,11 @@ fn write_patch(w: &mut Writer, s: &Stack) {
     if let (true, Some(rarity)) = (parts[27], e.rarity) {
         w.var_int(id_of(&crate::components::RARITY_COMPONENT))
             .var_int(i32::from(rarity));
+    }
+    if let (true, Some(data)) = (parts[28], &e.block_entity_data) {
+        w.var_int(id_of(&crate::components::BLOCK_ENTITY_DATA_COMPONENT))
+            .var_int(data.kind);
+        w.buf.extend_from_slice(&data.tag);
     }
 }
 
@@ -912,7 +929,10 @@ fn read_untrusted_stack(r: &mut Reader) -> Result<Slot> {
             return Err(crate::ProtocolError::BadLength(len));
         }
         let payload = r.bytes(len as usize)?;
-        if kind != id_of(&crate::components::TRIM_COMPONENT)
+        let bed_kind = id_of(&crate::components::BLOCK_ENTITY_DATA_COMPONENT);
+        let block_entity = bed_kind >= 0 && kind == bed_kind;
+        if !block_entity
+            && kind != id_of(&crate::components::TRIM_COMPONENT)
             && kind != id_of(&crate::components::BANNER_PATTERNS_COMPONENT)
             && kind != id_of(&crate::components::BASE_COLOR_COMPONENT)
             && kind != id_of(&crate::components::NOTE_BLOCK_SOUND_COMPONENT)
@@ -923,7 +943,14 @@ fn read_untrusted_stack(r: &mut Reader) -> Result<Slot> {
             patch.buf.extend_from_slice(payload);
         }
         let mut body = Reader::new(payload);
-        if kind == id_of(&DAMAGE_COMPONENT)
+        if block_entity {
+            if let Ok(block_kind) = body.var_int() {
+                e.block_entity_data = Some(crate::components::BlockEntityData {
+                    kind: block_kind,
+                    tag: body.remaining().to_vec(),
+                });
+            }
+        } else if kind == id_of(&DAMAGE_COMPONENT)
             && let Ok(d) = body.var_int()
         {
             s.damage = d.max(0);
@@ -1398,6 +1425,51 @@ mod tests {
         let mut out = Writer::new();
         write_stack(&mut out, stack);
         assert_eq!(out.buf, original);
+    }
+
+    /// `minecraft:block_entity_data`: тип реестра + сетевой NBT, в креативе
+    /// перед компонентом стоит длина.
+    #[test]
+    fn block_entity_data_roundtrips_over_network() {
+        use std::sync::atomic::Ordering;
+        crate::components::BLOCK_ENTITY_DATA_COMPONENT.store(302, Ordering::Relaxed);
+        let data = vec![10, 0];
+        let stack = Stack {
+            extra: crate::components::intern(crate::components::Extra {
+                block_entity_data: Some(crate::components::BlockEntityData {
+                    kind: 0,
+                    tag: data.clone(),
+                }),
+                ..Default::default()
+            }),
+            ..Stack::new(10, 1)
+        };
+        let mut w = Writer::new();
+        write_stack(&mut w, Some(stack));
+        let mut r = Reader::new(&w.buf);
+        assert_eq!(r.var_int().unwrap(), 1);
+        assert_eq!(r.var_int().unwrap(), 10);
+        assert_eq!(r.var_int().unwrap(), 1);
+        assert_eq!(r.var_int().unwrap(), 0);
+        assert_eq!(r.var_int().unwrap(), 302);
+        assert_eq!(r.var_int().unwrap(), 0);
+        assert_eq!(r.remaining(), &data);
+
+        let mut c = Writer::new();
+        c.u16(0)
+            .var_int(1)
+            .var_int(10)
+            .var_int(1)
+            .var_int(0)
+            .var_int(302)
+            .var_int(3)
+            .var_int(0);
+        c.buf.extend_from_slice(&data);
+        let (_, back) = read_creative_slot(&mut Reader::new(&c.buf)).unwrap();
+        assert_eq!(
+            crate::components::get(back.unwrap().extra).block_entity_data,
+            Some(crate::components::BlockEntityData { kind: 0, tag: data })
+        );
     }
 
     #[test]

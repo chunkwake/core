@@ -67,9 +67,8 @@ pub struct Extra {
     /// `minecraft:container_loot`: `SeededContainerLoot` в SNBT
     /// (`{loot_table: "...", seed: N}`).
     pub container_loot: Option<String>,
-    /// `minecraft:block_entity_data`: NBT блок-сущности в SNBT вместе с
-    /// `id` (`{id: "minecraft:jukebox", RecordItem: {...}}`).
-    pub block_entity_data: Option<String>,
+    /// `minecraft:block_entity_data`: тип блок-сущности и NBT без `id`.
+    pub block_entity_data: Option<BlockEntityData>,
     /// `minecraft:hide_tooltip`: skryt podskazku.
     pub hide_tooltip: bool,
     /// `minecraft:enchantment_glint_override`: prinuditelnyy blesk.
@@ -114,6 +113,14 @@ pub struct Explosion {
 }
 
 pub type Filterable = (String, Option<String>);
+
+/// `minecraft:block_entity_data`: `TypedEntityData<BlockEntityType<?>>`.
+/// `tag` — сетевой NBT compound без `id`, `kind` — id `block_entity_type`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct BlockEntityData {
+    pub kind: i32,
+    pub tag: Vec<u8>,
+}
 
 /// Содержимое книги. У черновой (`writable_book_content`) страницы — простой
 /// текст до 1024 символов, у подписанной (`written_book_content`) — текстовые
@@ -277,6 +284,8 @@ pub static TOOLTIP_STYLE_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static NOTE_BLOCK_SOUND_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 /// `minecraft:rarity`: редкость (цвет имени).
 pub static RARITY_COMPONENT: AtomicI32 = AtomicI32::new(-1);
+/// `minecraft:block_entity_data`: NBT блок-сущности.
+pub static BLOCK_ENTITY_DATA_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 /// Имена `Rarity` по id (0 common … 3 epic).
 pub const RARITY_NAMES: [&str; 4] = ["common", "uncommon", "rare", "epic"];
 pub static TOOLTIP_DISPLAY_COMPONENT: AtomicI32 = AtomicI32::new(-1);
@@ -411,6 +420,30 @@ pub(crate) fn id_of(c: &AtomicI32) -> i32 {
 }
 
 /// Чары по сетевому ID (порядок синхронизируемого реестра `enchantment`).
+/// `block_entity_type` по сетевому id (для `minecraft:block_entity_data`).
+static BLOCK_ENTITY_TYPE_NAMES: OnceLock<Vec<String>> = OnceLock::new();
+
+pub fn set_block_entity_types(names: Vec<String>) {
+    let _ = BLOCK_ENTITY_TYPE_NAMES.set(names);
+}
+
+pub fn block_entity_type_name(id: i32) -> Option<&'static str> {
+    BLOCK_ENTITY_TYPE_NAMES
+        .get()?
+        .get(id.max(0) as usize)
+        .filter(|n| !n.is_empty())
+        .map(String::as_str)
+}
+
+pub fn block_entity_type_id(name: &str) -> Option<i32> {
+    Some(
+        BLOCK_ENTITY_TYPE_NAMES
+            .get()?
+            .iter()
+            .position(|n| n == name)? as i32,
+    )
+}
+
 static ENCHANTMENT_NAMES: OnceLock<Vec<String>> = OnceLock::new();
 
 pub fn set_enchantments(names: Vec<String>) {
