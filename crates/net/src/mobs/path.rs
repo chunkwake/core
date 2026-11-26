@@ -303,6 +303,8 @@ pub enum NavKind {
     /// `WaterBoundPathNavigation`: только вода; `breaching` — дельфин,
     /// которому разрешён `PathType.BREACH` (воздух над водой).
     Water { breaching: bool },
+    /// `FlyingPathNavigation` (`FlyNodeEvaluator`): свободный полёт по воздуху.
+    Fly,
 }
 
 impl Walker {
@@ -668,6 +670,7 @@ impl<'q, 'a, 's, 'r> Search<'q, 'a, 's, 'r> {
         let t = match self.kind {
             NavKind::Ground => self.type_of_mob(p),
             NavKind::Water { .. } => self.swim_type(p),
+            NavKind::Fly => self.fly_type_of_mob(p),
         };
         self.types.insert(p, t);
         t
@@ -700,6 +703,102 @@ impl<'q, 'a, 's, 'r> Search<'q, 'a, 's, 'r> {
         } else {
             PathType::Blocked
         }
+    }
+
+    /// `FlyNodeEvaluator.getPathType`: как `WalkNodeEvaluator`, но вода и
+    /// проходимый блок под клеткой считаются открытым воздухом, а забор под
+    /// мобом — не забором.
+    fn fly_static(&self, p: [i32; 3]) -> PathType {
+        let t = self.state_type(p);
+        if t != PathType::Open || p[1] < self.m.min_y + 1 {
+            return t;
+        }
+        let below = self.state_type([p[0], p[1] - 1, p[2]]);
+        let t = match below {
+            PathType::Fire | PathType::Lava => PathType::Fire,
+            PathType::Damaging => PathType::Damaging,
+            PathType::Cocoa => PathType::Cocoa,
+            PathType::Fence if [p[0], p[1] - 1, p[2]] != self.m.block() => PathType::Fence,
+            PathType::Walkable | PathType::Open | PathType::Water => PathType::Open,
+            _ => PathType::Walkable,
+        };
+        if matches!(t, PathType::Walkable | PathType::Open) {
+            self.check_neighbours(p, t)
+        } else {
+            t
+        }
+    }
+
+    /// `WalkNodeEvaluator.getPathTypeWithinMobBB` через `fly_static`.
+    fn fly_types_within(&self, p: [i32; 3]) -> Vec<PathType> {
+        let mut set: Vec<PathType> = Vec::new();
+        let mb = self.m.block();
+        for i in 0..self.ew {
+            for j in 0..self.eh {
+                for k in 0..self.ed {
+                    let q = [p[0] + i, p[1] + j, p[2] + k];
+                    let mut t = self.fly_static(q);
+                    if t == PathType::DoorWoodClosed
+                        && self.m.can_open_doors
+                        && self.m.can_pass_doors
+                    {
+                        t = PathType::WalkableDoor;
+                    }
+                    if t == PathType::DoorOpen && !self.m.can_pass_doors {
+                        t = PathType::Blocked;
+                    }
+                    if t == PathType::Rail
+                        && self.fly_static(mb) != PathType::Rail
+                        && self.fly_static([mb[0], mb[1] - 1, mb[2]]) != PathType::Rail
+                    {
+                        t = PathType::UnpassableRail;
+                    }
+                    if !set.contains(&t) {
+                        set.push(t);
+                    }
+                }
+            }
+        }
+        set.sort();
+        set
+    }
+
+    /// `FlyNodeEvaluator` через общий `WalkNodeEvaluator.getPathTypeOfMob`.
+    fn fly_type_of_mob(&self, p: [i32; 3]) -> PathType {
+        let set = self.fly_types_within(p);
+        if set.len() == 1 {
+            return set[0];
+        }
+        if set.contains(&PathType::Fence) {
+            return PathType::Fence;
+        }
+        if set.contains(&PathType::UnpassableRail) {
+            return PathType::UnpassableRail;
+        }
+        let mut best = PathType::Blocked;
+        let mut best_m = self.m.malus(best);
+        for &t in &set {
+            let m = self.m.malus(t);
+            if m < 0.0 {
+                return t;
+            }
+            if m >= best_m {
+                best_m = m;
+                best = t;
+            }
+        }
+        let here = self.fly_static(p);
+        if self.ew > 1 {
+            if self.m.malus(here) < best_m && self.m.malus(PathType::BigMobsCloseToDanger) < best_m
+            {
+                return PathType::BigMobsCloseToDanger;
+            }
+            return best;
+        }
+        if here == PathType::Open && best != PathType::Open && best_m == 0.0 {
+            return PathType::Open;
+        }
+        best
     }
 
     // --- Геометрия --------------------------------------------------------
@@ -948,6 +1047,9 @@ impl<'q, 'a, 's, 'r> Search<'q, 'a, 's, 'r> {
         if matches!(self.kind, NavKind::Water { .. }) {
             return self.swim_neighbors(cur);
         }
+        if self.kind == NavKind::Fly {
+            return self.fly_neighbors(cur);
+        }
         let mut out = Vec::with_capacity(8);
         let p = self.n(cur).p;
         let above = self.cached([p[0], p[1] + 1, p[2]]);
@@ -1059,6 +1161,94 @@ impl<'q, 'a, 's, 'r> Search<'q, 'a, 's, 'r> {
         i.is_some_and(|i| self.n(i).malus >= 0.0)
     }
 
+    /// `FlyNodeEvaluator.findAcceptedNode`: узел, если штраф не отрицателен;
+    /// `WALKABLE` стоит на 1 дороже.
+    fn fly_accepted(&mut self, p: [i32; 3]) -> Option<u32> {
+        let t = self.cached(p);
+        let malus = self.m.malus(t);
+        if malus < 0.0 {
+            return None;
+        }
+        let i = self.node(p);
+        let n = self.nm(i);
+        n.kind = t;
+        n.malus = n.malus.max(malus);
+        if t == PathType::Walkable {
+            n.malus += 1.0;
+        }
+        Some(i)
+    }
+
+    /// `FlyNodeEvaluator.hasMalus` для промежуточной клетки.
+    fn fly_side_ok(&mut self, p: [i32; 3]) -> bool {
+        let t = self.cached(p);
+        self.m.malus(t) >= 0.0
+    }
+
+    /// `FlyNodeEvaluator.getNeighbors`: 26 направлений; диагональ не режет
+    /// угол, если промежуточная сторона непроходима.
+    fn fly_neighbors(&mut self, cur: u32) -> Vec<u32> {
+        const DIRS: [(i32, i32, i32); 26] = [
+            (0, 1, 0),
+            (-1, 0, 0),
+            (1, 0, 0),
+            (0, 0, -1),
+            (0, 0, 1),
+            (0, -1, 0),
+            (-1, 0, -1),
+            (1, 0, -1),
+            (-1, 0, 1),
+            (1, 0, 1),
+            (0, 1, -1),
+            (0, 1, 1),
+            (-1, 1, 0),
+            (1, 1, 0),
+            (-1, 1, -1),
+            (1, 1, -1),
+            (-1, 1, 1),
+            (1, 1, 1),
+            (0, -1, -1),
+            (0, -1, 1),
+            (-1, -1, 0),
+            (1, -1, 0),
+            (-1, -1, -1),
+            (1, -1, -1),
+            (-1, -1, 1),
+            (1, -1, 1),
+        ];
+        let p = self.n(cur).p;
+        let mut out = Vec::with_capacity(26);
+        for (dx, dy, dz) in DIRS {
+            let q = [p[0] + dx, p[1] + dy, p[2] + dz];
+            let mut clear = true;
+            for side in [
+                [p[0] + dx, p[1], p[2]],
+                [p[0], p[1] + dy, p[2]],
+                [p[0], p[1], p[2] + dz],
+            ] {
+                if side != p && !self.fly_side_ok(side) {
+                    clear = false;
+                    break;
+                }
+            }
+            if !clear {
+                continue;
+            }
+            if let Some(i) = self.fly_accepted(q)
+                && !self.n(i).closed
+            {
+                out.push(i);
+            }
+        }
+        out
+    }
+
+    /// `FlyNodeEvaluator.canStartAt`: штраф не отрицателен.
+    fn fly_can_start(&mut self, p: [i32; 3]) -> bool {
+        let t = self.cached(p);
+        self.m.malus(t) >= 0.0
+    }
+
     fn can_start_at(&mut self, p: [i32; 3]) -> bool {
         let t = self.cached(p);
         t != PathType::Open && self.m.malus(t) >= 0.0
@@ -1084,6 +1274,38 @@ impl<'q, 'a, 's, 'r> Search<'q, 'a, 's, 'r> {
                 (lo[1] + 0.5).floor() as i32,
                 lo[2].floor() as i32,
             ];
+            return self.start_node(p);
+        }
+        if self.kind == NavKind::Fly {
+            // `FlyNodeEvaluator.getStart`: центр по Y (в воде — над водой),
+            // затем углы рамки для мелкого моба.
+            let b = self.m.block();
+            let mut y = if self.m.can_float && self.m.in_water {
+                let mut y = b[1];
+                while (self.w.water)([b[0], y, b[2]]) {
+                    y += 1;
+                }
+                y
+            } else {
+                (self.m.pos[1] + 0.5).floor() as i32
+            };
+            let p = [b[0], y, b[2]];
+            if self.fly_can_start(p) {
+                return self.start_node(p);
+            }
+            let (lo, hi) = self.m.bb();
+            y = b[1];
+            for (x, z) in [
+                (lo[0], lo[2]),
+                (lo[0], hi[2]),
+                (hi[0], lo[2]),
+                (hi[0], hi[2]),
+            ] {
+                let c = [x.floor() as i32, y, z.floor() as i32];
+                if self.fly_can_start(c) {
+                    return self.start_node(c);
+                }
+            }
             return self.start_node(p);
         }
         let m = *self.m;
@@ -1382,6 +1604,14 @@ impl Navigation {
         }
     }
 
+    /// `FlyingPathNavigation`.
+    pub fn flying() -> Self {
+        Self {
+            kind: NavKind::Fly,
+            ..Self::default()
+        }
+    }
+
     pub fn is_done(&self) -> bool {
         self.path.as_ref().is_none_or(Path::is_done)
     }
@@ -1396,13 +1626,18 @@ impl Navigation {
         match self.kind {
             NavKind::Ground => m.on_ground || m.in_water,
             NavKind::Water { breaching } => breaching || m.in_water,
+            // `FlyingPathNavigation`: пассажиров у нас нет, полёт всегда можно.
+            NavKind::Fly => true,
         }
     }
 
-    /// `GroundPathNavigation.getTempMobPos` / `WaterBoundPathNavigation`.
+    /// `GroundPathNavigation.getTempMobPos` / `WaterBoundPathNavigation` /
+    /// `FlyingPathNavigation`.
     fn temp_pos(&self, m: &Walker, w: &World) -> [f64; 3] {
-        if matches!(self.kind, NavKind::Water { .. }) {
-            return [m.pos[0], m.pos[1] + 0.5, m.pos[2]];
+        match self.kind {
+            NavKind::Water { .. } => return [m.pos[0], m.pos[1] + 0.5, m.pos[2]],
+            NavKind::Fly => return m.pos,
+            NavKind::Ground => {}
         }
         let y = if m.in_water && m.can_float {
             let b = m.block();
@@ -1648,7 +1883,7 @@ impl Navigation {
         let y = match self.kind {
             // `WaterBoundPathNavigation.getGroundY`: высота узла как есть.
             NavKind::Water { .. } => next[1],
-            NavKind::Ground => ground_y(w, next),
+            NavKind::Ground | NavKind::Fly => ground_y(w, next),
         };
         Some(([next[0], y, next[2]], self.speed))
     }
@@ -1882,8 +2117,43 @@ pub fn rotlerp(from: f32, to: f32, max: f32) -> f32 {
     r
 }
 
+/// `FlyingMoveControl.tick`: `noGravity`, поворот, скорость полёта,
+/// вертикальный ход `yya` по знаку `dy` и тангаж.
+fn fly_move_control(m: &mut Mob) {
+    let base = m.speed();
+    if m.move_ctl.op != MoveOp::MoveTo {
+        m.yya = 0.0;
+        m.zza = 0.0;
+        return;
+    }
+    m.move_ctl.op = MoveOp::Wait;
+    m.no_gravity = true;
+    let dx = m.move_ctl.wanted[0] - m.pos[0];
+    let dy = m.move_ctl.wanted[1] - m.pos[1];
+    let dz = m.move_ctl.wanted[2] - m.pos[2];
+    if dx * dx + dy * dy + dz * dz < 2.500000277905201E-7 {
+        m.yya = 0.0;
+        m.zza = 0.0;
+        return;
+    }
+    let yaw = (atan2(dz, dx) * 57.2957763671875) as f32 - 90.0;
+    m.yaw = rotlerp(m.yaw, yaw, 90.0);
+    let speed = m.move_ctl.speed * base;
+    m.set_speed(speed as f32);
+    let horizontal = (dx * dx + dz * dz).sqrt();
+    if dy.abs() > 9.999_999_747_378_752E-6 || horizontal.abs() > 9.999_999_747_378_752E-6 {
+        let pitch = -(atan2(dy, horizontal.max(1.0e-6)) * 57.2957763671875) as f32;
+        m.pitch = rotlerp(m.pitch, pitch, 90.0);
+        m.yya = if dy > 0.0 { speed } else { -speed };
+    }
+}
+
 /// `MoveControl.tick`: поворот к точке, скорость и прыжок на ступень.
 pub fn move_control(m: &mut Mob, w: &World, in_water: bool) {
+    if matches!(m.species, super::Species::Bat | super::Species::Phantom) {
+        fly_move_control(m);
+        return;
+    }
     let base = m.speed();
     match m.move_ctl.op {
         MoveOp::MoveTo => {
@@ -2321,5 +2591,54 @@ mod tests {
                 .create_path(&w, &walk, [3, 66, 0], 1, 16.0)
                 .is_some()
         );
+    }
+
+    /// `FlyNodeEvaluator`: путь летит по воздуху над стеной, не заходя в
+    /// твёрдые блоки.
+    #[test]
+    fn fly_path_goes_over_wall() {
+        let shape = solid(|p| p[1] < 64 || (p[0] == 3 && p[1] < 70));
+        let water = |_: [i32; 3]| false;
+        let w = World {
+            shape: &shape,
+            water: &water,
+            cell: None,
+            info: None,
+            min_y: -64,
+        };
+        let mut walk = walker([0.5, 68.5, 0.5]);
+        walk.can_float = false;
+        let p = find_path(&w, &walk, &[[6, 68, 0]], 35.0, 0, 560, 1.0, NavKind::Fly).unwrap();
+        assert!(p.reached, "{p:?}");
+        assert!(
+            cells(&p).iter().all(|c| shape(*c).is_empty()),
+            "solid node: {p:?}"
+        );
+        assert!(
+            cells(&p).iter().any(|c| c[0] == 3 && c[1] >= 70)
+                || cells(&p).iter().any(|c| c[0] == 3 && c[2] != 0),
+            "through the wall: {p:?}"
+        );
+    }
+
+    /// `FlyingPathNavigation` не ищет поверхность: цель остаётся в воздухе,
+    /// путь проходит над провалом.
+    #[test]
+    fn fly_path_crosses_gap() {
+        let shape = solid(|p| p[1] < 64 && !(2..=4).contains(&p[0]));
+        let water = |_: [i32; 3]| false;
+        let w = World {
+            shape: &shape,
+            water: &water,
+            cell: None,
+            info: None,
+            min_y: -64,
+        };
+        let mut walk = walker([0.5, 65.5, 0.5]);
+        walk.can_float = false;
+        let p = find_path(&w, &walk, &[[6, 65, 0]], 35.0, 0, 560, 1.0, NavKind::Fly).unwrap();
+        assert!(p.reached, "{p:?}");
+        assert!(cells(&p).iter().any(|c| (2..=4).contains(&c[0])), "{p:?}");
+        assert!(cells(&p).iter().all(|c| c[1] >= 64), "{p:?}");
     }
 }

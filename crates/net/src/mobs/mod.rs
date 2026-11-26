@@ -1138,6 +1138,8 @@ pub struct Mob {
     /// `LivingEntity.speed` (ставит `MoveControl`) и ход вперёд `zza`.
     pub move_speed: f64,
     pub zza: f64,
+    /// Вертикальный ход `yya` (`FlyingMoveControl`).
+    pub yya: f64,
     /// `JumpControl.jump` этого тика и `noJumpDelay`.
     pub jump: bool,
     pub no_jump_delay: u8,
@@ -1292,6 +1294,7 @@ impl Mob {
             move_ctl: MoveControl::default(),
             move_speed: 0.0,
             zza: 0.0,
+            yya: 0.0,
             jump: false,
             no_jump_delay: 0,
             xxa: 0.0,
@@ -1867,15 +1870,17 @@ pub fn travel(m: &mut Mob, forward: f64, w: &World) -> bool {
     } else {
         AIR_ACCEL
     };
-    let (mut ix, mut iz) = (m.xxa, forward);
-    let l2 = ix * ix + iz * iz;
+    let (mut ix, mut iy, mut iz) = (m.xxa, m.yya, forward);
+    let l2 = ix * ix + iy * iy + iz * iz;
     if l2 >= 1.0e-7 {
         if l2 > 1.0 {
             let l = l2.sqrt();
             ix /= l;
+            iy /= l;
             iz /= l;
         }
         ix *= amount;
+        iy *= amount;
         iz *= amount;
         // `Entity.getInputVector`: угол во float и табличные `Mth.sin`/`Mth.cos`.
         let yaw = f64::from(m.yaw * 0.017453292f32);
@@ -1884,6 +1889,7 @@ pub fn travel(m: &mut Mob, forward: f64, w: &World) -> bool {
             f64::from(chunkwake_worldgen::carver::cos(yaw)),
         );
         m.vel[0] += ix * cos - iz * sin;
+        m.vel[1] += iy;
         m.vel[2] += iz * cos + ix * sin;
     }
     // `handleOnClimbable`: паук на стене не разгоняется и не падает быстро.
@@ -1957,6 +1963,7 @@ pub fn dist2(a: [f64; 3], b: [f64; 3]) -> f64 {
 fn navigation_for(species: Species) -> Navigation {
     match species {
         Species::Cod | Species::Salmon | Species::GlowSquid => Navigation::water(false),
+        Species::Bat | Species::Phantom => Navigation::flying(),
         _ => Navigation::new(species == Species::Spider),
     }
 }
@@ -1978,8 +1985,12 @@ pub fn walker(m: &Mob, w: &World, difficulty: u8, in_water: bool) -> path::Walke
         step: m.species.info().step_height as f32,
         max_fall: path::max_fall_distance(m.target.is_some(), m.health, m.max_health(), difficulty),
         speed: m.move_speed as f32,
-        // `FloatGoal` ставит `setCanFloat(true)`: его нет у зомби и скелета.
-        can_float: !matches!(m.species, Species::Zombie | Species::Skeleton),
+        // `FloatGoal` ставит `setCanFloat(true)`: его нет у зомби, скелета,
+        // летучей мыши и фантома.
+        can_float: !matches!(
+            m.species,
+            Species::Zombie | Species::Skeleton | Species::Bat | Species::Phantom
+        ),
         can_open_doors: m.can_break_doors,
         can_pass_doors: true,
         can_walk_over_fences: false,
@@ -4761,5 +4772,48 @@ mod tests {
             );
         }
         assert!(m.pos[0] > 2.0, "did not swim: {:?}", m.pos);
+    }
+
+    /// Фантом (`FlyingPathNavigation` + `FlyingMoveControl`) летит по воздуху:
+    /// путь строится в 3D, `noGravity` включается управлением, высота держится.
+    #[test]
+    fn phantom_flies_along_path() {
+        let shape = |p: [i32; 3]| if p[1] < 64 { FULL } else { &[][..] };
+        let water = |_: [i32; 3]| false;
+        let w = World {
+            shape: &shape,
+            water: &water,
+            cell: None,
+            info: None,
+            min_y: -64,
+        };
+        let mut m = Mob::new(Species::Phantom, [0.5, 68.5, 0.5], 1);
+        m.on_ground = false;
+        m.goals = Selector::default();
+        m.targets = Selector::default();
+        let walk = walker(&m, &w, 2, false);
+        let found = m.nav.path_to(&w, &walk, [6.0, 68.0, 0.5], 1, 16.0);
+        assert!(found.is_some(), "no flying path");
+        assert!(m.nav.move_to(&w, &walk, found, 1.0));
+        let mut rnd = || 0.99;
+        let mut s = Senses {
+            players: &[],
+            rand: &mut rnd,
+            prey: &[],
+            tempters: &[],
+            kin: &[],
+            sight: &always_visible,
+            difficulty: 2,
+            entity_id: 1,
+            bright_outside: false,
+            mob_griefing: false,
+            jump_boost: None,
+        };
+        for _ in 0..200 {
+            tick(&mut m, &w, &mut s);
+            assert!((64.0..=72.0).contains(&m.pos[1]), "{:?}", m.pos);
+        }
+        assert!(m.no_gravity, "flying control must clear gravity");
+        assert!(m.pos[0] > 2.0, "did not fly: {:?}", m.pos);
     }
 }
