@@ -250,10 +250,10 @@ impl PlayPlan {
     fn plugin_velocity(&self, id: i32) -> Option<[f64; 3]> {
         {
             let arrows = self.sim().arrows.lock().unwrap();
-            if let Some(a) = arrows.get(&id) {
-                if matches!(a.entity_name(), "minecraft:arrow" | "minecraft:trident") {
-                    return Some(a.vel);
-                }
+            if let Some(a) = arrows.get(&id)
+                && matches!(a.entity_name(), "minecraft:arrow" | "minecraft:trident")
+            {
+                return Some(a.vel);
             }
         }
         if let Some(b) = self.sim().boats.lock().unwrap().get(&id) {
@@ -282,11 +282,11 @@ impl PlayPlan {
         let mut found = false;
         {
             let mut arrows = self.sim().arrows.lock().unwrap();
-            if let Some(a) = arrows.get_mut(&id) {
-                if matches!(a.entity_name(), "minecraft:arrow" | "minecraft:trident") {
-                    a.vel = vel;
-                    found = true;
-                }
+            if let Some(a) = arrows.get_mut(&id)
+                && matches!(a.entity_name(), "minecraft:arrow" | "minecraft:trident")
+            {
+                a.vel = vel;
+                found = true;
             }
         }
         if !found && let Some(b) = self.sim().boats.lock().unwrap().get_mut(&id) {

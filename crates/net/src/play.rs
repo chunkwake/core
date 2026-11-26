@@ -12678,6 +12678,7 @@ impl PlayPlan {
         self.explode_full(center, power, false, false, None, Some(species), true);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn explode_full(
         &self,
         center: [f64; 3],
