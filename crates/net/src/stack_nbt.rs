@@ -1312,6 +1312,7 @@ mod tests {
 
     #[test]
     fn base_color_round_trips_through_playerdata() {
+        components::set_banner_pattern_names(vec!["minecraft:stripe_bottom".into()]);
         let stack = Stack {
             extra: components::intern(Extra {
                 banner_patterns: vec![(0, 14)],
