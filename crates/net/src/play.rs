@@ -137,6 +137,7 @@ struct Ids {
     block_entity_data: i32,
     tag_query: i32,
     pong_response: i32,
+    select_advancements_tab: i32,
     block_destruction: i32,
     section_blocks_update: i32,
     block_changed_ack: i32,
@@ -152,6 +153,7 @@ struct Ids {
     sb_lock_difficulty: i32,
     sb_ping_request: i32,
     sb_set_game_rule: i32,
+    sb_seen_advancements: i32,
     sb_change_game_mode: i32,
     sb_set_carried_item: i32,
     sb_set_beacon: i32,
@@ -325,6 +327,8 @@ pub struct PlayPlan {
     love_cause: Mutex<FastMap<i32, Uuid>>,
     /// `ServerPlayer.seenCredits`: титры Края уже показаны.
     pub(crate) seen_credits: Mutex<HashSet<Uuid>>,
+    /// `PlayerAdvancements.lastSelectedTab`: выбранная вкладка достижений.
+    selected_tab: Mutex<FastMap<Uuid, String>>,
     /// `BukkitValues` игроков: PDC плагинов (`Player.getPersistentDataContainer`).
     bukkit_values: Mutex<FastMap<Uuid, chunkwake_world::nbt::Compound>>,
     /// Статистика по игрокам: (тип, значение) → счётчик.
@@ -3499,6 +3503,7 @@ impl PlayPlan {
                 block_entity_data: cb("block_entity_data")?,
                 tag_query: cb("tag_query")?,
                 pong_response: cb("pong_response")?,
+                select_advancements_tab: cb("select_advancements_tab")?,
                 block_destruction: cb("block_destruction")?,
                 section_blocks_update: cb("section_blocks_update")?,
                 block_changed_ack: cb("block_changed_ack")?,
@@ -3514,6 +3519,7 @@ impl PlayPlan {
                 sb_lock_difficulty: sb("lock_difficulty")?,
                 sb_ping_request: sb("ping_request")?,
                 sb_set_game_rule: sb("set_game_rule")?,
+                sb_seen_advancements: sb("seen_advancements")?,
                 sb_change_game_mode: sb("change_game_mode")?,
                 sb_set_carried_item: sb("set_carried_item")?,
                 sb_set_beacon: sb("set_beacon")?,
@@ -3664,6 +3670,7 @@ impl PlayPlan {
             nether_entry: Mutex::new(FastMap::default()),
             love_cause: Mutex::new(FastMap::default()),
             seen_credits: Mutex::new(HashSet::new()),
+            selected_tab: Mutex::new(FastMap::default()),
             bukkit_values: Mutex::new(FastMap::default()),
             stats: Mutex::new(FastMap::default()),
             advancement_progress: Mutex::new(FastMap::default()),
@@ -15736,6 +15743,49 @@ impl PlayPlan {
                                     for player in players {
                                         self.send_to(player, packet.clone());
                                     }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    if id == ids.sb_seen_advancements {
+                        // `handleSeenAdvancements`: только OPENED_TAB;
+                        // сервер подтверждает вкладку (корень с display).
+                        let action = r.var_int()?;
+                        if action == 0
+                            && let Ok(tab) = r.string(32767)
+                        {
+                            let key = tab.strip_prefix("minecraft:").unwrap_or(tab);
+                            if let Some(index) = self.advancement_index(key) {
+                                let new_tab = self
+                                    .survival
+                                    .advancements
+                                    .get(index)
+                                    .filter(|def| def.parent.is_none() && def.display.is_some())
+                                    .map(|def| format!("minecraft:{}", def.id));
+                                let changed = {
+                                    let mut selected = self.selected_tab.lock().unwrap();
+                                    let old = selected.get(&uuid).cloned();
+                                    if old == new_tab {
+                                        false
+                                    } else {
+                                        match &new_tab {
+                                            Some(tab) => {
+                                                selected.insert(uuid, tab.clone());
+                                            }
+                                            None => {
+                                                selected.remove(&uuid);
+                                            }
+                                        }
+                                        true
+                                    }
+                                };
+                                if changed {
+                                    conn.send(&play::select_advancements_tab(
+                                        ids.select_advancements_tab,
+                                        new_tab.as_deref(),
+                                    ))
+                                    .await?;
                                 }
                             }
                         }

@@ -1536,6 +1536,22 @@ pub fn pong_response(id: i32, payload: i64) -> Vec<u8> {
     w.buf
 }
 
+/// `ClientboundSelectAdvancementsTabPacket`: выбранная вкладка достижений
+/// или `None` (закрыть).
+pub fn select_advancements_tab(id: i32, tab: Option<&str>) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id);
+    match tab {
+        Some(tab) => {
+            w.bool(true).string(tab);
+        }
+        None => {
+            w.bool(false);
+        }
+    }
+    w.buf
+}
+
 /// `ClientboundBlockDestructionPacket`: трещины на блоке; стадия вне 0..=9 убирает их.
 pub fn block_destruction(id: i32, entity: i32, pos: [i32; 3], stage: i8) -> Vec<u8> {
     let mut w = Writer::new();
