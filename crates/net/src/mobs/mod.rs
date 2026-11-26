@@ -167,24 +167,41 @@ pub const IDLE_DESPAWN_TICKS: u32 = 600;
 /// `MobCategory`: лимит на 289 чанков и исчезает ли моб вдали от игроков.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Category {
-    Creature,
     Monster,
+    Creature,
+    Ambient,
+    Axolotls,
+    UndergroundWaterCreature,
+    WaterCreature,
+    WaterAmbient,
 }
 
 impl Category {
-    pub const ALL: [Category; 2] = [Category::Monster, Category::Creature];
+    /// Порядок как у `NaturalSpawner.SPAWNING_CATEGORIES` (без `MISC`).
+    pub const ALL: [Category; 7] = [
+        Category::Monster,
+        Category::Creature,
+        Category::Ambient,
+        Category::Axolotls,
+        Category::UndergroundWaterCreature,
+        Category::WaterCreature,
+        Category::WaterAmbient,
+    ];
 
     /// `MobCategory.getMaxInstancesPerChunk`.
     pub fn max(self) -> u32 {
         match self {
             Category::Monster => 70,
             Category::Creature => 10,
+            Category::Ambient => 15,
+            Category::Axolotls | Category::UndergroundWaterCreature | Category::WaterCreature => 5,
+            Category::WaterAmbient => 20,
         }
     }
 
-    /// `MobCategory.isPersistent` наоборот: существа не исчезают.
+    /// `MobCategory.isPersistent` наоборот: только существа не исчезают.
     pub fn despawns(self) -> bool {
-        self == Category::Monster
+        self != Category::Creature
     }
 
     /// Ключ в `spawns_by_category` биома.
@@ -192,7 +209,36 @@ impl Category {
         match self {
             Category::Monster => "monster",
             Category::Creature => "creature",
+            Category::Ambient => "ambient",
+            Category::Axolotls => "axolotls",
+            Category::UndergroundWaterCreature => "underground_water_creature",
+            Category::WaterCreature => "water_creature",
+            Category::WaterAmbient => "water_ambient",
         }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.key() == key)
+    }
+
+    /// `MobCategory.getDespawnDistance` (у `water_ambient` — 64).
+    pub fn despawn_distance(self) -> f64 {
+        if self == Category::WaterAmbient {
+            64.0
+        } else {
+            DESPAWN_DISTANCE
+        }
+    }
+
+    /// Категории с `SpawnPlacementTypes.IN_WATER` у всех ванильных видов.
+    pub fn is_water(self) -> bool {
+        matches!(
+            self,
+            Category::Axolotls
+                | Category::UndergroundWaterCreature
+                | Category::WaterCreature
+                | Category::WaterAmbient
+        )
     }
 }
 
@@ -250,6 +296,7 @@ pub enum Species {
     Parrot,
     Warden,
     Cat,
+    Bat,
 }
 
 /// Всё о виде в одном месте. Встроенные значения — запасные: при старте
@@ -322,7 +369,7 @@ const fn base(name: &'static str, sound: &'static str, loot: &'static str) -> Sp
 
 /// Встроенная таблица в порядке [`Species::ALL`]: числа из `createAttributes`
 /// и `EntityType` 26.3.
-const BUILTIN: [SpeciesInfo; 29] = [
+const BUILTIN: [SpeciesInfo; 30] = [
     SpeciesInfo {
         size: (0.9, 1.4),
         eye_height: 1.3,
@@ -486,6 +533,7 @@ const BUILTIN: [SpeciesInfo; 29] = [
         )
     },
     SpeciesInfo {
+        category: Category::WaterCreature,
         size: (0.5, 0.3),
         eye_height: 0.195,
         max_health: 3.0,
@@ -717,6 +765,19 @@ const BUILTIN: [SpeciesInfo; 29] = [
             "minecraft:entities/cat",
         )
     },
+    SpeciesInfo {
+        category: Category::Ambient,
+        size: (0.5, 0.9),
+        eye_height: 0.45,
+        max_health: 6.0,
+        speed: 0.7,
+        follow_range: 16.0,
+        ..base(
+            "minecraft:bat",
+            "minecraft:entity.bat",
+            "minecraft:entities/bat",
+        )
+    },
 ];
 
 static INSTALLED: std::sync::OnceLock<Vec<SpeciesInfo>> = std::sync::OnceLock::new();
@@ -736,10 +797,7 @@ fn merge(b: &SpeciesInfo, types: &[chunkwake_data::world::EntityTypeInfo]) -> Sp
     s.size = (f64::from(t.width), f64::from(t.height));
     s.eye_height = f64::from(t.eye_height);
     s.fire_immune = t.fire_immune;
-    s.category = match t.category.as_str() {
-        "monster" => Category::Monster,
-        _ => Category::Creature,
-    };
+    s.category = Category::from_key(&t.category).unwrap_or(Category::Creature);
     if let Some(a) = t.attributes {
         s.max_health = a.max_health as f32;
         s.speed = a.movement_speed;
@@ -753,7 +811,7 @@ fn merge(b: &SpeciesInfo, types: &[chunkwake_data::world::EntityTypeInfo]) -> Sp
 }
 
 impl Species {
-    pub const ALL: [Species; 29] = [
+    pub const ALL: [Species; 30] = [
         Species::Cow,
         Species::Pig,
         Species::Sheep,
@@ -783,6 +841,7 @@ impl Species {
         Species::Parrot,
         Species::Warden,
         Species::Cat,
+        Species::Bat,
     ];
 
     /// Данные вида: выгрузка, если она установлена, иначе встроенные.
@@ -2582,7 +2641,8 @@ pub fn check_despawn(m: &mut Mob, nearest: Option<f64>, peaceful: bool, r: f64) 
     let Some(d2) = nearest else {
         return false;
     };
-    if d2 > DESPAWN_DISTANCE * DESPAWN_DISTANCE {
+    let despawn = m.species.category().despawn_distance();
+    if d2 > despawn * despawn {
         return true;
     }
     let far = d2 > NO_DESPAWN_DISTANCE * NO_DESPAWN_DISTANCE;
@@ -2737,7 +2797,8 @@ pub fn spawn_packs(
                 break;
             };
             // `isValidSpawnPostitionForType`: исчезающие не дальше 128 блоков.
-            if species.category().despawns() && d2 > DESPAWN_DISTANCE * DESPAWN_DISTANCE {
+            let despawn = species.category().despawn_distance();
+            if species.category().despawns() && d2 > despawn * despawn {
                 continue;
             }
             if !fits(species, pos, d2) {
@@ -4239,6 +4300,23 @@ mod tests {
         assert_eq!(mob_cap(Category::Creature, 578), 20);
         assert_eq!(spawn_cap_chunks(&[(3, -2)]), 289);
         assert_eq!(mob_cap(Category::Monster, spawn_cap_chunks(&[(3, -2)])), 70);
+        // Категории из `MobCategory`, включая амбиент и воду.
+        assert_eq!(mob_cap(Category::Ambient, 289), 15);
+        assert_eq!(mob_cap(Category::WaterCreature, 289), 5);
+        assert_eq!(mob_cap(Category::WaterAmbient, 289), 20);
+        assert!(Category::Ambient.despawns());
+        assert!(Category::WaterCreature.despawns());
+        assert!(!Category::Creature.despawns());
+        assert!(Category::WaterCreature.is_water());
+        assert_eq!(Category::WaterAmbient.despawn_distance(), 64.0);
+        assert_eq!(Category::WaterCreature.despawn_distance(), 128.0);
+        assert_eq!(Category::ALL.len(), 7);
+        assert_eq!(
+            Category::from_key("underground_water_creature"),
+            Some(Category::UndergroundWaterCreature)
+        );
+        assert_eq!(Species::Bat.category(), Category::Ambient);
+        assert_eq!(Species::Cod.category(), Category::WaterCreature);
         // Соседние игроки делят квадраты: 17 × 18, а не 2 × 289.
         assert_eq!(spawn_cap_chunks(&[(0, 0), (1, 0)]), 306);
         assert_eq!(spawn_cap_chunks(&[]), 0);

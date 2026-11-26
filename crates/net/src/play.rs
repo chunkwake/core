@@ -3404,6 +3404,11 @@ pub struct SurvivalData {
     pub creature_spawns: Vec<CreatureSpawns>,
     /// Категория `monster` биомов по сетевому ID биома (`chance` не используется).
     pub monster_spawns: Vec<CreatureSpawns>,
+    pub ambient_spawns: Vec<CreatureSpawns>,
+    pub axolotl_spawns: Vec<CreatureSpawns>,
+    pub underground_water_spawns: Vec<CreatureSpawns>,
+    pub water_creature_spawns: Vec<CreatureSpawns>,
+    pub water_ambient_spawns: Vec<CreatureSpawns>,
     /// Коллизия и трение блоков; `None` — старый кэш без `shapes.csv`.
     pub physics: Option<Arc<chunkwake_data::world::BlockPhysics>>,
     /// Клетки поиска пути по id состояния (`path_types.csv`); `None` — по форме.

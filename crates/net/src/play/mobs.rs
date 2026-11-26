@@ -5813,9 +5813,6 @@ impl PlayPlan {
         let monsters =
             self.difficulty() != Difficulty::Peaceful && self.vars.flag("spawn_monsters");
         let creatures = now.rem_euclid(mb::CREATURE_SPAWN_PERIOD as i64) == 0;
-        if !monsters && !creatures {
-            return;
-        }
         let dim = self.active_dim();
         let players: Vec<[f64; 3]> = {
             let players = self.hub.players.lock().unwrap();
@@ -5843,11 +5840,8 @@ impl PlayPlan {
         if chunks.is_empty() {
             return;
         }
-        let slot = |c: mb::Category| match c {
-            mb::Category::Monster => 0,
-            mb::Category::Creature => 1,
-        };
-        let mut counts = [0usize; 2];
+        let slot = |c: mb::Category| c as usize;
+        let mut counts = [0usize; mb::Category::ALL.len()];
         for e in self.sim().mobs.lock().unwrap().values() {
             let m = &e.mob;
             let chunk = (
@@ -5882,13 +5876,16 @@ impl PlayPlan {
         chunks.shuffle(&mut rng);
         let mut plan: Vec<(Species, [i32; 3], bool)> = Vec::new();
         // `LocalMobCapCalculator` и `PotentialCalculator` живут один цикл спавна.
-        let mut local_counts = vec![[0u32; 2]; players.len()];
+        let mut local_counts = vec![[0u32; mb::Category::ALL.len()]; players.len()];
         let mut potential = mb::SpawnPotential::default();
         self.with_world(|w| {
             for cat in mb::Category::ALL {
                 let on = match cat {
                     mb::Category::Monster => monsters,
                     mb::Category::Creature => creatures,
+                    // `MobCategory.isFriendly`/`isPersistent`: амбиент и
+                    // водные категории идут каждый тик, существа — раз в 400.
+                    _ => true,
                 };
                 if !on {
                     continue;
@@ -5983,6 +5980,11 @@ impl PlayPlan {
         let table = match cat {
             mb::Category::Monster => &self.survival.monster_spawns,
             mb::Category::Creature => &self.survival.creature_spawns,
+            mb::Category::Ambient => &self.survival.ambient_spawns,
+            mb::Category::Axolotls => &self.survival.axolotl_spawns,
+            mb::Category::UndergroundWaterCreature => &self.survival.underground_water_spawns,
+            mb::Category::WaterCreature => &self.survival.water_creature_spawns,
+            mb::Category::WaterAmbient => &self.survival.water_ambient_spawns,
         };
         let spawns = self.biome_in(w, start).and_then(|b| table.get(b as usize));
         let entries: Vec<mb::SpawnEntry> = spawns
@@ -6057,6 +6059,10 @@ impl PlayPlan {
         {
             return false;
         }
+        // `SpawnPlacementTypes.IN_WATER`: другая ветка правил, без опоры.
+        if species.category().is_water() {
+            return self.water_spawn_fits(w, species, pos);
+        }
         let below = [pos[0], pos[1] - 1, pos[2]];
         let Some(floor) = w.block(below) else {
             return false;
@@ -6084,6 +6090,25 @@ impl PlayPlan {
         }
         let sky = w.sky_light_at(pos).unwrap_or(0);
         let block = w.block_light_at(pos).unwrap_or(0);
+        // `Bat.checkBatSpawnRules`: ниже поверхности, 50 %, не ярче
+        // `nextInt(4)`, опора из `#minecraft:bats_spawnable_on`.
+        if species.category() == mb::Category::Ambient {
+            let Some(surface) = self.surface_y(w, pos[0], pos[2]) else {
+                return false;
+            };
+            if pos[1] >= surface || rng.r#gen::<bool>() {
+                return false;
+            }
+            let raw = i32::from(mb::raw_brightness(sky, block, light.darken));
+            if raw > rng.gen_range(0..4) {
+                return false;
+            }
+            return self
+                .survival
+                .block_tags
+                .get("minecraft:bats_spawnable_on")
+                .is_some_and(|tags| tags.contains(self.state_name(floor)));
+        }
         // `Slime.checkSlimeSpawnRules`: темнота не нужна. Болото на высоте
         // 51–69 — по шансу луны и свету; иначе слизневый чанк ниже y 40.
         if species == Species::Slime {
@@ -6127,7 +6152,39 @@ impl PlayPlan {
                 chunkwake_world::has_flag(floor, chunkwake_world::flags::GRASS)
                     && mb::bright_enough(sky, block)
             }
+            _ => false,
         }
+    }
+
+    /// `WaterAnimal.checkSurfaceWaterAnimalSpawnRules` + `IN_WATER`: y в
+    /// `[sea-13, sea]`, вода в клетке и снизу, над клеткой — вода, рамка свободна.
+    fn water_spawn_fits(&self, w: &WorldView<'_>, species: Species, pos: [i32; 3]) -> bool {
+        let sea = self.login.spawn.sea_level;
+        if pos[1] < sea - 13 || pos[1] > sea {
+            return false;
+        }
+        let water = |p: [i32; 3]| {
+            self.block(p)
+                .and_then(|s| crate::fluids::state_fluid(&self.survival.placement, s))
+                .is_some_and(|f| f.kind == crate::fluids::Kind::Water)
+        };
+        if !water(pos) || !water([pos[0], pos[1] - 1, pos[2]]) {
+            return false;
+        }
+        if self
+            .block([pos[0], pos[1] + 1, pos[2]])
+            .is_none_or(|s| self.state_name(s) != "minecraft:water")
+        {
+            return false;
+        }
+        let feet = [
+            f64::from(pos[0]) + 0.5,
+            f64::from(pos[1]),
+            f64::from(pos[2]) + 0.5,
+        ];
+        let (width, height) = species.size();
+        let shape = |c: [i32; 3]| self.shape_at(w.block(c), c);
+        mb::box_free(feet, width, height, &shape)
     }
 
     /// Верхний не воздушный блок столбца (карта высот `WORLD_SURFACE`).

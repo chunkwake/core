@@ -1311,6 +1311,11 @@ fn survival_data(
             .collect::<Result<_, _>>()?,
         creature_spawns: biome_spawns(data_dir, registries, "creature"),
         monster_spawns: biome_spawns(data_dir, registries, "monster"),
+        ambient_spawns: biome_spawns(data_dir, registries, "ambient"),
+        axolotl_spawns: biome_spawns(data_dir, registries, "axolotls"),
+        underground_water_spawns: biome_spawns(data_dir, registries, "underground_water_creature"),
+        water_creature_spawns: biome_spawns(data_dir, registries, "water_creature"),
+        water_ambient_spawns: biome_spawns(data_dir, registries, "water_ambient"),
         physics: chunkwake_data::world::load_physics(data_dir)
             .ok()
             .map(std::sync::Arc::new),

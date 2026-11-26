@@ -17,6 +17,7 @@ final class MobSpeciesTest {
         assertEquals("iron_golem", MobImpl.species(EntityType.IRON_GOLEM));
         assertEquals("ender_dragon", MobImpl.species(EntityType.ENDER_DRAGON));
         assertEquals("cat", MobImpl.species(EntityType.CAT));
+        assertEquals("bat", MobImpl.species(EntityType.BAT));
         assertEquals("wolf", MobImpl.species(Wolf.class));
     }
 
