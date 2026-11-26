@@ -442,6 +442,56 @@ impl PlayPlan {
                 }
                 Dispensed::Done
             }
+            // `$3`: `MobBucketItem` — вода в клетку, затем моб
+            // (`checkExtraContent`), ведро возвращается пустым. Некуда лить —
+            // выброс внутренним `dispense`.
+            n @ ("minecraft:cod_bucket"
+            | "minecraft:salmon_bucket"
+            | "minecraft:pufferfish_bucket"
+            | "minecraft:tropical_fish_bucket"
+            | "minecraft:axolotl_bucket"
+            | "minecraft:tadpole_bucket"
+            | "minecraft:sulfur_cube_bucket") => {
+                let Some((mob, sound, water)) = mob_bucket(n) else {
+                    return Some(Dispensed::Drop);
+                };
+                // Вид ещё не заведён в сервере: выбрасываем ведро, а не
+                // тратим его на воду без моба.
+                let Some(species) = crate::mobs::Species::from_name(mob) else {
+                    return Some(Dispensed::Drop);
+                };
+                if water {
+                    let s = front_state?;
+                    // `BucketItem.emptyContents`: водалоггинг, воздух или
+                    // заменяемый блок, иначе ведро вылетает.
+                    if !self.waterloggable(front) && !(empty || self.fluid_replaceable_of(s)) {
+                        return Some(Dispensed::DropTwice);
+                    }
+                    self.pour(front, fl::Kind::Water);
+                }
+                let at = [
+                    front[0] as f64 + 0.5,
+                    front[1] as f64 + 0.5,
+                    front[2] as f64 + 0.5,
+                ];
+                self.play_sound(None, sound, crate::sounds::NEUTRAL, at, 1.0, 1.0);
+                self.spawn_mob(
+                    species,
+                    [
+                        front[0] as f64 + 0.5,
+                        front[1] as f64,
+                        front[2] as f64 + 0.5,
+                    ],
+                    0.0,
+                    false,
+                    Some("BUCKET"),
+                );
+                self.emit_vibration(at, "minecraft:entity_place");
+                if let Some(rest) = plain("minecraft:bucket") {
+                    self.dispense_remainder(me, i, st, rest, disp, facing);
+                }
+                Dispensed::Done
+            }
             // `$3`, полное ведро: льёт [`PlayPlan::dispense_special`]; некуда —
             // выброс внутренним `dispense` (двойной щелчок).
             "minecraft:water_bucket" | "minecraft:lava_bucket" => {
@@ -497,5 +547,72 @@ impl PlayPlan {
             }
             _ => return None,
         })
+    }
+}
+
+/// `MobBucketItem`: имя моба, звук пустого ведра (`playEmptySound`) и
+/// ставит ли ведро воду (`BucketItem.emptyContents`). У серного куба
+/// содержимое `Fluids.EMPTY`, поэтому вода не ставится.
+fn mob_bucket(item: &str) -> Option<(&'static str, &'static str, bool)> {
+    Some(match item {
+        "minecraft:cod_bucket" => ("minecraft:cod", "minecraft:item.bucket.empty_fish", true),
+        "minecraft:salmon_bucket" => ("minecraft:salmon", "minecraft:item.bucket.empty_fish", true),
+        "minecraft:pufferfish_bucket" => (
+            "minecraft:pufferfish",
+            "minecraft:item.bucket.empty_fish",
+            true,
+        ),
+        "minecraft:tropical_fish_bucket" => (
+            "minecraft:tropical_fish",
+            "minecraft:item.bucket.empty_fish",
+            true,
+        ),
+        "minecraft:axolotl_bucket" => (
+            "minecraft:axolotl",
+            "minecraft:item.bucket.empty_axolotl",
+            true,
+        ),
+        "minecraft:tadpole_bucket" => (
+            "minecraft:tadpole",
+            "minecraft:item.bucket.empty_tadpole",
+            true,
+        ),
+        "minecraft:sulfur_cube_bucket" => (
+            "minecraft:sulfur_cube",
+            "minecraft:item.bucket.empty_sulfur_cube",
+            false,
+        ),
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `MobBucketItem`: рыба ставит воду, серный куб — нет.
+    #[test]
+    fn mob_bucket_contents_match_vanilla() {
+        assert_eq!(
+            mob_bucket("minecraft:cod_bucket"),
+            Some(("minecraft:cod", "minecraft:item.bucket.empty_fish", true))
+        );
+        assert_eq!(
+            mob_bucket("minecraft:axolotl_bucket"),
+            Some((
+                "minecraft:axolotl",
+                "minecraft:item.bucket.empty_axolotl",
+                true
+            ))
+        );
+        assert_eq!(
+            mob_bucket("minecraft:sulfur_cube_bucket"),
+            Some((
+                "minecraft:sulfur_cube",
+                "minecraft:item.bucket.empty_sulfur_cube",
+                false
+            ))
+        );
+        assert_eq!(mob_bucket("minecraft:water_bucket"), None);
     }
 }
