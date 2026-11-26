@@ -5881,6 +5881,9 @@ impl PlayPlan {
         let mut rng = rand::thread_rng();
         chunks.shuffle(&mut rng);
         let mut plan: Vec<(Species, [i32; 3], bool)> = Vec::new();
+        // `LocalMobCapCalculator` и `PotentialCalculator` живут один цикл спавна.
+        let mut local_counts = vec![[0u32; 2]; players.len()];
+        let mut potential = mb::SpawnPotential::default();
         self.with_world(|w| {
             for cat in mb::Category::ALL {
                 let on = match cat {
@@ -5895,7 +5898,22 @@ impl PlayPlan {
                     if counts[slot(cat)] >= cap {
                         break;
                     }
-                    let found = self.spawn_in_chunk(w, cat, chunk, light, &players);
+                    // `SpawnState.canSpawnForCategoryLocal`: достаточно одного
+                    // nearby-игрока, у которого категория ещё не на лимите.
+                    let near_counts: Vec<u32> = mb::players_near_chunk(&players, chunk)
+                        .into_iter()
+                        .map(|i| local_counts[i][slot(cat)])
+                        .collect();
+                    if !mb::local_cap_allows(&near_counts, cat.max()) {
+                        continue;
+                    }
+                    let found = self.spawn_in_chunk(w, cat, chunk, light, &players, &mut potential);
+                    for &(_, at, _) in &found {
+                        let mob_chunk = (at[0] >> 4, at[2] >> 4);
+                        for i in mb::players_near_chunk(&players, mob_chunk) {
+                            local_counts[i][slot(cat)] += 1;
+                        }
+                    }
                     counts[slot(cat)] += found.len();
                     plan.extend(found);
                 }
@@ -5944,6 +5962,7 @@ impl PlayPlan {
         (cx, cz): (i32, i32),
         light: SpawnLight,
         players: &[[f64; 3]],
+        potential: &mut mb::SpawnPotential,
     ) -> Vec<(Species, [i32; 3], bool)> {
         use rand::Rng;
         let mut rng = rand::thread_rng();
@@ -5965,9 +5984,8 @@ impl PlayPlan {
             mb::Category::Monster => &self.survival.monster_spawns,
             mb::Category::Creature => &self.survival.creature_spawns,
         };
-        let entries: Vec<mb::SpawnEntry> = self
-            .biome_in(w, start)
-            .and_then(|b| table.get(b as usize))
+        let spawns = self.biome_in(w, start).and_then(|b| table.get(b as usize));
+        let entries: Vec<mb::SpawnEntry> = spawns
             .map(|b| {
                 b.entries
                     .iter()
@@ -5980,6 +5998,7 @@ impl PlayPlan {
                     .collect()
             })
             .unwrap_or_default();
+        let costs = spawns.map_or(&[][..], |b| b.costs.as_slice());
         if entries.iter().all(|e| e.species.is_none()) {
             return Vec::new();
         }
@@ -5996,7 +6015,21 @@ impl PlayPlan {
         };
         let mut fit_rng = rand::thread_rng();
         let mut fits = |species: Species, pos: [i32; 3], _: f64| {
-            self.spawn_fits(w, species, pos, light, &mut fit_rng)
+            if !self.spawn_fits(w, species, pos, light, &mut fit_rng) {
+                return false;
+            }
+            // `SpawnState.canSpawn`: заряд моба в биоме должен оставить
+            // потенциальную энергию в пределах `energy_budget`.
+            if let Some((_, budget, charge)) =
+                costs.iter().find(|(name, _, _)| name == species.name())
+            {
+                let charge = *charge;
+                if potential.energy(pos, charge) > *budget {
+                    return false;
+                }
+                potential.add(pos, charge);
+            }
+            true
         };
         let mut roll = || rng.r#gen::<f64>();
         mb::spawn_packs(start, &entries, &mut nearest, &mut fits, &mut roll)

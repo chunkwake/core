@@ -1350,6 +1350,25 @@ fn survival_data(
     Ok(survival)
 }
 
+/// `spawn_costs` из `minecraft:gameplay/natural_mob_spawns.argument`.
+fn biome_spawn_costs(attrs: &serde_json::Value) -> Vec<(String, f64, f64)> {
+    attrs["minecraft:gameplay/natural_mob_spawns"]["argument"]["spawn_costs"]
+        .as_object()
+        .map(|costs| {
+            costs
+                .iter()
+                .filter_map(|(name, cost)| {
+                    Some((
+                        name.clone(),
+                        cost["energy_budget"].as_f64()?,
+                        cost["charge"].as_f64()?,
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Мобы биомов категории `category` (`creature`, `monster`): заселение новых
 /// чанков и естественный спавн по тику.
 fn biome_spawns(
@@ -1394,7 +1413,12 @@ fn biome_spawns(
                     Some((kind, weight, lo, hi))
                 })
                 .collect();
-            chunkwake_net::play::CreatureSpawns { chance, entries }
+            let costs = biome_spawn_costs(attrs);
+            chunkwake_net::play::CreatureSpawns {
+                chance,
+                entries,
+                costs,
+            }
         })
         .collect()
 }
@@ -1905,6 +1929,24 @@ mod tests {
         for index in 0..8 {
             assert_eq!(states.get(&(index as u32)).unwrap().copper, index as u8 + 1);
         }
+    }
+
+    #[test]
+    fn biome_spawn_costs_are_read_from_natural_mob_spawns() {
+        let attrs = serde_json::json!({
+            "minecraft:gameplay/natural_mob_spawns": {
+                "argument": {
+                    "spawn_costs": {
+                        "minecraft:ghast": {"charge": 0.7, "energy_budget": 0.15}
+                    }
+                }
+            }
+        });
+        assert_eq!(
+            super::biome_spawn_costs(&attrs),
+            vec![("minecraft:ghast".to_owned(), 0.15, 0.7)]
+        );
+        assert!(super::biome_spawn_costs(&serde_json::json!({})).is_empty());
     }
 
     #[test]

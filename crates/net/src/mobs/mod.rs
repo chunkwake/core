@@ -2627,6 +2627,61 @@ pub fn pick_entry(entries: &[SpawnEntry], r: f64) -> Option<SpawnEntry> {
 /// Максимум мобов за один заход в чанк (`Mob.getMaxSpawnClusterSize`).
 pub const MAX_CLUSTER: u32 = 4;
 
+/// `PotentialCalculator`: накопленный заряд мобов за цикл спавна.
+#[derive(Clone, Debug, Default)]
+pub struct SpawnPotential {
+    charges: Vec<([i32; 3], f64)>,
+}
+
+impl SpawnPotential {
+    /// `PotentialCalculator.getPotentialEnergyChange` (заряд моба — множитель).
+    pub fn energy(&self, pos: [i32; 3], charge: f64) -> f64 {
+        if charge == 0.0 {
+            return 0.0;
+        }
+        let mut sum = 0.0;
+        for &(other, value) in &self.charges {
+            let d = dist_sqr(other, pos);
+            if d == 0.0 {
+                return f64::INFINITY;
+            }
+            sum += value / d.sqrt();
+        }
+        sum * charge
+    }
+
+    pub fn add(&mut self, pos: [i32; 3], charge: f64) {
+        if charge != 0.0 {
+            self.charges.push((pos, charge));
+        }
+    }
+}
+
+fn dist_sqr(a: [i32; 3], b: [i32; 3]) -> f64 {
+    let dx = f64::from(a[0] - b[0]);
+    let dy = f64::from(a[1] - b[1]);
+    let dz = f64::from(a[2] - b[2]);
+    dx * dx + dy * dy + dz * dz
+}
+
+/// `ChunkMap.playerIsCloseEnoughForSpawning`: центр чанка и строго меньше
+/// 128² по XZ. Игроки без `collects` (наблюдатели, мёртвые) не попадают.
+pub fn players_near_chunk(players: &[[f64; 3]], (cx, cz): (i32, i32)) -> Vec<usize> {
+    let (x, z) = (f64::from(cx * 16 + 8), f64::from(cz * 16 + 8));
+    players
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| (p[0] - x).powi(2) + (p[2] - z).powi(2) < 16384.0)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// `LocalMobCapCalculator.MobCounts.canSpawn`: хотя бы у одного nearby-игрока
+/// счётчик категории меньше `MobCategory.maxInstancesPerChunk`.
+pub fn local_cap_allows(counts: &[u32], max: u32) -> bool {
+    counts.iter().any(|&c| c < max)
+}
+
 /// `NaturalSpawner.spawnCategoryForPosition`: три группы от точки `start`,
 /// в каждой до `ceil(4·r)` шагов со сдвигом `nextInt(6) − nextInt(6)` по X и Z;
 /// вид выбирается на первом подходящем шаге, и тогда число шагов становится
@@ -4187,6 +4242,25 @@ mod tests {
         // Соседние игроки делят квадраты: 17 × 18, а не 2 × 289.
         assert_eq!(spawn_cap_chunks(&[(0, 0), (1, 0)]), 306);
         assert_eq!(spawn_cap_chunks(&[]), 0);
+    }
+
+    /// `PotentialCalculator` и локальный лимит на игрока.
+    #[test]
+    fn spawn_potential_and_local_caps_match_vanilla() {
+        let mut potential = SpawnPotential::default();
+        assert_eq!(potential.energy([0, 0, 0], 1.0), 0.0);
+        potential.add([0, 0, 0], 2.0);
+        assert!(potential.energy([0, 0, 0], 1.0).is_infinite());
+        assert!((potential.energy([4, 0, 0], 1.0) - 0.5).abs() < 1e-9);
+        assert!((potential.energy([4, 0, 0], 2.0) - 1.0).abs() < 1e-9);
+
+        assert!(local_cap_allows(&[69, 70], 70));
+        assert!(!local_cap_allows(&[70, 70], 70));
+        assert!(!local_cap_allows(&[10], 10));
+
+        // Центр чанка (8, 8); 128 блоков — строго меньше.
+        let players = [[8.0, 0.0, 8.0], [136.0, 0.0, 8.0], [135.0, 64.0, 8.0]];
+        assert_eq!(players_near_chunk(&players, (0, 0)), vec![0, 2]);
     }
 
     #[test]

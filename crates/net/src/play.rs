@@ -3436,6 +3436,8 @@ pub struct CreatureSpawns {
     pub chance: f32,
     /// Вид, вес, размер группы от и до.
     pub entries: Vec<(String, u32, u32, u32)>,
+    /// `spawn_costs`: вид, `energy_budget`, `charge`.
+    pub costs: Vec<(String, f64, f64)>,
 }
 
 struct ToggleAction {
