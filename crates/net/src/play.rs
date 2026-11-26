@@ -23483,6 +23483,56 @@ impl PlayPlan {
                 crate::hoppers::take_one(&mut me.slots, i);
                 Some(true)
             }
+            // `ShulkerBoxDispenseBehavior`: шалкер ставится блоком в клетку
+            // перед раздатчиком. Под клеткой пусто — настенный (`facing`),
+            // иначе крышкой вверх (`facing=up`). Некуда — осечка, предмет
+            // остаётся в раздатчике (не выброс).
+            n if n.ends_with("shulker_box") => {
+                if !open {
+                    return Some(false);
+                }
+                let Some(base) = self.survival.block_defaults.get(n) else {
+                    return Some(false);
+                };
+                let below = self
+                    .block([front[0], front[1] - 1, front[2]])
+                    .map(|s| self.state_name(s));
+                let wall = matches!(
+                    below,
+                    Some("minecraft:air" | "minecraft:cave_air" | "minecraft:void_air")
+                );
+                let dir = if wall { facing } else { 1 }; // 1 — `up`.
+                let state = self
+                    .survival
+                    .placement
+                    .with_prop(*base, "facing", crate::redstone::DIRS[dir])
+                    .unwrap_or(*base);
+                self.set_block(front, state);
+                let sound = crate::sounds::place_sound(n, |s| self.survival.sounds.contains_key(s));
+                self.block_sound(None, &sound, front, 1.0, 0.8);
+                self.emit_vibration(front.map(|v| v as f64 + 0.5), "minecraft:block_place");
+                // `BlockItem.updateBlockEntityComponents`: CustomName и `container`.
+                let e = chunkwake_protocol::components::get(st.extra);
+                let mut nbt = Compound::new();
+                if let Some(name) = &e.custom_name {
+                    nbt.insert(
+                        "CustomName".into(),
+                        crate::stack_nbt::json_to_tag(&crate::stack_nbt::text_json(name)),
+                    );
+                }
+                self.set_block_entity(
+                    front,
+                    Some(BlockEntity {
+                        id: "minecraft:shulker_box".into(),
+                        nbt,
+                    }),
+                );
+                if !e.container.is_empty() {
+                    self.set_container_slots(front, &e.container);
+                }
+                crate::hoppers::take_one(&mut me.slots, i);
+                Some(true)
+            }
             // Броня (`EquipmentDispenseItemBehavior`): на игрока перед раздатчиком в пустой слот.
             n if crate::arrows::armor_slot(n).is_some() => {
                 let slot = crate::arrows::armor_slot(n)?;
