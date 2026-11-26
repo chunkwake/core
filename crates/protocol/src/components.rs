@@ -22,6 +22,8 @@ pub struct Extra {
     pub trim: Option<(i32, i32)>,
     /// Слои знамени: сетевой ID узора и ID цвета.
     pub banner_patterns: Vec<(i32, i32)>,
+    /// `minecraft:base_color`: цвет основы знамени/щита (`DyeColor`).
+    pub base_color: Option<i32>,
     /// Число страниц книги (для лектора): по [`Extra::book`] или по сырому патчу.
     pub book_pages: Option<i32>,
     /// `writable_book_content` или `written_book_content`.
@@ -138,6 +140,7 @@ impl Extra {
             && self.repair_cost == 0
             && self.trim.is_none()
             && self.banner_patterns.is_empty()
+            && self.base_color.is_none()
             && self.book_pages.is_none()
             && self.book.is_none()
             && self.lore.is_empty()
@@ -240,6 +243,8 @@ pub static CONTAINER_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static REPAIR_COST_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static TRIM_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static BANNER_PATTERNS_COMPONENT: AtomicI32 = AtomicI32::new(-1);
+/// `minecraft:base_color`: цвет основы знамени/щита.
+pub static BASE_COLOR_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static WRITTEN_BOOK_CONTENT_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static WRITABLE_BOOK_CONTENT_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static FIREWORKS_COMPONENT: AtomicI32 = AtomicI32::new(-1);

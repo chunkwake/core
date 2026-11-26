@@ -88,6 +88,14 @@ pub fn named_nbt(
             banner_layers_to_tag(&e.banner_patterns),
         );
     }
+    if let Some(color) = e.base_color
+        && let Some(name) = components::DYE_COLORS.get(color as usize)
+    {
+        comps.insert(
+            "minecraft:base_color".into(),
+            Tag::String((*name).to_owned()),
+        );
+    }
     if !e.enchantments.is_empty() {
         let levels: Compound = e
             .enchantments
@@ -294,6 +302,15 @@ fn from_nbt_ref(c: &Compound, item_id: &dyn Fn(&str) -> Option<i32>, depth: u32)
         if let Some(layers) = m.get("minecraft:banner_patterns") {
             e.banner_patterns = banner_layers_from_tag(layers);
         }
+        e.base_color = m
+            .get("minecraft:base_color")
+            .and_then(Tag::as_str)
+            .and_then(|name| {
+                components::DYE_COLORS
+                    .iter()
+                    .position(|&c| c == name)
+                    .map(|i| i as i32)
+            });
         s.damage = m
             .get("minecraft:damage")
             .and_then(Tag::as_i64)
@@ -641,6 +658,11 @@ pub fn to_line(s: Stack, name: &str) -> String {
             .collect();
         j.insert("banner_patterns".into(), Value::Array(layers));
     }
+    if let Some(color) = e.base_color
+        && let Some(name) = components::DYE_COLORS.get(color as usize)
+    {
+        j.insert("base_color".into(), Value::from(*name));
+    }
     if !e.enchantments.is_empty() {
         let levels = e
             .enchantments
@@ -789,6 +811,15 @@ pub fn from_line(line: &str, item_id: impl Fn(&str) -> Option<i32>) -> Option<St
                 })
                 .collect();
         }
+        e.base_color = j
+            .get("base_color")
+            .and_then(Value::as_str)
+            .and_then(|name| {
+                components::DYE_COLORS
+                    .iter()
+                    .position(|&c| c == name)
+                    .map(|i| i as i32)
+            });
         if let Some(Value::Object(levels)) = j.get("enchantments") {
             for (name, lvl) in levels {
                 if let (Some(id), Some(lvl)) = (components::enchantment_id(name), lvl.as_i64()) {
@@ -1148,6 +1179,21 @@ mod tests {
     }
 
     #[test]
+    fn base_color_round_trips_through_playerdata() {
+        let stack = Stack {
+            extra: components::intern(Extra {
+                banner_patterns: vec![(0, 14)],
+                base_color: Some(14),
+                ..Default::default()
+            }),
+            ..Stack::new(7, 1)
+        };
+        let nbt = to_nbt(stack, "minecraft:red_banner").unwrap();
+        let back = from_nbt(&nbt, |n| (n == "minecraft:red_banner").then_some(7)).unwrap();
+        assert_eq!(back, stack);
+    }
+
+    #[test]
     fn book_page_count_survives_playerdata_and_lectern_nbt() {
         let stack = Stack {
             extra: components::intern(Extra {
@@ -1351,6 +1397,7 @@ mod tests {
             repair_cost: 5,
             trim: None,
             banner_patterns: Vec::new(),
+            base_color: None,
             book_pages: None,
             book: None,
             lore: vec![r#""строка""#.into()],

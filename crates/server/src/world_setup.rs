@@ -847,6 +847,7 @@ fn survival_data(
         c::REPAIR_COST_COMPONENT.store(component("minecraft:repair_cost")?, order);
         c::TRIM_COMPONENT.store(component("minecraft:trim")?, order);
         c::BANNER_PATTERNS_COMPONENT.store(component("minecraft:banner_patterns")?, order);
+        c::BASE_COLOR_COMPONENT.store(component("minecraft:base_color")?, order);
         c::WRITTEN_BOOK_CONTENT_COMPONENT
             .store(component("minecraft:written_book_content")?, order);
         c::WRITABLE_BOOK_CONTENT_COMPONENT

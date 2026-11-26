@@ -19484,6 +19484,21 @@ impl PlayPlan {
             .copy_from
             .and_then(|i| grid.get(i).copied().flatten());
         let mut extra = base.map_or(0, |b| b.extra);
+        if let Some(slot) = special.banner_slot
+            && let Some(target) = base
+            && let Some(banner) = grid.get(slot).copied().flatten()
+        {
+            let mut e = (*chunkwake_protocol::components::get(target.extra)).clone();
+            // `ShieldDecorationRecipe.matches`: у щита ещё нет узоров.
+            if !e.banner_patterns.is_empty() {
+                return None;
+            }
+            e.banner_patterns = chunkwake_protocol::components::get(banner.extra)
+                .banner_patterns
+                .clone();
+            e.base_color = banners::banner_color(self.item_name(banner.item)).map(i32::from);
+            extra = chunkwake_protocol::components::intern(e);
+        }
         if let Some(slot) = special.dye_slot
             && let Some(dye) = grid.get(slot).copied().flatten()
             && let Some(rgb) = dye_color(self.item_name(dye.item))

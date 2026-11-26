@@ -228,10 +228,12 @@ fn write_patch(w: &mut Writer, s: &Stack) {
     if let Some(raw) = &e.raw {
         let trim_id = id_of(&crate::components::TRIM_COMPONENT);
         let banner_id = id_of(&crate::components::BANNER_PATTERNS_COMPONENT);
+        let base_id = id_of(&crate::components::BASE_COLOR_COMPONENT);
         let trim = e.trim.filter(|_| trim_id >= 0);
         let banner =
             (!e.banner_patterns.is_empty() && banner_id >= 0).then_some(&e.banner_patterns);
-        if trim.is_some() || banner.is_some() {
+        let base = e.base_color.filter(|_| base_id >= 0);
+        if trim.is_some() || banner.is_some() || base.is_some() {
             let mut r = Reader::new(raw);
             if let (Ok(added), Ok(removed)) = (r.var_int(), r.var_int())
                 && added >= 0
@@ -262,6 +264,10 @@ fn write_patch(w: &mut Writer, s: &Stack) {
                         if !ok {
                             break;
                         }
+                    } else if kind == base_id && base.is_some() {
+                        if probe.var_int().is_err() {
+                            break;
+                        }
                     } else {
                         break;
                     }
@@ -269,7 +275,10 @@ fn write_patch(w: &mut Writer, s: &Stack) {
                     skipped += 1;
                 }
                 w.var_int(
-                    added - skipped + i32::from(trim.is_some()) + i32::from(banner.is_some()),
+                    added - skipped
+                        + i32::from(trim.is_some())
+                        + i32::from(banner.is_some())
+                        + i32::from(base.is_some()),
                 )
                 .var_int(removed);
                 if let Some((material, pattern)) = trim {
@@ -282,6 +291,9 @@ fn write_patch(w: &mut Writer, s: &Stack) {
                     for &(pattern, color) in layers {
                         w.var_int(pattern.saturating_add(1)).var_int(color);
                     }
+                }
+                if let Some(color) = base {
+                    w.var_int(base_id).var_int(color);
                 }
                 w.buf.extend_from_slice(&raw[tail..]);
                 return;
@@ -324,6 +336,7 @@ fn write_patch(w: &mut Writer, s: &Stack) {
         e.custom_model_data.is_some()
             && id_of(&crate::components::CUSTOM_MODEL_DATA_COMPONENT) >= 0,
         e.unbreakable && id_of(&crate::components::UNBREAKABLE_COMPONENT) >= 0,
+        e.base_color.is_some() && id_of(&crate::components::BASE_COLOR_COMPONENT) >= 0,
     ];
 
     w.var_int(parts.iter().filter(|&&p| p).count() as i32)
@@ -470,6 +483,10 @@ fn write_patch(w: &mut Writer, s: &Stack) {
         // Unbreakable — unit-компонент: только тип, без данных.
         w.var_int(id_of(&crate::components::UNBREAKABLE_COMPONENT));
     }
+    if let (true, Some(color)) = (parts[25], e.base_color) {
+        w.var_int(id_of(&crate::components::BASE_COLOR_COMPONENT))
+            .var_int(color);
+    }
 }
 
 /// Номер компонента книги в реестре; -1 — нет книги или реестр не задан.
@@ -606,6 +623,11 @@ fn read_stack_tail(r: &mut Reader, item: i32, count: i32, depth: u8) -> Result<S
                 if pattern > 0 && (0..16).contains(&color) {
                     e.banner_patterns.push((pattern - 1, color));
                 }
+            }
+        } else if t == id_of(&crate::components::BASE_COLOR_COMPONENT) {
+            let color = r.var_int()?;
+            if (0..16).contains(&color) {
+                e.base_color = Some(color);
             }
         } else if t == id_of(&crate::components::WRITTEN_BOOK_CONTENT_COMPONENT)
             || t == id_of(&crate::components::WRITABLE_BOOK_CONTENT_COMPONENT)
@@ -878,6 +900,7 @@ fn read_untrusted_stack(r: &mut Reader) -> Result<Slot> {
         let payload = r.bytes(len as usize)?;
         if kind != id_of(&crate::components::TRIM_COMPONENT)
             && kind != id_of(&crate::components::BANNER_PATTERNS_COMPONENT)
+            && kind != id_of(&crate::components::BASE_COLOR_COMPONENT)
         {
             raw_added += 1;
             patch.var_int(kind);
@@ -936,6 +959,12 @@ fn read_untrusted_stack(r: &mut Reader) -> Result<Slot> {
                 if pattern > 0 && (0..16).contains(&color) {
                     e.banner_patterns.push((pattern - 1, color));
                 }
+            }
+        } else if kind == id_of(&crate::components::BASE_COLOR_COMPONENT)
+            && let Ok(color) = body.var_int()
+        {
+            if (0..16).contains(&color) {
+                e.base_color = Some(color);
             }
         } else if kind == id_of(&crate::components::WRITTEN_BOOK_CONTENT_COMPONENT)
             || kind == id_of(&crate::components::WRITABLE_BOOK_CONTENT_COMPONENT)

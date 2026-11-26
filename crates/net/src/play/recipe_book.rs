@@ -139,6 +139,12 @@ pub enum SpecialCraft {
         result: i32,
         count: i32,
     },
+    /// `crafting_special_shielddecoration`: щит без узоров + знамя.
+    ShieldDecoration {
+        target: Vec<i32>,
+        banner: Vec<i32>,
+        result: Option<i32>,
+    },
 }
 
 /// Результат особого крафта: предмет, количество и слот-источник
@@ -152,6 +158,8 @@ pub struct SpecialResult {
     pub dye_slot: Option<usize>,
     /// Слот зелья-источника (для `potion_contents`).
     pub potion_slot: Option<usize>,
+    /// Слот знамени (для `ShieldDecorationRecipe`).
+    pub banner_slot: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -259,6 +267,7 @@ impl RecipeBookData {
                         copy_from,
                         dye_slot: None,
                         potion_slot: None,
+                        banner_slot: None,
                     });
                 }
                 SpecialCraft::Dye {
@@ -287,6 +296,7 @@ impl RecipeBookData {
                         copy_from: Some(slot),
                         dye_slot: Some(dye_slot),
                         potion_slot: None,
+                        banner_slot: None,
                     });
                 }
                 SpecialCraft::Imbue {
@@ -313,8 +323,44 @@ impl RecipeBookData {
                             copy_from: None,
                             dye_slot: None,
                             potion_slot: Some(4),
+                            banner_slot: None,
                         });
                     }
+                }
+                SpecialCraft::ShieldDecoration {
+                    target,
+                    banner,
+                    result,
+                } => {
+                    if filled.len() != 2 {
+                        continue;
+                    }
+                    let ((a_slot, a), (b_slot, b)) = (filled[0], filled[1]);
+                    let (target_slot, banner_slot, ok) =
+                        if target.contains(&a) && banner.contains(&b) {
+                            (a_slot, b_slot, true)
+                        } else if target.contains(&b) && banner.contains(&a) {
+                            (b_slot, a_slot, true)
+                        } else {
+                            (0, 0, false)
+                        };
+                    if !ok {
+                        continue;
+                    }
+                    let item = (*result).unwrap_or_else(|| {
+                        filled
+                            .iter()
+                            .find(|(s, _)| *s == target_slot)
+                            .map_or(0, |(_, i)| *i)
+                    });
+                    return Some(SpecialResult {
+                        item,
+                        count: 1,
+                        copy_from: Some(target_slot),
+                        dye_slot: None,
+                        potion_slot: None,
+                        banner_slot: Some(banner_slot),
+                    });
                 }
             }
         }
@@ -737,6 +783,39 @@ pub fn load(
                     result,
                 )
             }
+            "crafting_special_shielddecoration" => {
+                let banner = json
+                    .get("banner")
+                    .map(|v| ingredient(v, items, tags))
+                    .unwrap_or_default();
+                let target = json
+                    .get("target")
+                    .map(|v| ingredient(v, items, tags))
+                    .unwrap_or_default();
+                let Some(result) = json.get("result").and_then(|r| result_of(r, items)) else {
+                    continue;
+                };
+                if banner.is_empty() || target.is_empty() {
+                    continue;
+                }
+                let target_display = SlotDisp::items(&target);
+                let display = Display::Shapeless {
+                    ingredients: vec![target_display.clone(), SlotDisp::items(&banner)],
+                    result: target_display,
+                    station: station("crafting"),
+                };
+                (
+                    vec![display],
+                    Placement::Crafting {
+                        width: 1,
+                        height: 2,
+                        cells: vec![target.clone(), banner.clone()],
+                        shapeless: true,
+                    },
+                    vec![target, banner],
+                    result,
+                )
+            }
             "crafting_imbue" => {
                 let material = json
                     .get("material")
@@ -1042,6 +1121,19 @@ fn special_of(
                 source,
                 result: result.0,
                 count: result.1,
+            })
+        }
+        "crafting_special_shielddecoration" => {
+            let target = json.get("target").map(|v| ingredient(v, items, tags))?;
+            let banner = json.get("banner").map(|v| ingredient(v, items, tags))?;
+            let result = json
+                .get("result")
+                .and_then(|r| result_of(r, items))
+                .map(|r| r.0);
+            Some(SpecialCraft::ShieldDecoration {
+                target,
+                banner,
+                result,
             })
         }
         _ => None,
