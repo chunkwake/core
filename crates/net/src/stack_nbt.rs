@@ -124,6 +124,13 @@ pub fn named_nbt(
         c.insert("id".into(), Tag::String(block.to_owned()));
         comps.insert("minecraft:block_entity_data".into(), Tag::Compound(c));
     }
+    if let Some(data) = &e.entity_data
+        && let Some(entity) = components::entity_type_name(data.kind)
+        && let Some(mut c) = net_to_compound(&data.tag)
+    {
+        c.insert("id".into(), Tag::String(entity.to_owned()));
+        comps.insert("minecraft:entity_data".into(), Tag::Compound(c));
+    }
     if !e.enchantments.is_empty() {
         let levels: Compound = e
             .enchantments
@@ -359,6 +366,18 @@ fn from_nbt_ref(c: &Compound, item_id: &dyn Fn(&str) -> Option<i32>, depth: u32)
             .and_then(Tag::as_compound)
             .and_then(|c| {
                 let kind = components::block_entity_type_id(c.get("id")?.as_str()?)?;
+                let mut data = c.clone();
+                data.remove("id");
+                Some(components::BlockEntityData {
+                    kind,
+                    tag: compound_to_net(&data),
+                })
+            });
+        e.entity_data = m
+            .get("minecraft:entity_data")
+            .and_then(Tag::as_compound)
+            .and_then(|c| {
+                let kind = components::entity_type_id(c.get("id")?.as_str()?)?;
                 let mut data = c.clone();
                 data.remove("id");
                 Some(components::BlockEntityData {
@@ -747,6 +766,12 @@ pub fn to_line(s: Stack, name: &str) -> String {
             serde_json::json!({"kind": data.kind, "tag": hex(&data.tag)}),
         );
     }
+    if let Some(data) = &e.entity_data {
+        j.insert(
+            "entity_data".into(),
+            serde_json::json!({"kind": data.kind, "tag": hex(&data.tag)}),
+        );
+    }
     if !e.enchantments.is_empty() {
         let levels = e
             .enchantments
@@ -916,6 +941,12 @@ pub fn from_line(line: &str, item_id: impl Fn(&str) -> Option<i32>) -> Option<St
         e.lock = j.get("lock").map(json_to_snbt);
         e.container_loot = j.get("container_loot").map(json_to_snbt);
         e.block_entity_data = j.get("block_entity_data").and_then(|v| {
+            Some(components::BlockEntityData {
+                kind: v.get("kind")?.as_i64()? as i32,
+                tag: unhex(v.get("tag")?.as_str()?)?,
+            })
+        });
+        e.entity_data = j.get("entity_data").and_then(|v| {
             Some(components::BlockEntityData {
                 kind: v.get("kind")?.as_i64()? as i32,
                 tag: unhex(v.get("tag")?.as_str()?)?,
@@ -1549,6 +1580,43 @@ mod tests {
     }
 
     #[test]
+    fn entity_data_round_trips_through_nbt_and_line() {
+        components::set_entity_types(vec![
+            "minecraft:item_frame".into(),
+            "minecraft:glow_item_frame".into(),
+        ]);
+        let data = Compound::from([
+            ("ItemRotation".into(), Tag::Byte(3)),
+            ("Invisible".into(), Tag::Byte(1)),
+        ]);
+        let stack = Stack {
+            extra: components::intern(Extra {
+                entity_data: Some(components::BlockEntityData {
+                    kind: 0,
+                    tag: compound_to_net(&data),
+                }),
+                ..Default::default()
+            }),
+            ..Stack::new(7, 1)
+        };
+        let id = |n: &str| (n == "minecraft:item_frame").then_some(7);
+        let nbt = to_nbt(stack, "minecraft:item_frame").unwrap();
+        let comps = nbt.get("components").and_then(Tag::as_compound).unwrap();
+        let tag = comps
+            .get("minecraft:entity_data")
+            .and_then(Tag::as_compound)
+            .unwrap();
+        assert_eq!(
+            tag.get("id").and_then(Tag::as_str),
+            Some("minecraft:item_frame")
+        );
+        assert_eq!(tag.get("ItemRotation"), data.get("ItemRotation"));
+        assert_eq!(from_nbt(&nbt, id).unwrap(), stack);
+        let line = to_line(stack, "minecraft:item_frame");
+        assert_eq!(from_line(&line, id).unwrap(), stack);
+    }
+
+    #[test]
     fn container_contents_survive_nbt() {
         let names = |id: i32| {
             Some(
@@ -1610,6 +1678,7 @@ mod tests {
             lock: None,
             container_loot: None,
             block_entity_data: None,
+            entity_data: None,
             hide_tooltip: true,
             glint_override: Some(false),
             potion: Some(0),

@@ -18512,7 +18512,7 @@ impl PlayPlan {
                         if let Some(i) = hand_slot.filter(|_| !state.vitals.dead && login.spawn.game_mode != 3)
                             && let Some(s) = state.inv.slots[i]
                             && self.player_at(uuid).is_some_and(|(p, _, _)| block_reach(eye_of(p), u.pos, if login.spawn.game_mode == 1 { 5.0 } else { 4.5 }))
-                            && self.place_item_frame(uuid, self.item_name(s.item), u.pos, u.face, login.spawn.game_mode == 2)
+                            && self.place_item_frame(uuid, self.item_name(s.item), s.extra, u.pos, u.face, login.spawn.game_mode == 2)
                         {
                             if login.spawn.game_mode != 1 {
                                 state.inv.consume_at(i);

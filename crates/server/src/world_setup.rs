@@ -861,6 +861,7 @@ fn survival_data(
         c::NOTE_BLOCK_SOUND_COMPONENT.store(component("minecraft:note_block_sound")?, order);
         c::RARITY_COMPONENT.store(component("minecraft:rarity")?, order);
         c::BLOCK_ENTITY_DATA_COMPONENT.store(component("minecraft:block_entity_data")?, order);
+        c::ENTITY_DATA_COMPONENT.store(component("minecraft:entity_data")?, order);
         c::TOOLTIP_DISPLAY_COMPONENT.store(component("minecraft:tooltip_display")?, order);
         c::GLINT_OVERRIDE_COMPONENT
             .store(component("minecraft:enchantment_glint_override")?, order);
@@ -906,6 +907,22 @@ fn survival_data(
     }
     chunkwake_protocol::components::set_block_entity_types(block_entity_names);
     let _ = chunkwake_world::BLOCK_ENTITY_TYPES.set(block_entity_types);
+    let entity_types_for_components =
+        chunkwake_data::registries::builtin_ids_of(builtin, "entity_type").map_err(s)?;
+    let mut entity_type_names = vec![
+        String::new();
+        entity_types_for_components
+            .values()
+            .copied()
+            .max()
+            .map_or(0, |id| id.max(0) as usize + 1)
+    ];
+    for (name, &id) in &entity_types_for_components {
+        if let Some(slot) = entity_type_names.get_mut(id as usize) {
+            *slot = name.clone();
+        }
+    }
+    chunkwake_protocol::components::set_entity_types(entity_type_names);
     // Сундуки: свойства `facing`/`type`/`waterlogged` каждого состояния.
     let chests = chest_states(blocks);
     let furnace_lit = furnace_states(blocks);

@@ -87,6 +87,45 @@ impl ItemFrame {
         }
     }
 
+    /// `EntityType.updateCustomEntityTag` для `minecraft:entity_data`:
+    /// поля рамки из NBT компонента.
+    fn apply_entity_data(&mut self, c: &Compound, item_id: &dyn Fn(&str) -> Option<i32>) {
+        if let Some(item) = c.get("Item") {
+            self.item = item
+                .as_compound()
+                .and_then(|item| crate::stack_nbt::from_nbt(item, item_id));
+        }
+        if let Some(rot) = c.get("ItemRotation").and_then(Tag::as_i64) {
+            self.rotation = rot.rem_euclid(ROTATIONS as i64) as i32;
+        }
+        if let Some(chance) = c.get("ItemDropChance") {
+            let value = match chance {
+                Tag::Float(v) => Some(*v as f32),
+                Tag::Double(v) => Some(*v as f32),
+                other => other.as_i64().map(|v| v as f32),
+            };
+            if let Some(value) = value {
+                self.drop_chance = value;
+            }
+        }
+        if let Some(v) = c.get("Invisible").and_then(Tag::as_i64) {
+            self.invisible = v != 0;
+        }
+        if let Some(v) = c.get("Fixed").and_then(Tag::as_i64) {
+            self.fixed = v != 0;
+        }
+        if let Some(name) = c.get("CustomName") {
+            self.custom_name = Some(name.clone());
+        }
+        if let Some(facing) = c
+            .get("Facing")
+            .and_then(Tag::as_i64)
+            .filter(|f| (0..6).contains(f))
+        {
+            self.facing = facing as usize;
+        }
+    }
+
     fn kind(&self) -> &'static str {
         if self.glow {
             "minecraft:glow_item_frame"
@@ -322,6 +361,7 @@ impl PlayPlan {
         &self,
         uuid: Uuid,
         item: &str,
+        extra: u32,
         clicked: [i32; 3],
         face: i32,
         adventure: bool,
@@ -343,7 +383,16 @@ impl PlayPlan {
         if !self.frame_survives(None, pos, facing, false) {
             return false;
         }
-        let f = ItemFrame::new(glow, pos, facing);
+        let mut f = ItemFrame::new(glow, pos, facing);
+        // `EntityType.createDefaultStackConfig` → `ENTITY_DATA`: только
+        // совпадающий тип рамки, загрузка до проверки/добавления.
+        let e = chunkwake_protocol::components::get(extra);
+        if let Some(data) = &e.entity_data
+            && chunkwake_protocol::components::entity_type_name(data.kind) == Some(f.kind())
+            && let Some(nbt) = crate::stack_nbt::net_to_compound(&data.tag)
+        {
+            f.apply_entity_data(&nbt, &|name| self.item_id(name));
+        }
         self.play_sound(
             None,
             &f.sound("place"),
@@ -764,6 +813,34 @@ mod tests {
         assert_eq!(f.analog(), 1);
         f.rotation = 7;
         assert_eq!(f.analog(), 8);
+    }
+
+    /// `minecraft:entity_data` перекрывает поля рамки до её добавления.
+    #[test]
+    fn entity_data_applies_frame_fields() {
+        let mut f = ItemFrame::new(false, [0, 0, 0], 3);
+        let nbt = Compound::from([
+            ("ItemRotation".into(), Tag::Byte(3)),
+            ("ItemDropChance".into(), Tag::Float(0.25)),
+            ("Invisible".into(), Tag::Byte(1)),
+            ("Fixed".into(), Tag::Byte(1)),
+            ("Facing".into(), Tag::Byte(4)),
+            ("CustomName".into(), Tag::String("frame".into())),
+            (
+                "Item".into(),
+                Tag::Compound(Compound::from([
+                    ("id".into(), Tag::String("minecraft:stone".into())),
+                    ("count".into(), Tag::Int(1)),
+                ])),
+            ),
+        ]);
+        f.apply_entity_data(&nbt, &|n| (n == "minecraft:stone").then_some(1));
+        assert_eq!(f.rotation, 3);
+        assert_eq!(f.drop_chance, 0.25);
+        assert!(f.invisible && f.fixed);
+        assert_eq!(f.facing, 4);
+        assert_eq!(f.custom_name, Some(Tag::String("frame".into())));
+        assert_eq!(f.item, Some(Stack::new(1, 1)));
     }
 
     #[test]

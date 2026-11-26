@@ -69,6 +69,8 @@ pub struct Extra {
     pub container_loot: Option<String>,
     /// `minecraft:block_entity_data`: тип блок-сущности и NBT без `id`.
     pub block_entity_data: Option<BlockEntityData>,
+    /// `minecraft:entity_data`: тип сущности и NBT без `id`.
+    pub entity_data: Option<BlockEntityData>,
     /// `minecraft:hide_tooltip`: skryt podskazku.
     pub hide_tooltip: bool,
     /// `minecraft:enchantment_glint_override`: prinuditelnyy blesk.
@@ -180,6 +182,7 @@ impl Extra {
             && self.lock.is_none()
             && self.container_loot.is_none()
             && self.block_entity_data.is_none()
+            && self.entity_data.is_none()
             && !self.hide_tooltip
             && self.glint_override.is_none()
             && self.potion.is_none()
@@ -286,6 +289,8 @@ pub static NOTE_BLOCK_SOUND_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 pub static RARITY_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 /// `minecraft:block_entity_data`: NBT блок-сущности.
 pub static BLOCK_ENTITY_DATA_COMPONENT: AtomicI32 = AtomicI32::new(-1);
+/// `minecraft:entity_data`: NBT сущности.
+pub static ENTITY_DATA_COMPONENT: AtomicI32 = AtomicI32::new(-1);
 /// Имена `Rarity` по id (0 common … 3 epic).
 pub const RARITY_NAMES: [&str; 4] = ["common", "uncommon", "rare", "epic"];
 pub static TOOLTIP_DISPLAY_COMPONENT: AtomicI32 = AtomicI32::new(-1);
@@ -442,6 +447,25 @@ pub fn block_entity_type_id(name: &str) -> Option<i32> {
             .iter()
             .position(|n| n == name)? as i32,
     )
+}
+
+/// `entity_type` по сетевому id (для `minecraft:entity_data`).
+static ENTITY_TYPE_NAMES: OnceLock<Vec<String>> = OnceLock::new();
+
+pub fn set_entity_types(names: Vec<String>) {
+    let _ = ENTITY_TYPE_NAMES.set(names);
+}
+
+pub fn entity_type_name(id: i32) -> Option<&'static str> {
+    ENTITY_TYPE_NAMES
+        .get()?
+        .get(id.max(0) as usize)
+        .filter(|n| !n.is_empty())
+        .map(String::as_str)
+}
+
+pub fn entity_type_id(name: &str) -> Option<i32> {
+    Some(ENTITY_TYPE_NAMES.get()?.iter().position(|n| n == name)? as i32)
 }
 
 static ENCHANTMENT_NAMES: OnceLock<Vec<String>> = OnceLock::new();

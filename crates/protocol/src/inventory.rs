@@ -237,7 +237,11 @@ fn write_patch(w: &mut Writer, s: &Stack) {
             .block_entity_data
             .as_ref()
             .filter(|_| id_of(&crate::components::BLOCK_ENTITY_DATA_COMPONENT) >= 0);
-        if trim.is_some() || banner.is_some() || base.is_some() || bed.is_some() {
+        let ent = e
+            .entity_data
+            .as_ref()
+            .filter(|_| id_of(&crate::components::ENTITY_DATA_COMPONENT) >= 0);
+        if trim.is_some() || banner.is_some() || base.is_some() || bed.is_some() || ent.is_some() {
             let mut r = Reader::new(raw);
             if let (Ok(added), Ok(removed)) = (r.var_int(), r.var_int())
                 && added >= 0
@@ -283,7 +287,8 @@ fn write_patch(w: &mut Writer, s: &Stack) {
                         + i32::from(trim.is_some())
                         + i32::from(banner.is_some())
                         + i32::from(base.is_some())
-                        + i32::from(bed.is_some()),
+                        + i32::from(bed.is_some())
+                        + i32::from(ent.is_some()),
                 )
                 .var_int(removed);
                 if let Some((material, pattern)) = trim {
@@ -304,6 +309,11 @@ fn write_patch(w: &mut Writer, s: &Stack) {
                     w.var_int(id_of(&crate::components::BLOCK_ENTITY_DATA_COMPONENT))
                         .var_int(bed.kind);
                     w.buf.extend_from_slice(&bed.tag);
+                }
+                if let Some(ent) = ent {
+                    w.var_int(id_of(&crate::components::ENTITY_DATA_COMPONENT))
+                        .var_int(ent.kind);
+                    w.buf.extend_from_slice(&ent.tag);
                 }
                 w.buf.extend_from_slice(&raw[tail..]);
                 return;
@@ -351,6 +361,7 @@ fn write_patch(w: &mut Writer, s: &Stack) {
         e.rarity.is_some() && id_of(&crate::components::RARITY_COMPONENT) >= 0,
         e.block_entity_data.is_some()
             && id_of(&crate::components::BLOCK_ENTITY_DATA_COMPONENT) >= 0,
+        e.entity_data.is_some() && id_of(&crate::components::ENTITY_DATA_COMPONENT) >= 0,
     ];
 
     w.var_int(parts.iter().filter(|&&p| p).count() as i32)
@@ -511,6 +522,11 @@ fn write_patch(w: &mut Writer, s: &Stack) {
     }
     if let (true, Some(data)) = (parts[28], &e.block_entity_data) {
         w.var_int(id_of(&crate::components::BLOCK_ENTITY_DATA_COMPONENT))
+            .var_int(data.kind);
+        w.buf.extend_from_slice(&data.tag);
+    }
+    if let (true, Some(data)) = (parts[29], &e.entity_data) {
+        w.var_int(id_of(&crate::components::ENTITY_DATA_COMPONENT))
             .var_int(data.kind);
         w.buf.extend_from_slice(&data.tag);
     }
@@ -931,7 +947,10 @@ fn read_untrusted_stack(r: &mut Reader) -> Result<Slot> {
         let payload = r.bytes(len as usize)?;
         let bed_kind = id_of(&crate::components::BLOCK_ENTITY_DATA_COMPONENT);
         let block_entity = bed_kind >= 0 && kind == bed_kind;
+        let ent_kind = id_of(&crate::components::ENTITY_DATA_COMPONENT);
+        let entity = ent_kind >= 0 && kind == ent_kind;
         if !block_entity
+            && !entity
             && kind != id_of(&crate::components::TRIM_COMPONENT)
             && kind != id_of(&crate::components::BANNER_PATTERNS_COMPONENT)
             && kind != id_of(&crate::components::BASE_COLOR_COMPONENT)
@@ -947,6 +966,13 @@ fn read_untrusted_stack(r: &mut Reader) -> Result<Slot> {
             if let Ok(block_kind) = body.var_int() {
                 e.block_entity_data = Some(crate::components::BlockEntityData {
                     kind: block_kind,
+                    tag: body.remaining().to_vec(),
+                });
+            }
+        } else if entity {
+            if let Ok(entity_kind) = body.var_int() {
+                e.entity_data = Some(crate::components::BlockEntityData {
+                    kind: entity_kind,
                     tag: body.remaining().to_vec(),
                 });
             }
@@ -1468,6 +1494,50 @@ mod tests {
         let (_, back) = read_creative_slot(&mut Reader::new(&c.buf)).unwrap();
         assert_eq!(
             crate::components::get(back.unwrap().extra).block_entity_data,
+            Some(crate::components::BlockEntityData { kind: 0, tag: data })
+        );
+    }
+
+    /// `minecraft:entity_data`: тот же формат, что у `block_entity_data`.
+    #[test]
+    fn entity_data_roundtrips_over_network() {
+        use std::sync::atomic::Ordering;
+        crate::components::ENTITY_DATA_COMPONENT.store(303, Ordering::Relaxed);
+        let data = vec![10, 0];
+        let stack = Stack {
+            extra: crate::components::intern(crate::components::Extra {
+                entity_data: Some(crate::components::BlockEntityData {
+                    kind: 0,
+                    tag: data.clone(),
+                }),
+                ..Default::default()
+            }),
+            ..Stack::new(10, 1)
+        };
+        let mut w = Writer::new();
+        write_stack(&mut w, Some(stack));
+        let mut r = Reader::new(&w.buf);
+        assert_eq!(r.var_int().unwrap(), 1);
+        assert_eq!(r.var_int().unwrap(), 10);
+        assert_eq!(r.var_int().unwrap(), 1);
+        assert_eq!(r.var_int().unwrap(), 0);
+        assert_eq!(r.var_int().unwrap(), 303);
+        assert_eq!(r.var_int().unwrap(), 0);
+        assert_eq!(r.remaining(), &data);
+
+        let mut c = Writer::new();
+        c.u16(0)
+            .var_int(1)
+            .var_int(10)
+            .var_int(1)
+            .var_int(0)
+            .var_int(303)
+            .var_int(3)
+            .var_int(0);
+        c.buf.extend_from_slice(&data);
+        let (_, back) = read_creative_slot(&mut Reader::new(&c.buf)).unwrap();
+        assert_eq!(
+            crate::components::get(back.unwrap().extra).entity_data,
             Some(crate::components::BlockEntityData { kind: 0, tag: data })
         );
     }
