@@ -9370,6 +9370,8 @@ impl PlayPlan {
             .iter()
             .map(|(uuid, pos, size, _)| (*uuid, *pos, *size))
             .collect();
+        // Рамки: снаряд снимает с них предмет (`ItemFrame.hurtServer`).
+        let frame_boxes = self.frame_hitboxes();
         // Подшаги стрел (~0.1 блока) много раз проверяют одни клетки: ответ — на тик.
         // Мир берётся один раз на фазу: `with_world` ниже держит один замок.
         let solid_seen: std::cell::RefCell<FastMap<[i32; 3], bool>> = Default::default();
@@ -9409,6 +9411,8 @@ impl PlayPlan {
         // Попадания в мишень: `set_block` нельзя звать под `with_world`
         // (там уже держится чтение `edited`, а запись ждёт его же).
         let mut target_hits: Vec<TargetHit> = Vec::new();
+        // Рамки, с которых сняли предмет (`ItemFrame.hurtServer`).
+        let mut frame_hits: Vec<i32> = Vec::new();
         let mut hurt = Vec::new();
         let mut hurt_mobs = Vec::new();
         // Вернувшиеся трезубцы: позиция для клиента и предмет для дропа.
@@ -9466,10 +9470,11 @@ impl PlayPlan {
                     // Для мишени нужна скорость до шага (направление грани и
                     // ось расчёта сигнала).
                     let vel_before = a.vel;
-                    for hit in ar::step(
+                    for hit in ar::step_frames(
                         a,
                         &alive,
                         &mob_boxes,
+                        &frame_boxes,
                         |owner, target| {
                             // `Projectile.canHitEntity`: союзник без friendly
                             // fire пропускает стрелу насквозь.
@@ -9567,6 +9572,10 @@ impl PlayPlan {
                                         gone.push(id);
                                     }
                                 }
+                            }
+                            ar::Hit::Frame(k) => {
+                                frame_hits.push(frame_boxes[k].0);
+                                gone.push(id);
                             }
                         }
                     }
@@ -9684,6 +9693,9 @@ impl PlayPlan {
         }
         for hit in target_hits {
             self.target_hit(hit.pos, hit.vel, hit.owner, &hit.direct);
+        }
+        for id in frame_hits {
+            self.projectile_item_frame(id);
         }
         for (id, pos, vel) in trident_syncs {
             self.hub.send(

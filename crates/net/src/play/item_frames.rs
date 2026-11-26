@@ -439,6 +439,53 @@ impl PlayPlan {
         Some(())
     }
 
+    /// Коробки рамок для попаданий снарядов (`createBoundingBox`).
+    pub(super) fn frame_hitboxes(&self) -> Vec<(i32, [[f64; 3]; 2])> {
+        self.sim()
+            .item_frames
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(&id, f)| {
+                (
+                    id,
+                    frame_box(f.pos, f.facing, self.map_id_of_slot(f.item).is_some()),
+                )
+            })
+            .collect()
+    }
+
+    /// Снаряд по рамке (`ItemFrame.hurtServer`): закреплённую не трогает,
+    /// предмет снимается и падает с шансом `ItemDropChance`. Пустая рамка
+    /// остаётся, стрела просто гаснет.
+    pub(super) fn projectile_item_frame(&self, target: i32) -> bool {
+        let (loot, packet, center, sound, pos) = {
+            let mut frames = self.sim().item_frames.lock().unwrap();
+            let Some(f) = frames.get_mut(&target) else {
+                return false;
+            };
+            if f.fixed || f.item.is_none() {
+                return false;
+            }
+            let Some(loot) = f.take_loot() else {
+                return false;
+            };
+            (
+                loot,
+                self.frame_item_data(target, f),
+                f.center(),
+                f.sound("remove_item"),
+                f.pos,
+            )
+        };
+        self.frame_drop(target, loot, false, false);
+        self.play_sound(None, &sound, crate::sounds::NEUTRAL, center, 1.0, 1.0);
+        self.hub.send_about(target, packet);
+        self.redstone_update(&crate::redstone::around(pos));
+        self.emit_vibration(center, "minecraft:block_change");
+        true
+    }
+
     /// `kill` + `dropItem(attacker)`: рамка исчезает, звук поломки, затем
     /// рамка и предмет на землю.
     fn break_item_frame(&self, id: i32, creative: bool) {

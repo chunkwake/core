@@ -170,6 +170,8 @@ pub enum Hit {
     Player(usize, f32, [f64; 3]),
     /// Попала в моба `i`.
     Mob(usize, f32, [f64; 3]),
+    /// Задела рамку `i` (`ItemFrame.hurtServer`).
+    Frame(usize),
 }
 
 /// `BowItem.getPowerForTime`: ниже 0.1 выстрела нет.
@@ -251,6 +253,21 @@ pub fn step(
     a: &mut Arrow,
     players: &[(uuid::Uuid, [f64; 3])],
     mobs: &[(u128, [f64; 3], (f64, f64))],
+    can_harm: impl Fn(uuid::Uuid, uuid::Uuid) -> bool,
+    solid: impl Fn([i32; 3]) -> bool,
+    water: impl Fn([i32; 3]) -> bool,
+    border: impl Fn([f64; 3], [f64; 3]) -> [f64; 3],
+) -> Vec<Hit> {
+    step_frames(a, players, mobs, &[], can_harm, solid, water, border)
+}
+
+/// [`step`] с рамками (`ItemFrame`): ID и коробка каждой. Снаряд задевает
+/// рамку раньше блока и снимает с неё предмет (`ItemFrame.hurtServer`).
+pub fn step_frames(
+    a: &mut Arrow,
+    players: &[(uuid::Uuid, [f64; 3])],
+    mobs: &[(u128, [f64; 3], (f64, f64))],
+    frames: &[(i32, [[f64; 3]; 2])],
     can_harm: impl Fn(uuid::Uuid, uuid::Uuid) -> bool,
     solid: impl Fn([i32; 3]) -> bool,
     water: impl Fn([i32; 3]) -> bool,
@@ -374,6 +391,19 @@ pub fn step(
             a.stopped = true;
             return hits;
         }
+        // Рамки: снаряд задевает коробку раньше блока; пустую рамку
+        // `hurtServer` не трогает, но стрела всё равно останавливается.
+        if !a.firework
+            && !(a.trident && a.dealt_damage)
+            && let Some(k) = frames
+                .iter()
+                .position(|(_, b)| (0..3).all(|i| p[i] > b[0][i] - 0.3 && p[i] < b[1][i] + 0.3))
+        {
+            a.pos = p;
+            a.stopped = true;
+            hits.push(Hit::Frame(k));
+            return hits;
+        }
         if solid(p.map(|c| c.floor() as i32)) {
             a.pos = prev;
             if a.firework {
@@ -462,6 +492,25 @@ pub fn in_cell(feet: [f64; 3], cell: [i32; 3]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_hit_stops_the_arrow() {
+        // Рамка на блоке [2, 64, 0], лицом на запад (box 0.0625 × 0.75).
+        let frame = [[1.46875, 64.125, 0.125], [1.53125, 64.875, 0.875]];
+        let mut a = Arrow::flight([0.5, 64.5, 0.5], [1.1, 0.0, 0.0], false);
+        let hits = step_frames(
+            &mut a,
+            &[],
+            &[],
+            &[(7, frame)],
+            |_, _| true,
+            |_| false,
+            |_| false,
+            |_, to| to,
+        );
+        assert_eq!(hits, vec![Hit::Frame(0)]);
+        assert!(a.stopped);
+    }
 
     #[test]
     fn projectiles_hit_world_border_before_targets_beyond_it() {
