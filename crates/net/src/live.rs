@@ -159,6 +159,10 @@ pub enum Control {
     Inventory,
     /// Задать скорость игрока (`Player.setVelocity`): `set_entity_motion`.
     Velocity([f64; 3]),
+    /// Разрешить/запретить полёт (`Player.setAllowFlight`).
+    AllowFlight(bool),
+    /// Включить/выключить полёт (`Player.setFlying`).
+    Flying(bool),
     /// Телепорт: позиция, поворот.
     Teleport([f64; 3], f32, f32),
     /// Переход в другое измерение: `respawn` клиенту и новый поток чанков.
@@ -334,6 +338,8 @@ impl Control {
                 };
                 Control::Velocity([n()?, n()?, n()?])
             }
+            "allowflight" => Control::AllowFlight(it.next()? != "0"),
+            "flying" => Control::Flying(it.next()? != "0"),
             "slot" => {
                 let window = bukkit_to_window(it.next()?.parse().ok()?)?;
                 // Остаток строки после номера — стопка (`-` — пусто).
@@ -367,6 +373,8 @@ impl Control {
             Control::Selected(s) => live.selected = s,
             Control::Inventory => {}
             Control::Velocity(_) => {}
+            Control::AllowFlight(_) => {}
+            Control::Flying(_) => {}
             Control::Teleport(p, yaw, pitch) => {
                 live.pos = p;
                 live.yaw = yaw;

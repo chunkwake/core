@@ -42,6 +42,8 @@ public final class PlayerImpl {
     /** Скрытые сущности: UUID -> набор плагинов (`*` — hidePlayer без плагина). */
     private final java.util.Map<UUID, Set<String>> hidden =
             new java.util.concurrent.ConcurrentHashMap<>();
+    private volatile boolean allowFlight;
+    private volatile boolean flying;
     /** `Player.setSleepingIgnored`: не мешать спать (Essentials). */
     private boolean sleepingIgnored;
     /** `Player.getLocale`: клиентский язык (по умолчанию `en_us`). */
@@ -1477,6 +1479,23 @@ public final class PlayerImpl {
     }
 
     public boolean canSee(Player player) { return canSee((org.bukkit.entity.Entity) player); }
+
+    public boolean getAllowFlight() { return allowFlight; }
+
+    public void setAllowFlight(boolean value) {
+        allowFlight = value;
+        if (!value) {
+            flying = false;
+        }
+        control("allowflight " + (value ? 1 : 0));
+    }
+
+    public boolean isFlying() { return flying; }
+
+    public void setFlying(boolean value) {
+        flying = value;
+        control("flying " + (value ? 1 : 0));
+    }
 
     public java.util.List<org.bukkit.entity.Entity> getNearbyEntities(double x, double y, double z) {
         java.util.List<org.bukkit.entity.Entity> out = new java.util.ArrayList<>();

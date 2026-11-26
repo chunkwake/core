@@ -14210,6 +14210,7 @@ impl PlayPlan {
         let mut fall_fly_ticks: u32 = 0;
         // Креатив/наблюдатель: клиент шлёт `player_abilities`, пока бит включён элитры нельзя.
         let mut flying = login.spawn.game_mode == 3;
+        let mut allow_flight = self.allow_flight.load(Ordering::Relaxed);
         let mut food_ticker = tokio::time::interval(TICK);
         food_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         self.send_inventory(conn, &mut state.inv).await?;
@@ -14438,6 +14439,29 @@ impl PlayPlan {
                         }
                         Control::Velocity(v) => {
                             conn.send(&play::set_entity_motion(ids.set_entity_motion, me.entity_id, v)).await?;
+                        }
+                        Control::AllowFlight(v) => {
+                            allow_flight = v;
+                            if !v {
+                                flying = false;
+                            }
+                            conn.send(&play::player_abilities_state(
+                                ids.player_abilities,
+                                login.spawn.game_mode,
+                                allow_flight,
+                                flying,
+                            )).await?;
+                            self.refresh_glide(conn, me, state, sneaking, flying, &mut gliding).await?;
+                        }
+                        Control::Flying(v) => {
+                            flying = v && (allow_flight || matches!(login.spawn.game_mode, 1 | 3));
+                            conn.send(&play::player_abilities_state(
+                                ids.player_abilities,
+                                login.spawn.game_mode,
+                                allow_flight,
+                                flying,
+                            )).await?;
+                            self.refresh_glide(conn, me, state, sneaking, flying, &mut gliding).await?;
                         }
                         Control::Furnace(pos, data, items) => {
                             if let Some(w) = window.as_mut().filter(|w| w.pos == pos) {
@@ -16492,7 +16516,7 @@ impl PlayPlan {
                     }
                     if id == ids.sb_player_abilities {
                         let flags = r.u8()?;
-                        let mayfly = self.allow_flight.load(Ordering::Relaxed)
+                        let mayfly = allow_flight
                             || matches!(login.spawn.game_mode, 1 | 3);
                         flying = mayfly && flags & ABILITY_FLYING != 0;
                         if flying {

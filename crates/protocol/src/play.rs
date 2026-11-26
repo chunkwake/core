@@ -774,6 +774,16 @@ pub fn dust_body(argb: i32, scale: f32) -> Vec<u8> {
 ///
 /// `allow_flight` включает бит may-fly и в выживании с приключением.
 pub fn player_abilities(id: i32, game_mode: u8, allow_flight: bool) -> Vec<u8> {
+    player_abilities_state(id, game_mode, allow_flight, false)
+}
+
+/// `player_abilities` с явным флагом полёта (Bukkit `setFlying`).
+pub fn player_abilities_state(
+    id: i32,
+    game_mode: u8,
+    allow_flight: bool,
+    flying: bool,
+) -> Vec<u8> {
     let mut flags: u8 = match game_mode {
         1 => 0x01 | 0x04 | 0x08,
         3 => 0x01 | 0x02 | 0x04,
@@ -781,6 +791,9 @@ pub fn player_abilities(id: i32, game_mode: u8, allow_flight: bool) -> Vec<u8> {
     };
     if allow_flight {
         flags |= 0x04;
+    }
+    if flying {
+        flags |= 0x02;
     }
     let mut w = Writer::new();
     w.var_int(id).u8(flags).f32(0.05).f32(0.1);
