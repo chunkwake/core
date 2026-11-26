@@ -2642,13 +2642,15 @@ pub fn spawn_packs(
     nearest: &mut dyn FnMut([i32; 3]) -> Option<f64>,
     fits: &mut dyn FnMut(Species, [i32; 3], f64) -> bool,
     rand: &mut dyn FnMut() -> f64,
-) -> Vec<(Species, [i32; 3])> {
+) -> Vec<(Species, [i32; 3], bool)> {
     let mut out = Vec::new();
     let next_int = |rand: &mut dyn FnMut() -> f64, n: u32| {
         ((rand() * f64::from(n)).floor() as i32).min(n as i32 - 1)
     };
     for _ in 0..3 {
         let (mut x, mut z) = (start[0], start[2]);
+        // Первый моб группы — взрослый (`AgeableMobGroupData.groupSize == 0`).
+        let mut first = true;
         let mut chosen: Option<SpawnEntry> = None;
         let mut steps = (rand() * 4.0).ceil() as u32;
         let mut q = 0;
@@ -2686,7 +2688,8 @@ pub fn spawn_packs(
             if !fits(species, pos, d2) {
                 continue;
             }
-            out.push((species, pos));
+            out.push((species, pos, first));
+            first = false;
             if out.len() as u32 >= MAX_CLUSTER {
                 return out;
             }
@@ -4149,7 +4152,10 @@ mod tests {
             &mut rnd,
         );
         assert_eq!(got.len(), MAX_CLUSTER as usize);
-        assert!(got.iter().all(|(s, p)| *s == Species::Zombie && p[1] == 64));
+        assert!(
+            got.iter()
+                .all(|(s, p, _)| *s == Species::Zombie && p[1] == 64)
+        );
         // Рядом с игроком (ближе 24) — никого.
         let got = spawn_packs(
             [8, 64, 8],

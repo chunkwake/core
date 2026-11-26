@@ -5880,7 +5880,7 @@ impl PlayPlan {
         let cap_chunks = mb::spawn_cap_chunks(&player_chunks);
         let mut rng = rand::thread_rng();
         chunks.shuffle(&mut rng);
-        let mut plan: Vec<(Species, [i32; 3])> = Vec::new();
+        let mut plan: Vec<(Species, [i32; 3], bool)> = Vec::new();
         self.with_world(|w| {
             for cat in mb::Category::ALL {
                 let on = match cat {
@@ -5901,9 +5901,14 @@ impl PlayPlan {
                 }
             }
         });
-        for (species, at) in plan {
-            // `Zombie.getSpawnAsBabyOdds` и `AgeableMobGroupData(0.05)`:
-            // 5 % детёнышей у зомби/утопленников и животных.
+        // `ZombieGroupData`: 5 % на всю группу; `AgeableMobGroupData(0.05)`:
+        // у животных 5 % только у членов группы после первого.
+        let mut zombie_baby = false;
+        for (species, at, first) in plan {
+            let zombie = matches!(species, Species::Zombie | Species::Drowned);
+            if first {
+                zombie_baby = zombie && rng.r#gen::<f64>() < 0.05;
+            }
             let animal = matches!(
                 species,
                 Species::Cow
@@ -5914,8 +5919,7 @@ impl PlayPlan {
                     | Species::Cat
                     | Species::Parrot
             );
-            let baby = (animal || matches!(species, Species::Zombie | Species::Drowned))
-                && rng.r#gen::<f64>() < 0.05;
+            let baby = zombie_baby || (!first && animal && rng.r#gen::<f64>() < 0.05);
             let pos = [
                 f64::from(at[0]) + 0.5,
                 f64::from(at[1]),
@@ -5940,7 +5944,7 @@ impl PlayPlan {
         (cx, cz): (i32, i32),
         light: SpawnLight,
         players: &[[f64; 3]],
-    ) -> Vec<(Species, [i32; 3])> {
+    ) -> Vec<(Species, [i32; 3], bool)> {
         use rand::Rng;
         let mut rng = rand::thread_rng();
         let (x, z) = (
