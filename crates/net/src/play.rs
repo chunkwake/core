@@ -566,6 +566,8 @@ type SpawnFrameCache = FastMap<
 struct DragonFight {
     /// `dragonKilled`: без убитого дракона возрождение не начинается.
     killed: bool,
+    /// `hasPreviouslyKilledDragon`: драконье яйцо только за первое убийство.
+    has_previously_killed: bool,
     /// Кристаллы на портале: позиция блока над обсидианом и id сущности.
     crystals: Vec<([i32; 3], i32)>,
     /// `DragonRespawnAnimation`: тик появления дракона.

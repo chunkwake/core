@@ -103,4 +103,107 @@ impl PlayPlan {
             self.hub.send_about(id, packet);
         }
     }
+
+    /// `EnderDragonFight.setDragonKilled`: активный выходной портал и
+    /// драконье яйцо после первого убийства.
+    pub(super) fn dragon_killed(&self) {
+        if self.active_dim() != Dimension::End {
+            return;
+        }
+        let first = {
+            let mut fight = self.dragon_fight.lock().unwrap();
+            if fight.killed {
+                return;
+            }
+            fight.killed = true;
+            let first = !fight.has_previously_killed;
+            fight.has_previously_killed = true;
+            first
+        };
+        let pos = self.exit_portal_pos();
+        self.end_podium(pos, true);
+        if first {
+            self.named_block([pos[0], pos[1] + 4, pos[2]], "minecraft:dragon_egg");
+        }
+    }
+
+    /// `EnderDragonFight.spawnExitPortal`: подиум на высоте (0, 0),
+    /// над бедроком не выше 63 и не ниже дна мира.
+    fn exit_portal_pos(&self) -> [i32; 3] {
+        let mut y = self.motion_blocking_top(0, 0).unwrap_or(self.min_y() + 1) - 1;
+        while y > 63
+            && self
+                .block([0, y, 0])
+                .is_some_and(|s| self.state_name(s) == "minecraft:bedrock")
+        {
+            y -= 1;
+        }
+        [0, y.max(self.min_y() + 1), 0]
+    }
+
+    /// `EndPodiumFeature.place`: сфера из бедрока/эндер-камня с колонной,
+    /// активный центр — `end_portal`, по бокам настенные факелы.
+    fn end_podium(&self, [x, y, z]: [i32; 3], active: bool) {
+        for dy in -1..=32 {
+            for dx in -4..=4 {
+                for dz in -4..=4 {
+                    let d2 = (dx * dx + dy * dy + dz * dz) as f64;
+                    let inner = d2 < 2.5 * 2.5;
+                    let outer = d2 < 3.5 * 3.5;
+                    if !inner && !outer {
+                        continue;
+                    }
+                    let p = [x + dx, y + dy, z + dz];
+                    let name = if p[1] < y {
+                        if inner {
+                            "minecraft:bedrock"
+                        } else {
+                            "minecraft:end_stone"
+                        }
+                    } else if p[1] > y {
+                        "minecraft:air"
+                    } else if !inner {
+                        "minecraft:bedrock"
+                    } else if active {
+                        "minecraft:end_portal"
+                    } else {
+                        "minecraft:air"
+                    };
+                    self.named_block(p, name);
+                }
+            }
+        }
+        // Колонна 4 блока в центре (перекрывает центральный портал).
+        for i in 0..4 {
+            self.named_block([x, y + i, z], "minecraft:bedrock");
+        }
+        // Настенные факелы на `pos.above(2)` смотрят наружу.
+        for (dx, dz, facing) in [
+            (0, -1, "north"),
+            (0, 1, "south"),
+            (-1, 0, "west"),
+            (1, 0, "east"),
+        ] {
+            let Some(&base) = self.survival.block_defaults.get("minecraft:wall_torch") else {
+                continue;
+            };
+            let state = self
+                .survival
+                .placement
+                .with_prop(base, "facing", facing)
+                .unwrap_or(base);
+            self.set_block([x + dx, y + 2, z + dz], state);
+        }
+    }
+
+    /// Поставить блок по имени, если состояние уже такое — не трогать.
+    fn named_block(&self, pos: [i32; 3], name: &str) {
+        let Some(&state) = self.survival.block_defaults.get(name) else {
+            return;
+        };
+        if self.block(pos) == Some(state) {
+            return;
+        }
+        self.set_block(pos, state);
+    }
 }

@@ -1700,7 +1700,7 @@ impl PlayPlan {
                 if e.mob.species == Species::EnderDragon
                     && self.active_dim() == crate::play::Dimension::End
                 {
-                    self.dragon_fight.lock().unwrap().killed = true;
+                    self.dragon_killed();
                 }
                 // `EndCrystal`: смерть лечащего кристалла бьёт дракона на 10.
                 if e.mob.species == Species::EndCrystal {
