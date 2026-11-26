@@ -12266,10 +12266,13 @@ impl PlayPlan {
             .filter(|p| p.collects)
             .map(|p| (p.entry.uuid, p.pos))
             .collect();
+        // `LightningBolt`: AABB 6×9×6 от точки удара (x±3, y−3…+6, z±3).
+        let lo = [pos[0] - 3.0, pos[1] - 3.0, pos[2] - 3.0];
+        let hi = [pos[0] + 3.0, pos[1] + 6.0, pos[2] + 3.0];
         for (uuid, feet) in players {
-            let dx = feet[0] - pos[0];
-            let dz = feet[2] - pos[2];
-            if dx * dx + dz * dz <= 9.0 && (feet[1] - pos[1]).abs() <= 6.0 {
+            let plo = [feet[0] - 0.3, feet[1], feet[2] - 0.3];
+            let phi = [feet[0] + 0.3, feet[1] + 1.8, feet[2] + 0.3];
+            if (0..3).all(|i| plo[i] < hi[i] && phi[i] > lo[i]) {
                 self.push_control(uuid, Control::Hurt(5.0, Cause::Fire, Some(pos), 0.0));
             }
         }

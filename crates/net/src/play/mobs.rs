@@ -5616,10 +5616,13 @@ impl PlayPlan {
                     continue;
                 }
                 let mpos = e.mob.pos;
-                if (mpos[0] - at[0]).powi(2) + (mpos[2] - at[2]).powi(2) > 9.0 {
-                    continue;
-                }
-                if mpos[1] < at[1] - 3.0 || mpos[1] > at[1] + 9.0 {
+                let (w, h) = e.mob.size();
+                let mlo = [mpos[0] - w / 2.0, mpos[1], mpos[2] - w / 2.0];
+                let mhi = [mpos[0] + w / 2.0, mpos[1] + h, mpos[2] + w / 2.0];
+                // `LightningBolt`: AABB x±3, y−3…+6, z±3.
+                let lo = [at[0] - 3.0, at[1] - 3.0, at[2] - 3.0];
+                let hi = [at[0] + 3.0, at[1] + 6.0, at[2] + 3.0];
+                if (0..3).any(|k| mlo[k] >= hi[k] || mhi[k] <= lo[k]) {
                     continue;
                 }
                 let died = mb::hurt(&mut e.mob, 5.0, mb::Source::default(), 0.0) == Some(true);
