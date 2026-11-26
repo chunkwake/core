@@ -59,6 +59,12 @@ impl PlayPlan {
                     ])),
                 );
             }
+            if let Some(rarity) = e.rarity
+                && let Some(name) =
+                    chunkwake_protocol::components::RARITY_NAMES.get(rarity as usize)
+            {
+                comps.insert("minecraft:rarity".into(), Tag::String((*name).to_owned()));
+            }
             if !comps.is_empty() {
                 nbt.insert("components".into(), Tag::Compound(comps));
             }
@@ -111,7 +117,21 @@ impl PlayPlan {
             .and_then(|c| c.get("hide_tooltip"))
             .and_then(Tag::as_i64)
             .is_some_and(|v| v != 0);
-        if patterns.is_empty() && name.is_none() && item_name.is_none() && !tooltip {
+        let rarity = components
+            .and_then(|c| c.get("minecraft:rarity"))
+            .and_then(Tag::as_str)
+            .and_then(|name| {
+                chunkwake_protocol::components::RARITY_NAMES
+                    .iter()
+                    .position(|&n| n == name)
+            })
+            .map(|i| i as u8);
+        if patterns.is_empty()
+            && name.is_none()
+            && item_name.is_none()
+            && !tooltip
+            && rarity.is_none()
+        {
             return loot;
         }
         loot.into_iter()
@@ -127,6 +147,9 @@ impl PlayPlan {
                     }
                     if tooltip {
                         e.hide_tooltip = true;
+                    }
+                    if rarity.is_some() {
+                        e.rarity = rarity;
                     }
                     s.extra = chunkwake_protocol::components::intern(e);
                 }
