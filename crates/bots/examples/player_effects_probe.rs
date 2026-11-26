@@ -45,6 +45,7 @@ async fn main() {
         "remove_entities",
         "add_entity",
         "player_abilities",
+        "tab_list",
     ];
     let mut capture = Vec::new();
     let mut by_id = BTreeMap::new();

@@ -648,6 +648,15 @@ pub fn player_info_hat(id: i32, uuid: Uuid, shown: bool) -> Vec<u8> {
     w.buf
 }
 
+/// `ClientboundTabListPacket`: заголовок и подвал списка игроков.
+pub fn tab_list(id: i32, header: &serde_json::Value, footer: &serde_json::Value) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id);
+    crate::text::write_component(&mut w, header);
+    crate::text::write_component(&mut w, footer);
+    w.buf
+}
+
 /// `player_info_update` только с режимом игры (таб-лист).
 pub fn player_info_game_mode(id: i32, uuid: Uuid, game_mode: i32) -> Vec<u8> {
     let mut w = Writer::new();

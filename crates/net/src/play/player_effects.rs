@@ -85,6 +85,21 @@ impl PlayPlan {
             // Не-игровые сущности пока не восстанавливаем: нужен add_entity с типом/позой.
             return Some("0".into());
         }
+        if let Some(rest) = command.strip_prefix("tablist ") {
+            let mut it = rest.split_whitespace();
+            let (Some(header), Some(footer)) = (it.next(), it.next()) else {
+                return Some("0".into());
+            };
+            if it.next().is_some() {
+                return Some("0".into());
+            }
+            let (Some(header), Some(footer)) = (hex_component(header), hex_component(footer))
+            else {
+                return Some("0".into());
+            };
+            self.send_to(uuid, play::tab_list(self.ids.tab_list, &header, &footer));
+            return Some("1".into());
+        }
         if let Some(rest) = command.strip_prefix("title ") {
             let (part, json) = rest.split_once(' ')?;
             let Ok(component) = serde_json::from_str(json) else {
@@ -184,6 +199,19 @@ impl PlayPlan {
         }
         Some("0".into())
     }
+}
+
+/// JSON-компонент из hex-байтов (Java присылает UTF-8 Gson JSON).
+fn hex_component(text: &str) -> Option<serde_json::Value> {
+    if !text.len().is_multiple_of(2) || text.len() > 32768 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(text.len() / 2);
+    for pair in text.as_bytes().chunks_exact(2) {
+        let pair = std::str::from_utf8(pair).ok()?;
+        bytes.push(u8::from_str_radix(pair, 16).ok()?);
+    }
+    serde_json::from_str(std::str::from_utf8(&bytes).ok()?).ok()
 }
 
 fn normalize_sound(name: &str) -> &str {

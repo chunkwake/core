@@ -48,6 +48,10 @@ public final class PlayerImpl {
     private boolean sleepingIgnored;
     /** `Player.getLocale`: клиентский язык (по умолчанию `en_us`). */
     private String locale = "en_us";
+    private Component listHeader = Component.empty();
+    private Component listFooter = Component.empty();
+    private String listHeaderLegacy = "";
+    private String listFooterLegacy = "";
 
     PlayerImpl(ChunkwakeServer server, UUID id, String name) {
         this.server = server;
@@ -382,6 +386,90 @@ public final class PlayerImpl {
             double offsetX, double offsetY, double offsetZ, double speed) {
         spawnParticle0(particle, x, y, z, count,
                 offsetX, offsetY, offsetZ, speed, null, false);
+    }
+
+    private void sendTabList() {
+        String header = GsonComponentSerializer.gson().serialize(listHeader);
+        String footer = GsonComponentSerializer.gson().serialize(listFooter);
+        playerEffect("tablist "
+                + java.util.HexFormat.of().formatHex(header.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                + " "
+                + java.util.HexFormat.of().formatHex(footer.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+    }
+
+    private static String legacyText(Component component) {
+        return net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer
+                .legacySection().serialize(component);
+    }
+
+    public void setPlayerListHeader(String header) {
+        listHeaderLegacy = header == null ? "" : header;
+        listHeader = header == null ? Component.empty() : ChunkwakeServer.legacy(header);
+        sendTabList();
+    }
+
+    public void setPlayerListFooter(String footer) {
+        listFooterLegacy = footer == null ? "" : footer;
+        listFooter = footer == null ? Component.empty() : ChunkwakeServer.legacy(footer);
+        sendTabList();
+    }
+
+    public void setPlayerListHeaderFooter(String header, String footer) {
+        listHeaderLegacy = header == null ? "" : header;
+        listFooterLegacy = footer == null ? "" : footer;
+        listHeader = header == null ? Component.empty() : ChunkwakeServer.legacy(header);
+        listFooter = footer == null ? Component.empty() : ChunkwakeServer.legacy(footer);
+        sendTabList();
+    }
+
+    public void setPlayerListHeaderFooter(net.md_5.bungee.api.chat.BaseComponent header,
+            net.md_5.bungee.api.chat.BaseComponent footer) {
+        setPlayerListHeaderFooter(
+                header == null ? null : net.md_5.bungee.api.chat.TextComponent.toLegacyText(header),
+                footer == null ? null : net.md_5.bungee.api.chat.TextComponent.toLegacyText(footer));
+    }
+
+    public void setPlayerListHeaderFooter(net.md_5.bungee.api.chat.BaseComponent[] header,
+            net.md_5.bungee.api.chat.BaseComponent[] footer) {
+        setPlayerListHeaderFooter(
+                header == null ? null : net.md_5.bungee.api.chat.TextComponent.toLegacyText(header),
+                footer == null ? null : net.md_5.bungee.api.chat.TextComponent.toLegacyText(footer));
+    }
+
+    public String getPlayerListHeader() { return listHeaderLegacy; }
+    public String getPlayerListFooter() { return listFooterLegacy; }
+
+    public void sendPlayerListHeader(Component header) {
+        listHeader = header == null ? Component.empty() : header;
+        listHeaderLegacy = legacyText(listHeader);
+        sendTabList();
+    }
+
+    public void sendPlayerListHeader(ComponentLike header) {
+        sendPlayerListHeader(header == null ? null : header.asComponent());
+    }
+
+    public void sendPlayerListFooter(Component footer) {
+        listFooter = footer == null ? Component.empty() : footer;
+        listFooterLegacy = legacyText(listFooter);
+        sendTabList();
+    }
+
+    public void sendPlayerListFooter(ComponentLike footer) {
+        sendPlayerListFooter(footer == null ? null : footer.asComponent());
+    }
+
+    public void sendPlayerListHeaderAndFooter(Component header, Component footer) {
+        listHeader = header == null ? Component.empty() : header;
+        listFooter = footer == null ? Component.empty() : footer;
+        listHeaderLegacy = legacyText(listHeader);
+        listFooterLegacy = legacyText(listFooter);
+        sendTabList();
+    }
+
+    public void sendPlayerListHeaderAndFooter(ComponentLike header, ComponentLike footer) {
+        sendPlayerListHeaderAndFooter(header == null ? null : header.asComponent(),
+                footer == null ? null : footer.asComponent());
     }
 
     private void titlePart(String part, Component component) {
