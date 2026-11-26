@@ -42,6 +42,9 @@ async fn main() {
     let sb_close = table
         .id(State::Play, Direction::Serverbound, "container_close")
         .unwrap();
+    let sb_click = table
+        .id(State::Play, Direction::Serverbound, "container_click")
+        .unwrap();
 
     let mut c = Client::connect(&a[1], "chestcontents", ids, 777, "26.3")
         .await
@@ -85,6 +88,21 @@ async fn main() {
             .and_then(|(_, payload)| payload.first().copied());
         println!("open {attempt} window={window:?}");
         drain(&mut c, 600).await;
+        if attempt == 1
+            && let Some(window) = window
+        {
+            let mut w = Writer::new();
+            w.var_int(sb_click)
+                .var_int(window as i32)
+                .var_int(0)
+                .u16(0)
+                .u8(0)
+                .var_int(0)
+                .var_int(0)
+                .bool(false);
+            c.send_raw(&w.buf).await.unwrap();
+            drain(&mut c, 600).await;
+        }
         if let Some(window) = window {
             let mut w = Writer::new();
             w.var_int(sb_close).var_int(window as i32);

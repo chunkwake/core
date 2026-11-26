@@ -24,6 +24,7 @@ final class ContainerOpenProbe implements Listener {
     private final JavaPlugin plugin;
     private int opens;
     private int closes;
+    private int clicks;
     private int ok;
     private int bad;
 
@@ -83,12 +84,12 @@ final class ContainerOpenProbe implements Listener {
                 check(temp.getContents()[0] != null, "temp-inventory");
                 plugin.getLogger().info("CONTAINER_OPEN first size=" + top.getSize());
             } else {
-                // Close-sort (ChestSort по умолчанию) переставил предметы.
-                check(first != null && first.getType() == Material.STONE
-                        && first.getAmount() == 3, "reopen-stone");
-                check(second != null && second.getType() == Material.DIRT
-                        && second.getAmount() == 2, "reopen-dirt");
-                var meta = second == null ? null : second.getItemMeta();
+                // Close-sort (ChestSort по умолчанию) вернул DIRT/STONE на место.
+                check(first != null && first.getType() == Material.DIRT
+                        && first.getAmount() == 2, "reopen-dirt");
+                check(second != null && second.getType() == Material.STONE
+                        && second.getAmount() == 3, "reopen-stone");
+                var meta = first == null ? null : first.getItemMeta();
                 check(meta != null && meta.hasCustomModelData()
                         && meta.getCustomModelData() == 42, "reopen-cmd");
                 check(meta != null && meta.isUnbreakable(), "reopen-unbreakable");
@@ -99,6 +100,53 @@ final class ContainerOpenProbe implements Listener {
         } finally {
             plugin.getLogger().info(
                     "CONTAINER_OPEN event opens=" + opens + " ok=" + ok + " bad=" + bad);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onClick(org.bukkit.event.inventory.InventoryClickEvent event) {
+        if (event.getInventory().getType() != org.bukkit.event.inventory.InventoryType.CHEST) {
+            return;
+        }
+        var location = event.getInventory().getLocation();
+        if (location != null && (location.getBlockX() != X
+                || location.getBlockY() != Y || location.getBlockZ() != Z)) {
+            return;
+        }
+        if (clicks > 0) {
+            return;
+        }
+        clicks++;
+        try {
+            Inventory top = event.getInventory();
+            check(event.getClickedInventory() == top, "click-top");
+            ItemStack first = top.getItem(0);
+            ItemStack second = top.getItem(1);
+            check(first != null && first.getType() == Material.DIRT
+                    && first.getAmount() == 2, "click-dirt");
+            check(second != null && second.getType() == Material.STONE
+                    && second.getAmount() == 3, "click-stone");
+            var meta = first == null ? null : first.getItemMeta();
+            check(meta != null && meta.hasCustomModelData()
+                    && meta.getCustomModelData() == 42, "click-cmd");
+            check(meta != null && meta.isUnbreakable(), "click-unbreakable");
+            check(event.getCurrentItem() != null
+                    && event.getCurrentItem().getType() == Material.DIRT, "click-current");
+            check(event.getCursor() == null, "click-cursor");
+            // Эмулируем hotkey-сортировку: отменяем клик и переставляем слоты.
+            event.setCancelled(true);
+            ItemStack[] contents = top.getContents();
+            ItemStack swap = contents[0];
+            contents[0] = contents[1];
+            contents[1] = swap;
+            top.setContents(contents);
+            plugin.getLogger().info("CONTAINER_OPEN click sorted");
+        } catch (Throwable t) {
+            bad++;
+            plugin.getLogger().log(java.util.logging.Level.WARNING, "CONTAINER_OPEN click error", t);
+        } finally {
+            plugin.getLogger().info(
+                    "CONTAINER_OPEN click clicks=" + clicks + " ok=" + ok + " bad=" + bad);
         }
     }
 
@@ -120,15 +168,27 @@ final class ContainerOpenProbe implements Listener {
             ItemStack first = top.getItem(0);
             ItemStack second = top.getItem(1);
             if (closes == 1) {
-                check(first != null && first.getType() == Material.DIRT
-                        && first.getAmount() == 2, "close-dirt");
-                check(second != null && second.getType() == Material.STONE
-                        && second.getAmount() == 3, "close-stone");
-                var meta = first == null ? null : first.getItemMeta();
-                check(meta != null && meta.hasCustomModelData()
-                        && meta.getCustomModelData() == 42, "close-cmd");
-                check(meta != null && meta.isUnbreakable(), "close-unbreakable");
-                // Эмулируем sort-time=close (по умолчанию у ChestSort).
+                if (clicks > 0) {
+                    // Click-sort (hotkey) уже переставил DIRT/STONE.
+                    check(first != null && first.getType() == Material.STONE
+                            && first.getAmount() == 3, "close-click-stone");
+                    check(second != null && second.getType() == Material.DIRT
+                            && second.getAmount() == 2, "close-click-dirt");
+                    var meta = second == null ? null : second.getItemMeta();
+                    check(meta != null && meta.hasCustomModelData()
+                            && meta.getCustomModelData() == 42, "close-click-cmd");
+                    check(meta != null && meta.isUnbreakable(), "close-click-unbreakable");
+                } else {
+                    check(first != null && first.getType() == Material.DIRT
+                            && first.getAmount() == 2, "close-dirt");
+                    check(second != null && second.getType() == Material.STONE
+                            && second.getAmount() == 3, "close-stone");
+                    var meta = first == null ? null : first.getItemMeta();
+                    check(meta != null && meta.hasCustomModelData()
+                            && meta.getCustomModelData() == 42, "close-cmd");
+                    check(meta != null && meta.isUnbreakable(), "close-unbreakable");
+                }
+                // Эмулируем sort-time=close (по умолчанию у ChestSort): вернуть DIRT/STONE.
                 ItemStack[] contents = top.getContents();
                 ItemStack swap = contents[0];
                 contents[0] = contents[1];
@@ -136,11 +196,11 @@ final class ContainerOpenProbe implements Listener {
                 top.setContents(contents);
                 plugin.getLogger().info("CONTAINER_OPEN close sorted");
             } else {
-                check(first != null && first.getType() == Material.STONE
-                        && first.getAmount() == 3, "next-close-stone");
-                check(second != null && second.getType() == Material.DIRT
-                        && second.getAmount() == 2, "next-close-dirt");
-                var meta = second == null ? null : second.getItemMeta();
+                check(first != null && first.getType() == Material.DIRT
+                        && first.getAmount() == 2, "next-close-dirt");
+                check(second != null && second.getType() == Material.STONE
+                        && second.getAmount() == 3, "next-close-stone");
+                var meta = first == null ? null : first.getItemMeta();
                 check(meta != null && meta.hasCustomModelData()
                         && meta.getCustomModelData() == 42, "next-close-cmd");
                 check(meta != null && meta.isUnbreakable(), "next-close-unbreakable");

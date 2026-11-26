@@ -13470,68 +13470,93 @@ impl PlayPlan {
         true
     }
 
-    /// `InventoryClickEvent` до применения клика; `true` — плагин отменил.
-    async fn click_cancelled(
+    /// `InventoryClickEvent` до применения клика: плагин видит все слоты окна,
+    /// может их изменить (hotkey-сортировка), а `true` отменяет сам клик.
+    async fn click_event(
         &self,
         uuid: Uuid,
-        inv: &Inventory,
-        window: Option<&Window>,
+        inv: &mut Inventory,
+        ender: &mut Vec<Slot>,
+        window: &mut Option<Window>,
         c: &chunkwake_protocol::inventory::ContainerClick,
-    ) -> bool {
+    ) -> (bool, bool) {
         if c.mode == 5
             || !self
                 .hooks()
                 .is_some_and(|h| h.listens(Event::InventoryClick))
         {
-            return false;
+            return (false, false);
         }
-        let (ty, pid, top, current) = if c.window == chunkwake_protocol::inventory::PLAYER_WINDOW {
-            let cur = usize::try_from(c.slot)
-                .ok()
-                .and_then(|i| inv.slots.get(i).copied().flatten());
-            ("CRAFTING", -1, 5, cur)
-        } else if let Some(w) = window.filter(|w| w.id == c.window) {
-            let n = w.slots.len();
-            let cur = usize::try_from(c.slot).ok().and_then(|i| {
-                if i < n {
-                    w.slots[i]
-                } else {
-                    inv.slots.get(9 + i - n).copied().flatten()
-                }
-            });
-            let ty = match w.kind {
-                Kind::Chest(5) => "HOPPER",
-                Kind::Chest(9) if plugin_of(w.pos).is_none() => "DISPENSER",
-                Kind::Chest(_) => "CHEST",
-                Kind::EnderChest => "ENDER_CHEST",
-                Kind::Crafting => "WORKBENCH",
-                Kind::Furnace => "FURNACE",
-                Kind::Brewing => "BREWING",
-                Kind::Enchanting => "ENCHANTING",
-                Kind::Grindstone => "GRINDSTONE",
-                Kind::Anvil => "ANVIL",
-                Kind::Smithing => "SMITHING",
-                Kind::Stonecutter => "STONECUTTER",
-                Kind::Loom => "LOOM",
-                Kind::Cartography => "CARTOGRAPHY",
-                Kind::Lectern => "LECTERN",
-                Kind::Beacon => "BEACON",
-                Kind::Crafter(_) => "CRAFTER",
-                Kind::Merchant => "MERCHANT",
-                Kind::Player => "CRAFTING",
+        let (ty, pid, top, current, top_slots) =
+            if c.window == chunkwake_protocol::inventory::PLAYER_WINDOW {
+                let cur = usize::try_from(c.slot)
+                    .ok()
+                    .and_then(|i| inv.slots.get(i).copied().flatten());
+                let slots = inv.slots.iter().take(5).copied().collect::<Vec<_>>();
+                ("CRAFTING", -1, slots.len(), cur, slots)
+            } else if let Some(w) = window.as_ref().filter(|w| w.id == c.window) {
+                let n = w.slots.len();
+                let cur = usize::try_from(c.slot).ok().and_then(|i| {
+                    if i < n {
+                        w.slots[i]
+                    } else {
+                        inv.slots.get(9 + i - n).copied().flatten()
+                    }
+                });
+                let ty = match w.kind {
+                    Kind::Chest(5) => "HOPPER",
+                    Kind::Chest(9) if plugin_of(w.pos).is_none() => "DISPENSER",
+                    Kind::Chest(_) => "CHEST",
+                    Kind::EnderChest => "ENDER_CHEST",
+                    Kind::Crafting => "WORKBENCH",
+                    Kind::Furnace => "FURNACE",
+                    Kind::Brewing => "BREWING",
+                    Kind::Enchanting => "ENCHANTING",
+                    Kind::Grindstone => "GRINDSTONE",
+                    Kind::Anvil => "ANVIL",
+                    Kind::Smithing => "SMITHING",
+                    Kind::Stonecutter => "STONECUTTER",
+                    Kind::Loom => "LOOM",
+                    Kind::Cartography => "CARTOGRAPHY",
+                    Kind::Lectern => "LECTERN",
+                    Kind::Beacon => "BEACON",
+                    Kind::Crafter(_) => "CRAFTER",
+                    Kind::Merchant => "MERCHANT",
+                    Kind::Player => "CRAFTING",
+                };
+                (ty, plugin_of(w.pos).unwrap_or(-1), n, cur, w.slots.clone())
+            } else {
+                return (false, false);
             };
-            (ty, plugin_of(w.pos).unwrap_or(-1), n, cur)
-        } else {
-            return false;
-        };
         let (cur, cursor) = (self.slot_line(current), self.slot_line(inv.carried));
-        self.cancelled(Event::InventoryClick, uuid, || {
-            format!(
-                "{ty} {pid} {top} {} {} {}\n{cur}\n{cursor}",
-                c.slot, c.button, c.mode
-            )
-        })
-        .await
+        let mut arg = format!("{ty} {pid} {top} {} {} {}", c.slot, c.button, c.mode);
+        for slot in &top_slots {
+            arg.push('\n');
+            arg.push_str(&self.slot_line(*slot));
+        }
+        arg.push('\n');
+        arg.push_str(&cur);
+        arg.push('\n');
+        arg.push_str(&cursor);
+        let Some(reply) = self.plugin_event(Event::InventoryClick, uuid, || arg).await else {
+            return (false, false);
+        };
+        let cancelled = reply.lines().next().unwrap_or("").trim() == "c";
+        let mut changed = false;
+        if c.window == chunkwake_protocol::inventory::PLAYER_WINDOW {
+            changed =
+                apply_inventory_open_reply(&mut inv.slots[..5], &reply, |name| self.item_id(name));
+        } else if let Some(w) = window.as_mut().filter(|w| w.id == c.window) {
+            changed = apply_inventory_open_reply(&mut w.slots, &reply, |name| self.item_id(name));
+            if changed {
+                match w.kind {
+                    Kind::Chest(_) => self.save_window(w, uuid),
+                    Kind::EnderChest => ender.clone_from(&w.slots),
+                    _ => {}
+                }
+            }
+        }
+        (cancelled, changed)
     }
 
     /// Закрыть окно; плагинам — `InventoryCloseEvent` (id окна и слоты).
@@ -15554,7 +15579,10 @@ impl PlayPlan {
                             self.send_window(conn, &mut state.inv, window.as_ref(), c.window).await?;
                             continue;
                         }
-                        if self.click_cancelled(uuid, &state.inv, window.as_ref(), &c).await {
+                        let (cancelled, plugin_changed) = self
+                            .click_event(uuid, &mut state.inv, &mut state.ender, &mut window, &c)
+                            .await;
+                        if cancelled {
                             self.send_window(conn, &mut state.inv, window.as_ref(), c.window).await?;
                             continue;
                         }
@@ -15563,7 +15591,7 @@ impl PlayPlan {
                             let old_level = state.xp.level;
                             let (thrown, resync) = self.click(&mut state.inv, &mut state.ender, &mut window, &c, &mut state.xp, creative, uuid);
                             if old_level != state.xp.level { self.send_xp(conn, &state.xp).await?; }
-                            if resync || window.as_ref().is_some_and(|w| w.id == c.window && matches!(w.kind, Kind::Stonecutter | Kind::Anvil | Kind::Loom)) {
+                            if resync || plugin_changed || window.as_ref().is_some_and(|w| w.id == c.window && matches!(w.kind, Kind::Stonecutter | Kind::Anvil | Kind::Loom)) {
                                 self.send_window(conn, &mut state.inv, window.as_ref(), c.window).await?;
                             }
                             if let Some(w) = window.as_ref().filter(|w| w.id == c.window && w.kind == Kind::Anvil) {

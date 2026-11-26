@@ -725,13 +725,31 @@ final class Events {
         var type = org.bukkit.event.inventory.InventoryType.valueOf(f[0]);
         int pid = Integer.parseInt(f[1]), size = Integer.parseInt(f[2]);
         int raw = Integer.parseInt(f[3]), button = Integer.parseInt(f[4]), mode = Integer.parseInt(f[5]);
-        ItemStack cur = l.length > 1 && !l[1].equals("-") ? StackImpl.parse(l[1]) : null;
-        ItemStack cursor = l.length > 2 && !l[2].equals("-") ? StackImpl.parse(l[2]) : null;
+        String[] before = new String[size];
+        for (int i = 0; i < size; i++) {
+            before[i] = 1 + i < l.length ? l[1 + i] : "-";
+        }
+        int currentIndex = 1 + size;
+        int cursorIndex = currentIndex + 1;
+        ItemStack cur = l.length > currentIndex && !l[currentIndex].equals("-")
+                ? StackImpl.parse(l[currentIndex]) : null;
+        ItemStack cursor = l.length > cursorIndex && !l[cursorIndex].equals("-")
+                ? StackImpl.parse(l[cursorIndex]) : null;
         ViewImpl view = pid > 0 ? p.viewFor(pid) : null;
         if (view == null) {
-            view = type == org.bukkit.event.inventory.InventoryType.CRAFTING ? p.craftingView()
-                    : new ViewImpl(p, ViewImpl.blockTop(p, type, size), type, net.kyori.adventure.text.Component.translatable(
-                            "container." + type.name().toLowerCase(java.util.Locale.ROOT)));
+            ViewImpl.BlockTop top = new ViewImpl.BlockTop(
+                    p, type, new ItemStack[size], null, "");
+            view = new ViewImpl(p, ViewImpl.blockTop(top), type,
+                    net.kyori.adventure.text.Component.translatable(
+                            "container." + type.name().toLowerCase(java.util.Locale.ROOT)),
+                    top);
+        }
+        ViewImpl.BlockTop top = view.blockTop;
+        if (top != null && top.size() == size) {
+            // Плагин видит актуальное содержимое окна, а не снимок открытия.
+            for (int i = 0; i < size; i++) {
+                top.setLine(i, before[i]);
+            }
         }
         view.clicked(raw, cur, cursor);
         boolean outside = raw == -999;
@@ -792,7 +810,17 @@ final class Events {
                 ? new org.bukkit.event.inventory.InventoryClickEvent(view.api, slotType, raw, click, action, key)
                 : new org.bukkit.event.inventory.InventoryClickEvent(view.api, slotType, raw, click, action);
         plugins.callEvent(e);
-        return e.isCancelled() ? "c" : "";
+        StringBuilder out = new StringBuilder(e.isCancelled() ? "c" : "k");
+        if (top != null && top.size() == size) {
+            // Hotkey-сортировка и другие правки возвращаются в Rust до клика.
+            for (int i = 0; i < size; i++) {
+                String after = top.line(i);
+                if (!after.equals(before[i])) {
+                    out.append('\n').append(i).append(' ').append(after);
+                }
+            }
+        }
+        return out.toString();
     }
 
     /** Воткнутая стрела для {@code PlayerPickupArrowEvent}. */
