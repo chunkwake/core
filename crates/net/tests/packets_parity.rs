@@ -23,7 +23,6 @@ const UNHANDLED: &[&str] = &[
     "cookie_response",
     "custom_click_action",
     "debug_subscription_request",
-    "entity_tag_query",
     "jigsaw_generate",
     "lock_difficulty",
     "ping_request",

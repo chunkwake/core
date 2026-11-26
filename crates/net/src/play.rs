@@ -146,6 +146,7 @@ struct Ids {
     sb_pick_item_from_entity: i32,
     sb_teleport_to_entity: i32,
     sb_block_entity_tag_query: i32,
+    sb_entity_tag_query: i32,
     sb_change_game_mode: i32,
     sb_set_carried_item: i32,
     sb_set_beacon: i32,
@@ -3500,6 +3501,7 @@ impl PlayPlan {
                 sb_pick_item_from_entity: sb("pick_item_from_entity")?,
                 sb_teleport_to_entity: sb("teleport_to_entity")?,
                 sb_block_entity_tag_query: sb("block_entity_tag_query")?,
+                sb_entity_tag_query: sb("entity_tag_query")?,
                 sb_change_game_mode: sb("change_game_mode")?,
                 sb_set_carried_item: sb("set_carried_item")?,
                 sb_set_beacon: sb("set_beacon")?,
@@ -15773,6 +15775,29 @@ impl PlayPlan {
                                 bytes.as_deref(),
                             ))
                             .await?;
+                        }
+                        continue;
+                    }
+                    if id == ids.sb_entity_tag_query {
+                        // `ServerboundEntityTagQueryPacket`: F3+I, только
+                        // уровень прав 2. Нет сущности — ответа нет.
+                        let transaction = r.var_int()?;
+                        let entity = r.var_int()?;
+                        if self.op_level(uuid) >= 2 {
+                            let target =
+                                crate::play::commands::access::entity_ref(entity, [0.0; 3], "");
+                            let mut nbt = self.entity_nbt(&target);
+                            if !nbt.is_empty() {
+                                // `Entity.saveWithoutId` не пишет `id`.
+                                nbt.remove("id");
+                                let bytes = chunkwake_world::nbt::write_network(&nbt);
+                                conn.send(&play::tag_query(
+                                    ids.tag_query,
+                                    transaction,
+                                    Some(&bytes),
+                                ))
+                                .await?;
+                            }
                         }
                         continue;
                     }

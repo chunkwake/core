@@ -2817,7 +2817,7 @@ impl PlayPlan {
 }
 
 /// Сущность мира как цель селектора.
-fn entity_ref(entity_id: i32, pos: [f64; 3], name: &str) -> Target {
+pub(crate) fn entity_ref(entity_id: i32, pos: [f64; 3], name: &str) -> Target {
     Target {
         // У сущностей мира нет UUID: берём предсказуемый, чтобы сравнение
         // работало; отличать их достаточно по `entity_id`.
