@@ -1229,6 +1229,7 @@ fn survival_data(
             .network_id("damage_type", "minecraft:wither")
             .map_err(s)?,
         difficulty: std::sync::atomic::AtomicU8::new(difficulty.id()),
+        difficulty_locked: std::sync::atomic::AtomicBool::new(false),
         item_ids: items.clone(),
         potions: {
             let map =

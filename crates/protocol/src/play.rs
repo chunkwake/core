@@ -1523,9 +1523,9 @@ pub fn set_time(id: i32, game_time: i64, day_time: i64, ticking: bool) -> Vec<u8
 }
 
 /// `change_difficulty`: байт сложности (0 мирный … 3 сложный) и флаг блокировки.
-pub fn change_difficulty(id: i32, difficulty: u8) -> Vec<u8> {
+pub fn change_difficulty(id: i32, difficulty: u8, locked: bool) -> Vec<u8> {
     let mut w = Writer::new();
-    w.var_int(id).u8(difficulty).bool(false);
+    w.var_int(id).u8(difficulty).bool(locked);
     w.buf
 }
 
@@ -1731,7 +1731,7 @@ mod block_tests {
         assert_eq!(r.f32().unwrap(), 1.0);
         assert!(r.remaining().is_empty());
 
-        let diff = change_difficulty(4, 2);
+        let diff = change_difficulty(4, 2, false);
         let mut r = crate::Reader::new(&diff);
         assert_eq!(r.var_int().unwrap(), 4);
         assert_eq!(r.u8().unwrap(), 2);

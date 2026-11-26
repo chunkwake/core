@@ -147,6 +147,8 @@ struct Ids {
     sb_teleport_to_entity: i32,
     sb_block_entity_tag_query: i32,
     sb_entity_tag_query: i32,
+    sb_change_difficulty: i32,
+    sb_lock_difficulty: i32,
     sb_change_game_mode: i32,
     sb_set_carried_item: i32,
     sb_set_beacon: i32,
@@ -3270,6 +3272,8 @@ pub struct SurvivalData {
     pub lightning_entity_type: i32,
     /// Текущая сложность: `/difficulty` меняет её, пока сервер запущен.
     pub difficulty: AtomicU8,
+    /// `difficultyLocked`: смена сложности из клиента и `/difficulty` не проходит.
+    pub difficulty_locked: AtomicBool,
     /// ID предмета по имени (`minecraft:bread`) для `/give`.
     pub item_ids: HashMap<String, i32>,
     /// Имя зелья по сетевому ID реестра `potion` (`minecraft:swiftness`).
@@ -3502,6 +3506,8 @@ impl PlayPlan {
                 sb_teleport_to_entity: sb("teleport_to_entity")?,
                 sb_block_entity_tag_query: sb("block_entity_tag_query")?,
                 sb_entity_tag_query: sb("entity_tag_query")?,
+                sb_change_difficulty: sb("change_difficulty")?,
+                sb_lock_difficulty: sb("lock_difficulty")?,
                 sb_change_game_mode: sb("change_game_mode")?,
                 sb_set_carried_item: sb("set_carried_item")?,
                 sb_set_beacon: sb("set_beacon")?,
@@ -14502,6 +14508,7 @@ impl PlayPlan {
         conn.send(&play::change_difficulty(
             ids.change_difficulty,
             self.difficulty().id(),
+            self.survival.difficulty_locked.load(Ordering::Relaxed),
         ))
         .await?;
         let level = self.op_level(uuid);
@@ -14975,7 +14982,7 @@ impl PlayPlan {
                                 // который кончается `LEVEL_CHUNKS_LOAD_START`, —
                                 // без него клиент не снимает экран загрузки.
                                 conn.send(&chunkwake_protocol::inventory::respawn(ids.respawn, &spawn, 3)).await?;
-                                conn.send(&play::change_difficulty(ids.change_difficulty, self.difficulty().id())).await?;
+                                conn.send(&play::change_difficulty(ids.change_difficulty, self.difficulty().id(), self.survival.difficulty_locked.load(Ordering::Relaxed))).await?;
                                 let level = self.op_level(uuid);
                                 conn.send(&permission_event(ids.entity_event, me.entity_id, level)).await?;
                                 conn.send(&play::player_abilities(ids.player_abilities, mode, self.allow_flight.load(Ordering::Relaxed))).await?;
@@ -15677,6 +15684,23 @@ impl PlayPlan {
                                 w.data[..3].copy_from_slice(&data[..3]);
                                 self.send_window(conn, &mut state.inv, Some(w), w.id).await?;
                             }
+                        }
+                        continue;
+                    }
+                    if id == ids.sb_change_difficulty {
+                        // `handleChangeDifficulty`: права 2; при включённой
+                        // блокировке `MinecraftServer.setDifficulty` ничего не меняет.
+                        let level = r.u8()?;
+                        if self.op_level(uuid) >= 2 {
+                            self.set_difficulty(level);
+                        }
+                        continue;
+                    }
+                    if id == ids.sb_lock_difficulty {
+                        // `handleLockDifficulty`: тоже уровень прав 2.
+                        let locked = r.bool()?;
+                        if self.op_level(uuid) >= 2 {
+                            self.set_difficulty_locked(locked);
                         }
                         continue;
                     }

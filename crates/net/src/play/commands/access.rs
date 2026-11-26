@@ -1063,12 +1063,31 @@ impl PlayPlan {
 
     /// Сложность мира (`/difficulty`).
     pub(crate) fn set_difficulty(&self, level: u8) {
+        if self.survival.difficulty_locked.load(Ordering::Relaxed) {
+            return;
+        }
         self.survival
             .difficulty
             .store(level.min(3), Ordering::Relaxed);
+        self.broadcast_difficulty();
+    }
+
+    /// `MinecraftServer.setDifficultyLocked`: блокировка и рассылка клиентам.
+    pub(crate) fn set_difficulty_locked(&self, locked: bool) {
+        self.survival
+            .difficulty_locked
+            .store(locked, Ordering::Relaxed);
+        self.broadcast_difficulty();
+    }
+
+    fn broadcast_difficulty(&self) {
         self.hub.send(
             None,
-            chunkwake_protocol::play::change_difficulty(self.ids.change_difficulty, level.min(3)),
+            chunkwake_protocol::play::change_difficulty(
+                self.ids.change_difficulty,
+                self.survival.difficulty.load(Ordering::Relaxed).min(3),
+                self.survival.difficulty_locked.load(Ordering::Relaxed),
+            ),
         );
     }
 

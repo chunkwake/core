@@ -15,7 +15,6 @@ use std::collections::BTreeSet;
 /// Матрица: `docs/feature-matrix.md`, строка «Пакеты клиента».
 const UNHANDLED: &[&str] = &[
     "bundle_item_selected",
-    "change_difficulty",
     "chat_ack",
     "chat_session_update",
     "client_tick_end",
@@ -24,7 +23,6 @@ const UNHANDLED: &[&str] = &[
     "custom_click_action",
     "debug_subscription_request",
     "jigsaw_generate",
-    "lock_difficulty",
     "ping_request",
     "pong",
     "resource_pack",
