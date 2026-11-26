@@ -193,11 +193,13 @@ pub enum Goal {
         parent: Option<i32>,
         recalc: i32,
     },
-    /// `RandomStrollGoal` / `WaterAvoidingRandomStrollGoal` (`avoid_water`).
+    /// `RandomStrollGoal` / `WaterAvoidingRandomStrollGoal` (`avoid_water`) /
+    /// `RandomSwimmingGoal` (`swim`).
     Stroll {
         speed: f64,
         interval: i32,
         avoid_water: bool,
+        swim: bool,
         to: [f64; 3],
     },
     /// `LookAtPlayerGoal(Player, range)`.
@@ -724,6 +726,30 @@ pub fn land_pos(m: &Mob, c: &mut Ctx, h: i32, v: i32) -> Option<[f64; 3]> {
     })
 }
 
+/// `BehaviorUtils.getRandomSwimmablePos`: `DefaultRandomPos.getPos` до 10 раз,
+/// пока точка не окажется в воде (`WaterBoundPathNavigation.isStableDestination`
+/// — блок не цельный).
+pub fn swim_pos(m: &Mob, c: &mut Ctx, h: i32, v: i32) -> Option<[f64; 3]> {
+    for _ in 0..10 {
+        let p = generate(m, c, |m, c| {
+            let d = random_dir(c, h, v);
+            let p = toward(m, d);
+            (!outside(c, p) && !path::cell(c.w, p).has(path::Cell::SOLID)).then_some(p)
+        });
+        if let Some(p) = p {
+            let at = [
+                p[0].floor() as i32,
+                p[1].floor() as i32,
+                p[2].floor() as i32,
+            ];
+            if (c.w.water)(at) {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
 // --- Сами цели ------------------------------------------------------------
 
 /// `isInFluidDeeperThan(WATER, getFluidJumpThreshold)`.
@@ -856,6 +882,7 @@ fn can_use(g: &mut Goal, m: &mut Mob, c: &mut Ctx) -> bool {
         Goal::Stroll {
             interval,
             avoid_water,
+            swim,
             to,
             ..
         } => {
@@ -865,7 +892,9 @@ fn can_use(g: &mut Goal, m: &mut Mob, c: &mut Ctx) -> bool {
             if c.next_int(reduced(*interval)) != 0 {
                 return false;
             }
-            let p = if *avoid_water {
+            let p = if *swim {
+                swim_pos(m, c, 10, 7)
+            } else if *avoid_water {
                 if super::in_water(m, c.w) {
                     land_pos(m, c, 15, 7)
                 } else if c.next_float() >= 0.001 {
@@ -1472,6 +1501,7 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
                 speed,
                 interval: 120,
                 avoid_water: true,
+                swim: false,
                 to: [0.0; 3],
             },
         )
@@ -1663,9 +1693,25 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
                 Selector::new(vec![nearest(1, false)]),
             );
         }
-        // Рыба, светящийся спрут и летучая мышь: без целей (движение —
-        // отдельной строкой).
-        Species::Cod | Species::Salmon | Species::GlowSquid | Species::Bat => {
+        // Рыба и светящийся спрут: `FishSwimGoal` (
+        // `RandomSwimmingGoal(1.0, 40)`); без целей.
+        Species::Cod | Species::Salmon | Species::GlowSquid => {
+            return (
+                Selector::new(vec![(
+                    4,
+                    Goal::Stroll {
+                        speed: 1.0,
+                        interval: 40,
+                        avoid_water: false,
+                        swim: true,
+                        to: [0.0; 3],
+                    },
+                )]),
+                Selector::default(),
+            );
+        }
+        // Летучая мышь: движение отдельной строкой.
+        Species::Bat => {
             return (Selector::default(), Selector::default());
         }
         // `Piglin`/`Wolf`: для проб и взаимодействия достаточно прогулки.

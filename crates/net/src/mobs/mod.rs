@@ -539,8 +539,10 @@ const BUILTIN: [SpeciesInfo; 32] = [
         size: (0.5, 0.3),
         eye_height: 0.195,
         max_health: 3.0,
-        speed: 0.0,
-        follow_range: 0.0,
+        // `Mob.createMobAttributes`: движение 0.7 и follow range 16 — значения
+        // атрибутов по умолчанию, отдельных `add` у рыбы нет.
+        speed: 0.7,
+        follow_range: 16.0,
         ..base(
             "minecraft:cod",
             "minecraft:entity.cod",
@@ -828,8 +830,14 @@ fn merge(b: &SpeciesInfo, types: &[chunkwake_data::world::EntityTypeInfo]) -> Sp
     s.category = Category::from_key(&t.category).unwrap_or(Category::Creature);
     if let Some(a) = t.attributes {
         s.max_health = a.max_health as f32;
-        s.speed = a.movement_speed;
-        s.follow_range = a.follow_range;
+        // Ноль означает «атрибут не задан»: у рыбы нет своего `add`, а
+        // значения по умолчанию — 0.7 и 16. Оставляем встроенные.
+        if a.movement_speed > 0.0 {
+            s.speed = a.movement_speed;
+        }
+        if a.follow_range > 0.0 {
+            s.follow_range = a.follow_range;
+        }
         s.attack_damage = a.attack_damage.unwrap_or(0.0) as f32;
         s.armor = a.armor;
         s.step_height = a.step_height;
@@ -1280,7 +1288,7 @@ impl Mob {
             dragon_cycle: 0,
             raid_leader: false,
             witch_heal_cooldown: 0,
-            nav: Navigation::new(species == Species::Spider),
+            nav: navigation_for(species),
             move_ctl: MoveControl::default(),
             move_speed: 0.0,
             zza: 0.0,
@@ -1943,10 +1951,24 @@ pub fn dist2(a: [f64; 3], b: [f64; 3]) -> f64 {
     (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)
 }
 
+/// `Mob.createNavigation`: рыбы и светящийся спрут ходят
+/// `WaterBoundPathNavigation`, паук — `WallClimberNavigation`, остальные —
+/// `GroundPathNavigation`.
+fn navigation_for(species: Species) -> Navigation {
+    match species {
+        Species::Cod | Species::Salmon | Species::GlowSquid => Navigation::water(false),
+        _ => Navigation::new(species == Species::Spider),
+    }
+}
+
 /// Моб для поиска пути.
 pub fn walker(m: &Mob, w: &World, difficulty: u8, in_water: bool) -> path::Walker {
     let (width, height) = m.size();
     let animal = m.species.is_animal();
+    let aquatic = matches!(
+        m.species,
+        Species::Cod | Species::Salmon | Species::GlowSquid
+    );
     path::Walker {
         pos: m.pos,
         width,
@@ -1961,7 +1983,13 @@ pub fn walker(m: &Mob, w: &World, difficulty: u8, in_water: bool) -> path::Walke
         can_open_doors: m.can_break_doors,
         can_pass_doors: true,
         can_walk_over_fences: false,
-        malus: if animal { path::ANIMAL_MALUS } else { &[] },
+        malus: if aquatic {
+            path::WATER_MALUS
+        } else if animal {
+            path::ANIMAL_MALUS
+        } else {
+            &[]
+        },
         min_y: w.min_y,
     }
 }
@@ -4689,5 +4717,49 @@ mod tests {
         tick(&mut m, &w, &mut s);
         assert!(m.pos[1] > y0 + 0.3, "{:?}", m.pos);
         assert!(m.vel[0] > 0.2, "{:?}", m.vel);
+    }
+
+    /// Треска (`WaterBoundPathNavigation`) плывёт по воде: путь строится,
+    /// `MoveControl` ведёт её вперёд, из воды она не выходит.
+    #[test]
+    fn cod_swims_along_water_path() {
+        let shape = |p: [i32; 3]| if p[1] < 64 { FULL } else { &[][..] };
+        let water = |p: [i32; 3]| (64..=70).contains(&p[1]);
+        let w = World {
+            shape: &shape,
+            water: &water,
+            cell: None,
+            info: None,
+            min_y: -64,
+        };
+        let mut m = Mob::new(Species::Cod, [0.5, 65.0, 0.5], 1);
+        m.on_ground = false;
+        let walk = walker(&m, &w, 2, true);
+        let found = m.nav.path_to(&w, &walk, [6.0, 66.0, 0.5], 1, 16.0);
+        assert!(found.is_some(), "no water path");
+        assert!(m.nav.move_to(&w, &walk, found, 1.0));
+        let mut rnd = || 0.99;
+        let mut s = Senses {
+            players: &[],
+            rand: &mut rnd,
+            prey: &[],
+            tempters: &[],
+            kin: &[],
+            sight: &always_visible,
+            difficulty: 2,
+            entity_id: 1,
+            bright_outside: false,
+            mob_griefing: false,
+            jump_boost: None,
+        };
+        for _ in 0..200 {
+            tick(&mut m, &w, &mut s);
+            assert!(
+                (64..=70).contains(&(m.pos[1].floor() as i32)),
+                "left water: {:?}",
+                m.pos
+            );
+        }
+        assert!(m.pos[0] > 2.0, "did not swim: {:?}", m.pos);
     }
 }

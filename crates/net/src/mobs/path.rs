@@ -290,6 +290,21 @@ pub struct Walker {
 pub const ANIMAL_MALUS: &[(PathType, f32)] =
     &[(PathType::FireInNeighbor, 16.0), (PathType::Fire, -1.0)];
 
+/// `WaterAnimal`: вода проходима бесплатно (по умолчанию у `PathType.WATER`
+/// штраф 8, он остаётся только у наземных мобов).
+pub const WATER_MALUS: &[(PathType, f32)] = &[(PathType::Water, 0.0)];
+
+/// Вид навигации (`PathNavigation` и его наследники).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NavKind {
+    /// `GroundPathNavigation`/`WallClimberNavigation`.
+    #[default]
+    Ground,
+    /// `WaterBoundPathNavigation`: только вода; `breaching` — дельфин,
+    /// которому разрешён `PathType.BREACH` (воздух над водой).
+    Water { breaching: bool },
+}
+
 impl Walker {
     pub fn malus(&self, t: PathType) -> f32 {
         self.malus
@@ -392,6 +407,7 @@ struct Target {
 struct Search<'q, 'a, 's, 'r> {
     w: &'q World<'a, 's, 'r>,
     m: &'q Walker,
+    kind: NavKind,
     nodes: Vec<Node>,
     index: HashMap<[i32; 3], u32>,
     types: HashMap<[i32; 3], PathType>,
@@ -404,10 +420,11 @@ struct Search<'q, 'a, 's, 'r> {
 }
 
 impl<'q, 'a, 's, 'r> Search<'q, 'a, 's, 'r> {
-    fn new(w: &'q World<'a, 's, 'r>, m: &'q Walker) -> Self {
+    fn new(w: &'q World<'a, 's, 'r>, m: &'q Walker, kind: NavKind) -> Self {
         Self {
             w,
             m,
+            kind,
             nodes: Vec::new(),
             index: HashMap::default(),
             types: HashMap::default(),
@@ -642,14 +659,47 @@ impl<'q, 'a, 's, 'r> Search<'q, 'a, 's, 'r> {
         best
     }
 
-    /// `getCachedPathType`.
+    /// `getCachedPathType`: у плавающей навигации свой `SwimNodeEvaluator`
+    /// (`getPathTypeOfMob`), у наземной — `WalkNodeEvaluator`.
     fn cached(&mut self, p: [i32; 3]) -> PathType {
         if let Some(&t) = self.types.get(&p) {
             return t;
         }
-        let t = self.type_of_mob(p);
+        let t = match self.kind {
+            NavKind::Ground => self.type_of_mob(p),
+            NavKind::Water { .. } => self.swim_type(p),
+        };
         self.types.insert(p, t);
         t
+    }
+
+    /// `SwimNodeEvaluator.getPathTypeOfMob`: все клетки рамки — вода; воздух
+    /// над водой — `BREACH`; иначе `BLOCKED`.
+    fn swim_type(&self, p: [i32; 3]) -> PathType {
+        let mut last = p;
+        for i in 0..self.ew.max(1) {
+            for j in 0..self.eh.max(1) {
+                for k in 0..self.ed.max(1) {
+                    let q = [p[0] + i, p[1] + j, p[2] + k];
+                    last = q;
+                    let fluid = (self.w.water)(q);
+                    if !fluid
+                        && cell(self.w, q).has(Cell::AIR)
+                        && (self.w.water)([q[0], q[1] - 1, q[2]])
+                    {
+                        return PathType::Breach;
+                    }
+                    if !fluid {
+                        return PathType::Blocked;
+                    }
+                }
+            }
+        }
+        if (self.w.water)(last) {
+            PathType::Water
+        } else {
+            PathType::Blocked
+        }
     }
 
     // --- Геометрия --------------------------------------------------------
@@ -895,6 +945,9 @@ impl<'q, 'a, 's, 'r> Search<'q, 'a, 's, 'r> {
 
     /// `getNeighbors`.
     fn neighbors(&mut self, cur: u32) -> Vec<u32> {
+        if matches!(self.kind, NavKind::Water { .. }) {
+            return self.swim_neighbors(cur);
+        }
         let mut out = Vec::with_capacity(8);
         let p = self.n(cur).p;
         let above = self.cached([p[0], p[1] + 1, p[2]]);
@@ -932,7 +985,79 @@ impl<'q, 'a, 's, 'r> Search<'q, 'a, 's, 'r> {
         out
     }
 
-    // --- Старт ------------------------------------------------------------
+    /// `SwimNodeEvaluator.findAcceptedNode`: узел только для воды (и
+    /// `BREACH`, если он разрешён), с надбавкой 8 за клетку без жидкости.
+    fn swim_accepted(&mut self, p: [i32; 3]) -> Option<u32> {
+        let t = self.cached(p);
+        let allowed = match (self.kind, t) {
+            (NavKind::Water { breaching: true }, PathType::Breach) => true,
+            (_, PathType::Water) => true,
+            _ => false,
+        };
+        if !allowed {
+            return None;
+        }
+        let malus = self.m.malus(t);
+        if malus < 0.0 {
+            return None;
+        }
+        let wet = (self.w.water)(p);
+        let i = self.node(p);
+        let n = self.nm(i);
+        n.kind = t;
+        n.malus = n.malus.max(malus);
+        if !wet {
+            n.malus += 8.0;
+        }
+        Some(i)
+    }
+
+    /// `SwimNodeEvaluator.getNeighbors`: шесть сторон `Direction.values()` и
+    /// горизонтальные диагонали, если обе соседние стороны проходимы.
+    fn swim_neighbors(&mut self, cur: u32) -> Vec<u32> {
+        const DIRS: [(i32, i32, i32); 6] = [
+            (0, -1, 0),
+            (0, 1, 0),
+            (0, 0, -1),
+            (0, 0, 1),
+            (-1, 0, 0),
+            (1, 0, 0),
+        ];
+        const HORIZONTAL_PAIRS: [(usize, usize); 4] = [(2, 5), (5, 3), (3, 4), (4, 2)];
+        let p = self.n(cur).p;
+        let mut sides = [None; 6];
+        let mut out = Vec::with_capacity(10);
+        for (i, d) in DIRS.iter().enumerate() {
+            let node = self.swim_accepted([p[0] + d.0, p[1] + d.1, p[2] + d.2]);
+            sides[i] = node;
+            if let Some(i) = node
+                && !self.n(i).closed
+            {
+                out.push(i);
+            }
+        }
+        for (a, b) in HORIZONTAL_PAIRS {
+            if self.node_has_malus(sides[a]) && self.node_has_malus(sides[b]) {
+                let (da, db) = (DIRS[a], DIRS[b]);
+                let node = self.swim_accepted([
+                    p[0] + da.0 + db.0,
+                    p[1] + da.1 + db.1,
+                    p[2] + da.2 + db.2,
+                ]);
+                if let Some(i) = node
+                    && !self.n(i).closed
+                {
+                    out.push(i);
+                }
+            }
+        }
+        out
+    }
+
+    /// `SwimNodeEvaluator.hasMalus`.
+    fn node_has_malus(&self, i: Option<u32>) -> bool {
+        i.is_some_and(|i| self.n(i).malus >= 0.0)
+    }
 
     fn can_start_at(&mut self, p: [i32; 3]) -> bool {
         let t = self.cached(p);
@@ -951,6 +1076,16 @@ impl<'q, 'a, 's, 'r> Search<'q, 'a, 's, 'r> {
 
     /// `getStart`.
     fn start(&mut self) -> u32 {
+        if matches!(self.kind, NavKind::Water { .. }) {
+            // `SwimNodeEvaluator.getStart`: угол рамки, середина по Y.
+            let (lo, _) = self.m.bb();
+            let p = [
+                lo[0].floor() as i32,
+                (lo[1] + 0.5).floor() as i32,
+                lo[2].floor() as i32,
+            ];
+            return self.start_node(p);
+        }
         let m = *self.m;
         let b = m.block();
         let mut y = b[1];
@@ -1129,14 +1264,15 @@ pub fn find_path(
     reach: i32,
     max_visited: i32,
     multiplier: f32,
+    kind: NavKind,
 ) -> Option<Path> {
-    Search::new(w, m).run(targets, max_range, reach, max_visited, multiplier)
+    Search::new(w, m, kind).run(targets, max_range, reach, max_visited, multiplier)
 }
 
 /// Найденный путь (`Path`): узлы, следующий узел и цель.
 /// `WalkNodeEvaluator.getPathTypeStatic` для моба (`GoalUtils.hasMalus`).
 pub fn type_static(w: &World, m: &Walker, p: [i32; 3]) -> PathType {
-    Search::new(w, m).type_static(p)
+    Search::new(w, m, NavKind::Ground).type_static(p)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1221,6 +1357,8 @@ pub struct Navigation {
     pub avoid_sun: bool,
     /// `WallClimberNavigation` паука и `pathToPosition`.
     pub climber: bool,
+    /// `GroundPathNavigation`, `WaterBoundPathNavigation` и т.д.
+    pub kind: NavKind,
     pub to_position: Option<[i32; 3]>,
 }
 
@@ -1236,6 +1374,14 @@ impl Navigation {
         }
     }
 
+    /// `WaterBoundPathNavigation`; `breaching` — дельфин (`BREACH`).
+    pub fn water(breaching: bool) -> Self {
+        Self {
+            kind: NavKind::Water { breaching },
+            ..Self::default()
+        }
+    }
+
     pub fn is_done(&self) -> bool {
         self.path.as_ref().is_none_or(Path::is_done)
     }
@@ -1244,13 +1390,20 @@ impl Navigation {
         self.path = None;
     }
 
-    /// `canUpdatePath`: на земле или в жидкости.
-    fn can_update(m: &Walker) -> bool {
-        m.on_ground || m.in_water
+    /// `canUpdatePath`: на земле или в жидкости; у водной навигации — только
+    /// в жидкости (или при разрешённом `BREACH`).
+    fn can_update(&self, m: &Walker) -> bool {
+        match self.kind {
+            NavKind::Ground => m.on_ground || m.in_water,
+            NavKind::Water { breaching } => breaching || m.in_water,
+        }
     }
 
-    /// `GroundPathNavigation.getTempMobPos`.
-    fn temp_pos(m: &Walker, w: &World) -> [f64; 3] {
+    /// `GroundPathNavigation.getTempMobPos` / `WaterBoundPathNavigation`.
+    fn temp_pos(&self, m: &Walker, w: &World) -> [f64; 3] {
+        if matches!(self.kind, NavKind::Water { .. }) {
+            return [m.pos[0], m.pos[1] + 0.5, m.pos[2]];
+        }
         let y = if m.in_water && m.can_float {
             let b = m.block();
             let mut y = b[1];
@@ -1307,7 +1460,7 @@ impl Navigation {
         reach: i32,
         follow_range: f64,
     ) -> Option<Path> {
-        if m.pos[1] < m.min_y as f64 || !Self::can_update(m) {
+        if m.pos[1] < m.min_y as f64 || !self.can_update(m) {
             return None;
         }
         if let Some(p) = &self.path
@@ -1326,6 +1479,7 @@ impl Navigation {
             reach,
             max_visited,
             NODES_MULTIPLIER,
+            self.kind,
         )?;
         self.target = Some(path.target);
         self.reach = reach;
@@ -1350,7 +1504,12 @@ impl Navigation {
         if self.climber {
             self.to_position = Some(p);
         }
-        let p = Self::surface(w, m, p);
+        // `WaterBoundPathNavigation`/`FlyingPathNavigation` не ищут поверхность.
+        let p = if self.kind == NavKind::Ground {
+            Self::surface(w, m, p)
+        } else {
+            p
+        };
         self.create_path(w, m, p, reach, follow_range)
     }
 
@@ -1372,7 +1531,7 @@ impl Navigation {
         }
         self.speed = speed;
         self.last_stuck_check = self.tick;
-        self.last_stuck_pos = Self::temp_pos(m, w);
+        self.last_stuck_pos = self.temp_pos(m, w);
         true
     }
 
@@ -1393,7 +1552,7 @@ impl Navigation {
             }
         }
         // `GroundPathNavigation.trimPath`: с солнцем — обрезать у первого узла под небом.
-        if self.avoid_sun {
+        if self.avoid_sun && self.kind == NavKind::Ground {
             let sky = |p: [i32; 3]| w.info.is_some_and(|f| f(p).sky);
             let at = [
                 m.pos[0].floor() as i32,
@@ -1411,7 +1570,7 @@ impl Navigation {
 
     /// `recomputePath`: не чаще раза в 20 тиков, иначе — отложенно.
     pub fn recompute(&mut self, w: &World, m: &Walker, follow_range: f64) {
-        if self.tick - self.last_recompute > 20 && Self::can_update(m) {
+        if self.tick - self.last_recompute > 20 && self.can_update(m) {
             if let Some(t) = self.target {
                 self.path = None;
                 self.path = self.create_path(w, m, t, self.reach, follow_range);
@@ -1467,12 +1626,11 @@ impl Navigation {
         if self.is_done() {
             return None;
         }
-        if Self::can_update(m) {
+        if self.can_update(m) {
             self.follow(w, m);
-        } else if let Some(path) = &mut self.path
-            && !path.is_done()
-        {
-            let temp = Self::temp_pos(m, w);
+        } else if !self.is_done() {
+            let temp = self.temp_pos(m, w);
+            let path = self.path.as_mut().expect("путь не закончен");
             let next = path.entity_pos_at(path.next, m.width);
             if temp[1] > next[1]
                 && !m.on_ground
@@ -1487,12 +1645,17 @@ impl Navigation {
         }
         let path = self.path.as_ref().expect("путь не закончен");
         let next = path.entity_pos_at(path.next, m.width);
-        Some(([next[0], ground_y(w, next), next[2]], self.speed))
+        let y = match self.kind {
+            // `WaterBoundPathNavigation.getGroundY`: высота узла как есть.
+            NavKind::Water { .. } => next[1],
+            NavKind::Ground => ground_y(w, next),
+        };
+        Some(([next[0], y, next[2]], self.speed))
     }
 
     /// `followThePath`.
     fn follow(&mut self, w: &World, m: &Walker) {
-        let temp = Self::temp_pos(m, w);
+        let temp = self.temp_pos(m, w);
         let width = m.width as f32;
         let max_d = if width > 0.75 {
             width / 2.0
@@ -1841,7 +2004,16 @@ mod tests {
             info: None,
             min_y: -64,
         };
-        find_path(&w, &walker(from), &[to], 35.0, 0, visited, 1.0)
+        find_path(
+            &w,
+            &walker(from),
+            &[to],
+            35.0,
+            0,
+            visited,
+            1.0,
+            NavKind::Ground,
+        )
     }
 
     fn cells(p: &Path) -> Vec<[i32; 3]> {
@@ -1887,13 +2059,13 @@ mod tests {
         };
         let mut walk = walker([0.5, 64.0, 0.5]);
         walk.can_open_doors = true;
-        let open = find_path(&w, &walk, &[[4, 64, 0]], 35.0, 0, 560, 1.0).unwrap();
+        let open = find_path(&w, &walk, &[[4, 64, 0]], 35.0, 0, 560, 1.0, NavKind::Ground).unwrap();
         assert!(
             open.reached && cells(&open).contains(&[2, 64, 0]),
             "{open:?}"
         );
         walk.can_open_doors = false;
-        let closed = find_path(&w, &walk, &[[4, 64, 0]], 35.0, 0, 560, 1.0);
+        let closed = find_path(&w, &walk, &[[4, 64, 0]], 35.0, 0, 560, 1.0, NavKind::Ground);
         assert!(closed.as_ref().is_none_or(|p| !p.reached), "{closed:?}");
     }
 
@@ -2062,5 +2234,92 @@ mod tests {
         // 20 − 6.6 = 13 − (3 − 2)·4 = 9 → 12.
         assert_eq!(max_fall_distance(true, 20.0, 20.0, 2), 12);
         assert_eq!(max_fall_distance(true, 5.0, 20.0, 1), 3);
+    }
+
+    /// Рыба стартует в воде: путь идёт только по клеткам воды
+    /// (`SwimNodeEvaluator`), в том числе по вертикали.
+    #[test]
+    fn water_path_stays_in_water() {
+        let shape = solid(|p| p[1] < 64);
+        let water = |p: [i32; 3]| (64..=70).contains(&p[1]);
+        let w = World {
+            shape: &shape,
+            water: &water,
+            cell: None,
+            info: None,
+            min_y: -64,
+        };
+        let mut walk = walker([0.5, 64.5, 0.5]);
+        walk.in_water = true;
+        let p = find_path(
+            &w,
+            &walk,
+            &[[5, 66, 0]],
+            35.0,
+            0,
+            560,
+            1.0,
+            NavKind::Water { breaching: false },
+        )
+        .unwrap();
+        assert!(p.reached, "{p:?}");
+        assert!(cells(&p).iter().all(|c| water(*c)), "dry node: {p:?}");
+        assert!(cells(&p).contains(&[5, 66, 0]), "{p:?}");
+    }
+
+    /// Без `BREACH` рыба не выходит из воды: за границей воды путь
+    /// обрывается, а не идёт по воздуху.
+    #[test]
+    fn water_path_does_not_breach() {
+        let shape = solid(|p| p[1] < 64);
+        let water = |p: [i32; 3]| (64..=66).contains(&p[1]) && p[0] <= 2;
+        let w = World {
+            shape: &shape,
+            water: &water,
+            cell: None,
+            info: None,
+            min_y: -64,
+        };
+        let mut walk = walker([0.5, 64.5, 0.5]);
+        walk.in_water = true;
+        let p = find_path(
+            &w,
+            &walk,
+            &[[4, 65, 0]],
+            35.0,
+            0,
+            560,
+            1.0,
+            NavKind::Water { breaching: false },
+        )
+        .unwrap();
+        assert!(!p.reached, "breached: {p:?}");
+        assert!(cells(&p).iter().all(|c| water(*c)), "dry node: {p:?}");
+    }
+
+    /// `WaterBoundPathNavigation.canUpdatePath`: вне воды путь не строится,
+    /// а с `BREACH` (дельфин) — строится.
+    #[test]
+    fn water_navigation_requires_water() {
+        let shape = solid(|p| p[1] < 64);
+        let water = |p: [i32; 3]| (64..=65).contains(&p[1]);
+        let w = World {
+            shape: &shape,
+            water: &water,
+            cell: None,
+            info: None,
+            min_y: -64,
+        };
+        let mut nav = Navigation::water(false);
+        let walk = walker([0.5, 64.0, 0.5]);
+        assert!(nav.create_path(&w, &walk, [5, 64, 0], 1, 16.0).is_none());
+        // `allowBreaching`: старт и цель — воздух над водой (`BREACH`).
+        let mut dolphin = Navigation::water(true);
+        let walk = walker([0.5, 66.0, 0.5]);
+        assert!(
+            dolphin
+                .create_path(&w, &walk, [3, 66, 0], 1, 16.0)
+                .is_some()
+        );
     }
 }
