@@ -1710,8 +1710,8 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
                 Selector::default(),
             );
         }
-        // Летучая мышь: движение отдельной строкой.
-        Species::Bat => {
+        // Летучая мышь и пчела: движение отдельной строкой.
+        Species::Bat | Species::Bee => {
             return (Selector::default(), Selector::default());
         }
         // `Piglin`/`Wolf`: для проб и взаимодействия достаточно прогулки.

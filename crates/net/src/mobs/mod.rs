@@ -299,6 +299,7 @@ pub enum Species {
     Bat,
     Salmon,
     GlowSquid,
+    Bee,
 }
 
 /// Всё о виде в одном месте. Встроенные значения — запасные: при старте
@@ -371,7 +372,7 @@ const fn base(name: &'static str, sound: &'static str, loot: &'static str) -> Sp
 
 /// Встроенная таблица в порядке [`Species::ALL`]: числа из `createAttributes`
 /// и `EntityType` 26.3.
-const BUILTIN: [SpeciesInfo; 32] = [
+const BUILTIN: [SpeciesInfo; 33] = [
     SpeciesInfo {
         size: (0.9, 1.4),
         eye_height: 1.3,
@@ -808,6 +809,20 @@ const BUILTIN: [SpeciesInfo; 32] = [
             "minecraft:entities/glow_squid",
         )
     },
+    SpeciesInfo {
+        category: Category::Creature,
+        size: (0.7, 0.6),
+        eye_height: 0.3,
+        max_health: 10.0,
+        speed: 0.3,
+        follow_range: 16.0,
+        attack_damage: 2.0,
+        ..base(
+            "minecraft:bee",
+            "minecraft:entity.bee",
+            "minecraft:entities/bee",
+        )
+    },
 ];
 
 static INSTALLED: std::sync::OnceLock<Vec<SpeciesInfo>> = std::sync::OnceLock::new();
@@ -847,7 +862,7 @@ fn merge(b: &SpeciesInfo, types: &[chunkwake_data::world::EntityTypeInfo]) -> Sp
 }
 
 impl Species {
-    pub const ALL: [Species; 32] = [
+    pub const ALL: [Species; 33] = [
         Species::Cow,
         Species::Pig,
         Species::Sheep,
@@ -880,6 +895,7 @@ impl Species {
         Species::Bat,
         Species::Salmon,
         Species::GlowSquid,
+        Species::Bee,
     ];
 
     /// Данные вида: выгрузка, если она установлена, иначе встроенные.
@@ -1170,6 +1186,8 @@ pub struct Mob {
     pub statue: bool,
     /// `EnderDragon`: кулдаун контактного урона (тиков).
     pub dragon_cooldown: u8,
+    /// `Bee`: оставшиеся тики злости (`AngerTime`).
+    pub anger_time: u32,
     /// `Warden`: задержка до следующего sonic boom (`SONIC_BOOM_COOLDOWN`).
     pub sonic_cooldown: u32,
     /// `Warden`: оставшиеся тики зарядки sonic boom (34 до выстрела).
@@ -1273,6 +1291,7 @@ impl Mob {
             ticks: 0,
             statue: false,
             dragon_cooldown: 0,
+            anger_time: 0,
             sonic_cooldown: 0,
             sonic_charge: 0,
             sonic_target: None,
@@ -1964,6 +1983,7 @@ fn navigation_for(species: Species) -> Navigation {
     match species {
         Species::Cod | Species::Salmon | Species::GlowSquid => Navigation::water(false),
         Species::Bat | Species::Phantom => Navigation::flying(),
+        Species::Bee => Navigation::flying(),
         Species::Drowned => Navigation::amphibious(),
         _ => Navigation::new(species == Species::Spider),
     }
@@ -1990,7 +2010,7 @@ pub fn walker(m: &Mob, w: &World, difficulty: u8, in_water: bool) -> path::Walke
         // летучей мыши и фантома.
         can_float: !matches!(
             m.species,
-            Species::Zombie | Species::Skeleton | Species::Bat | Species::Phantom
+            Species::Zombie | Species::Skeleton | Species::Bat | Species::Phantom | Species::Bee
         ),
         can_open_doors: m.can_break_doors,
         can_pass_doors: true,
@@ -2210,6 +2230,61 @@ fn dragon_ai_step(m: &mut Mob, s: &mut Senses) {
 
 /// `Vex`: полёт к цели, удар раз в 20 тиков и срок жизни
 /// (`setLimitedLife`, затем `discard` без лута).
+fn bee_ai_step(m: &mut Mob, s: &mut Senses) {
+    m.no_gravity = true;
+    if m.anger_time > 0 {
+        m.anger_time -= 1;
+    }
+    // `BeeHurtByOtherGoal`: удар делает игрока целью и злит.
+    if m.target.is_none()
+        && let Some((who, at)) = m.last_hurt_by
+        && m.tick_count.wrapping_sub(at) <= 100
+    {
+        m.target = Some(who);
+        m.anger_time = 400;
+    }
+    if m.target.is_none() && m.anger_time > 0 {
+        m.target = s
+            .players
+            .iter()
+            .filter(|p| dist2(p.pos, m.pos) <= 32.0 * 32.0)
+            .min_by(|a, b| dist2(a.pos, m.pos).total_cmp(&dist2(b.pos, m.pos)))
+            .map(|p| p.uuid);
+    }
+    if m.anger_time == 0 && m.target.is_some() {
+        m.target = None;
+    }
+    let Some(p) = m
+        .target
+        .and_then(|u| s.players.iter().find(|p| p.uuid == u))
+        .copied()
+    else {
+        m.yya = 0.0;
+        m.zza = 0.0;
+        return;
+    };
+    let dx = p.pos[0] - m.pos[0];
+    let dy = p.pos[1] + 0.5 - m.pos[1];
+    let dz = p.pos[2] - m.pos[2];
+    if dx * dx + dy * dy + dz * dz < 4.0 {
+        m.yya = 0.0;
+        m.zza = 0.0;
+        // `Bee.doHurtTarget`: жало, 2 урона (`ATTACK_DAMAGE`); после укуса
+        // цель сбрасывается. Жало не восстанавливается, но смерть от него
+        // отдельной механикой пока не ведём.
+        if m.tick_count.is_multiple_of(20) {
+            m.strike = Some(p.uuid);
+            m.anger_time = 0;
+            m.target = None;
+        }
+        return;
+    }
+    m.move_ctl
+        .set_wanted([p.pos[0], p.pos[1] + 1.0, p.pos[2]], 1.0);
+}
+
+/// `Vex`: летит к цели, машет мечом раз в 20 тиков и исчезает по
+/// `setLimitedLife` (умирает как `discard` без лута).
 fn vex_ai_step(m: &mut Mob, s: &mut Senses) {
     m.no_gravity = true;
     if m.limited_life > 0 {
@@ -2313,6 +2388,12 @@ fn server_ai_step(m: &mut Mob, w: &World, s: &mut Senses) {
     }
     if m.species == Species::Vex {
         vex_ai_step(m, s);
+        return;
+    }
+    if m.species == Species::Bee {
+        bee_ai_step(m, s);
+        path::move_control(m, w, in_water(m, w));
+        goals::look_tick(m);
         return;
     }
     if m.species == Species::Wither {
@@ -4838,5 +4919,53 @@ mod tests {
         assert_eq!(walk.malus(path::PathType::Water), 0.0);
         assert_eq!(walk.malus(path::PathType::Walkable), 6.0);
         assert_eq!(walk.malus(path::PathType::WaterBorder), 4.0);
+    }
+
+    /// Пчела злится, летит к игроку и жалит (`strike`), после укуса злость
+    /// сбрасывается.
+    #[test]
+    fn bee_stings_target_and_anger_expires() {
+        let (shape, water) = flat_world(&floor);
+        let w = World {
+            shape: &*shape,
+            water: &*water,
+            cell: None,
+            info: None,
+            min_y: -64,
+        };
+        let mut m = Mob::new(Species::Bee, [0.5, 66.0, 0.5], 1);
+        assert!(matches!(m.nav.kind, path::NavKind::Fly));
+        m.target = Some(7);
+        m.anger_time = 400;
+        let prey = [Prey {
+            uuid: 7,
+            pos: [3.5, 66.0, 0.5],
+        }];
+        let mut rnd = || 0.5;
+        let mut s = Senses {
+            players: &prey,
+            rand: &mut rnd,
+            prey: &[],
+            tempters: &[],
+            kin: &[],
+            sight: &always_visible,
+            difficulty: 2,
+            entity_id: 1,
+            bright_outside: true,
+            mob_griefing: false,
+            jump_boost: None,
+        };
+        let mut stung = false;
+        for _ in 0..100 {
+            tick(&mut m, &w, &mut s);
+            if m.strike == Some(7) {
+                stung = true;
+                break;
+            }
+        }
+        assert!(stung, "bee did not sting: {:?}", m.pos);
+        assert!(m.no_gravity);
+        assert!(m.pos[0] > 1.0, "bee did not fly: {:?}", m.pos);
+        assert_eq!(m.anger_time, 0);
     }
 }

@@ -2312,7 +2312,10 @@ fn fly_move_control(m: &mut Mob) {
 
 /// `MoveControl.tick`: поворот к точке, скорость и прыжок на ступень.
 pub fn move_control(m: &mut Mob, w: &World, in_water: bool) {
-    if matches!(m.species, super::Species::Bat | super::Species::Phantom) {
+    if matches!(
+        m.species,
+        super::Species::Bat | super::Species::Phantom | super::Species::Bee
+    ) {
         fly_move_control(m);
         return;
     }

@@ -40,6 +40,20 @@ pub(super) enum Dispensed {
     DropTwice,
 }
 
+/// `BeehiveBlockEntity`: число жильцов в `bees` (26.3) или старом `Bees`,
+/// не больше трёх (`isFull`).
+fn hive_occupants(nbt: &Compound) -> usize {
+    nbt.get("bees")
+        .or_else(|| nbt.get("Bees"))
+        .and_then(Tag::as_list)
+        .map_or(0, |l| l.len().min(3))
+}
+
+/// `CampfireBlock.isLitCampfire`: костёр/душевой костёр и `lit` не `false`.
+fn is_lit_campfire(name: &str, lit: Option<&str>) -> bool {
+    matches!(name, "minecraft:campfire" | "minecraft:soul_campfire") && lit != Some("false")
+}
+
 impl PlayPlan {
     /// Полный улей или гнездо (`BlockTags.BEEHIVES`, `honey_level` 5).
     pub(super) fn full_hive(&self, pos: [i32; 3]) -> Option<u32> {
@@ -58,6 +72,92 @@ impl PlayPlan {
         }
     }
 
+    /// Улей или гнездо (`BlockTags.BEEHIVES`).
+    fn is_hive(&self, s: u32) -> bool {
+        self.survival
+            .block_tags
+            .get("minecraft:beehives")
+            .is_some_and(|h| h.contains(self.state_name(s)))
+    }
+
+    /// `BeehiveBlockEntity`: жильцы в `bees` (26.3) или старом `Bees`.
+    fn hive_bee_count(&self, pos: [i32; 3]) -> usize {
+        let Some(be) = self.block_entity(pos) else {
+            return 0;
+        };
+        hive_occupants(&be.nbt)
+    }
+
+    /// `CampfireBlock.isSmokeyPos`: горящий костёр на 1..=5 блоков ниже.
+    fn smoked_hive(&self, pos: [i32; 3]) -> bool {
+        (1..=5).any(|i| {
+            let p = [pos[0], pos[1] - i, pos[2]];
+            let Some(s) = self.block(p) else {
+                return false;
+            };
+            is_lit_campfire(self.state_name(s), self.survival.placement.prop(s, "lit"))
+        })
+    }
+
+    /// `BeehiveBlockEntity.emptyAllLivingFromHive` при поломке, ножницах или
+    /// бутылке: выпускает до трёх пчёл; дым костра под ульем не злит их.
+    pub(super) fn release_hive_bees(&self, pos: [i32; 3], old: u32, player: Option<Uuid>) -> usize {
+        if !self.is_hive(old) {
+            return 0;
+        }
+        let count = self.hive_bee_count(pos);
+        if count == 0 {
+            return 0;
+        }
+        let smoked = self.smoked_hive(pos);
+        let target = player.and_then(|u| self.player_at(u).map(|_| u.as_u128()));
+        for _ in 0..count {
+            let at = [
+                pos[0] as f64 + 0.5 + rand::random::<f64>() * 0.5 - 0.25,
+                pos[1] as f64 + 0.5 + rand::random::<f64>() * 0.5 - 0.25,
+                pos[2] as f64 + 0.5 + rand::random::<f64>() * 0.5 - 0.25,
+            ];
+            self.spawn_mob_with(
+                crate::mobs::Species::Bee,
+                at,
+                rand::random::<f32>() * 360.0,
+                false,
+                None,
+                |m| {
+                    m.persistent = false;
+                    m.anger_time = if smoked { 0 } else { 400 };
+                    m.target = if smoked { None } else { target };
+                },
+            );
+        }
+        if let Some(mut be) = self.block_entity(pos) {
+            let had = be.nbt.remove("bees").is_some() || be.nbt.remove("Bees").is_some();
+            if had {
+                self.set_block_entity(pos, Some(be));
+            }
+        }
+        // `BeehiveBlock.angerNearbyBees`: уже вылетевшие пчёлы в 8×6×8.
+        if !smoked && let Some(uuid) = player {
+            let player_pos = self.player_at(uuid).map(|(p, _, _)| p);
+            if let Some(pp) = player_pos {
+                let mut mobs = self.sim().mobs.lock().unwrap();
+                for e in mobs.values_mut() {
+                    if e.mob.species != crate::mobs::Species::Bee || e.mob.target.is_some() {
+                        continue;
+                    }
+                    let dx = e.mob.pos[0] - pp[0];
+                    let dy = e.mob.pos[1] - pp[1];
+                    let dz = e.mob.pos[2] - pp[2];
+                    if dx.abs() <= 8.0 + 0.7 && dy.abs() <= 6.0 + 0.6 && dz.abs() <= 8.0 + 0.7 {
+                        e.mob.target = Some(uuid.as_u128());
+                        e.mob.anger_time = 400;
+                    }
+                }
+            }
+        }
+        count
+    }
+
     /// `Block.popResource`: в пределах ±0.25 от центра блока, на 0.125 ниже.
     fn pop_resource(&self, pos: [i32; 3], stack: Stack) {
         let r: [f64; 3] = rand::random();
@@ -72,7 +172,7 @@ impl PlayPlan {
 
     /// Ножницы по полному улью: соты из `harvest/beehive`, звук `shear`
     /// в `sound_at` (у игрока — в его ногах, у раздатчика — в улье).
-    pub(super) fn shear_hive(&self, pos: [i32; 3], sound_at: [f64; 3]) -> bool {
+    pub(super) fn shear_hive(&self, pos: [i32; 3], sound_at: [f64; 3], by: Option<Uuid>) -> bool {
         let Some(s) = self.full_hive(pos) else {
             return false;
         };
@@ -102,6 +202,7 @@ impl PlayPlan {
             }
         }
         self.reset_honey(pos, s);
+        self.release_hive_bees(pos, s, by);
         self.emit_vibration(pos.map(|v| v as f64 + 0.5), "minecraft:shear");
         true
     }
@@ -164,6 +265,7 @@ impl PlayPlan {
             );
         }
         self.reset_honey(pos, s);
+        self.release_hive_bees(pos, s, by.map(|(uuid, _)| uuid));
         true
     }
 
@@ -413,7 +515,7 @@ impl PlayPlan {
             }
             // `ShearsDispenseItemBehavior.tryShearBeehive` раньше овец.
             "minecraft:shears" => {
-                if !self.shear_hive(front, front.map(|v| v as f64 + 0.5)) {
+                if !self.shear_hive(front, front.map(|v| v as f64 + 0.5), None) {
                     return None;
                 }
                 let mut s = st;
@@ -614,5 +716,33 @@ mod tests {
             ))
         );
         assert_eq!(mob_bucket("minecraft:water_bucket"), None);
+    }
+
+    /// `bees` из 26.3 и старый `Bees`; больше трёх не бывает.
+    #[test]
+    fn hive_reads_bees_list_and_caps_at_three() {
+        let mut nbt = Compound::new();
+        nbt.insert(
+            "bees".into(),
+            Tag::List(vec![Tag::Compound(Compound::new()); 2]),
+        );
+        assert_eq!(hive_occupants(&nbt), 2);
+        nbt.insert(
+            "Bees".into(),
+            Tag::List(vec![Tag::Compound(Compound::new()); 5]),
+        );
+        assert_eq!(hive_occupants(&nbt), 2, "новый ключ старше");
+        nbt.remove("bees");
+        assert_eq!(hive_occupants(&nbt), 3);
+        assert_eq!(hive_occupants(&Compound::new()), 0);
+    }
+
+    /// `CampfireBlock.isSmokeyPos`: только горящий костёр; потушенный не дымит.
+    #[test]
+    fn campfire_smoke_requires_lit_fire() {
+        assert!(is_lit_campfire("minecraft:campfire", None));
+        assert!(is_lit_campfire("minecraft:soul_campfire", Some("true")));
+        assert!(!is_lit_campfire("minecraft:campfire", Some("false")));
+        assert!(!is_lit_campfire("minecraft:furnace", None));
     }
 }

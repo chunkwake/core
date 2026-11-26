@@ -2139,6 +2139,14 @@ impl PlayPlan {
         if let Some(Tag::Byte(no_gravity)) = nbt.get("NoGravity") {
             m.no_gravity = *no_gravity != 0;
         }
+        if m.species == Species::Bee
+            && let Some(anger) = nbt
+                .get("AngerTime")
+                .or_else(|| nbt.get("anger_time"))
+                .and_then(crate::play::commands::snbt::number)
+        {
+            m.anger_time = anger.max(0.0) as u32;
+        }
         if m.species == Species::CopperGolem {
             // `getLongOr`: принимаем любое число (`1`, `1L`, ...).
             if let Some(age) = nbt
@@ -4765,6 +4773,9 @@ pub(super) fn mob_to_nbt(
         }
         Species::Chicken => {
             c.insert("EggLayTime".into(), Tag::Int(m.egg_time));
+        }
+        Species::Bee => {
+            c.insert("AngerTime".into(), Tag::Int(m.anger_time as i32));
         }
         // `AbstractCubeMob.addAdditionalSaveData`.
         Species::Slime => {

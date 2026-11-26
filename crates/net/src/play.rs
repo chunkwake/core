@@ -85,6 +85,7 @@ struct Ids {
     login: i32,
     game_event: i32,
     set_chunk_cache_center: i32,
+    set_chunk_cache_radius: i32,
     set_default_spawn_position: i32,
     initialize_border: i32,
     set_border_center: i32,
@@ -3561,6 +3562,7 @@ impl PlayPlan {
                 login: cb("login")?,
                 game_event: cb("game_event")?,
                 set_chunk_cache_center: cb("set_chunk_cache_center")?,
+                set_chunk_cache_radius: cb("set_chunk_cache_radius")?,
                 set_default_spawn_position: cb("set_default_spawn_position")?,
                 initialize_border: cb("initialize_border")?,
                 set_border_center: cb("set_border_center")?,
@@ -18039,7 +18041,7 @@ impl PlayPlan {
                                     }
                                     true
                                 }
-                                "minecraft:shears" if self.shear_hive(u.pos, feet) => {
+                                "minecraft:shears" if self.shear_hive(u.pos, feet, Some(uuid)) => {
                                     if !creative {
                                         if self.wear_one(&mut held) {
                                             self.award_stat(uuid, "minecraft:broken", self.item_name(held.item), 1);
@@ -19633,6 +19635,9 @@ impl PlayPlan {
         // Содержимое сундука — на землю.
         let be = self.block_entity(pos);
         if be.is_some() {
+            // `BeehiveBlock.playerDestroy`: жильцы вылетают и злятся (кроме
+            // дыма костра под ульем), затем блок-сущность удаляется.
+            self.release_hive_bees(pos, old, Some(uuid));
             let center = [
                 pos[0] as f64 + 0.5,
                 pos[1] as f64 + 0.5,
