@@ -272,6 +272,7 @@ pub fn step(
 
 /// [`step`] с рамками (`ItemFrame`): ID и коробка каждой. Снаряд задевает
 /// рамку раньше блока и снимает с неё предмет (`ItemFrame.hurtServer`).
+#[allow(clippy::too_many_arguments)]
 pub fn step_frames(
     a: &mut Arrow,
     players: &[(uuid::Uuid, [f64; 3])],

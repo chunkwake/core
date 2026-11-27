@@ -100,7 +100,7 @@ impl ItemFrame {
         }
         if let Some(chance) = c.get("ItemDropChance") {
             let value = match chance {
-                Tag::Float(v) => Some(*v as f32),
+                Tag::Float(v) => Some(*v),
                 Tag::Double(v) => Some(*v as f32),
                 other => other.as_i64().map(|v| v as f32),
             };

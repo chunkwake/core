@@ -1175,6 +1175,7 @@ impl PlayPlan {
 
     /// `AbstractBoat.tick` в конце: задевающих мобов сажает
     /// (`startRiding`), остальных толкает (`push`).
+    #[allow(clippy::too_many_arguments)]
     fn boat_contacts(
         &self,
         b: &mut Boat,

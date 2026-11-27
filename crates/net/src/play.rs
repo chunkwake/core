@@ -23807,13 +23807,10 @@ impl PlayPlan {
             // `$7`: череп визер-скелета сначала завершает ритуал (основа из
             // душ под клеткой), иначе уходит на голову, как броня.
             "minecraft:wither_skeleton_skull" if empty && self.can_spawn_wither(front) => {
-                let Some(base) = self
+                let base = self
                     .survival
                     .block_defaults
-                    .get("minecraft:wither_skeleton_skull")
-                else {
-                    return None;
-                };
+                    .get("minecraft:wither_skeleton_skull")?;
                 let state = self
                     .survival
                     .placement
@@ -23827,10 +23824,10 @@ impl PlayPlan {
             }
             // `$8`: тыква на готовый шаблон голема, иначе — на голову.
             "minecraft:carved_pumpkin" if empty && self.can_spawn_golem(front) => {
-                let Some(base) = self.survival.block_defaults.get("minecraft:carved_pumpkin")
-                else {
-                    return None;
-                };
+                let base = self
+                    .survival
+                    .block_defaults
+                    .get("minecraft:carved_pumpkin")?;
                 // `set_block` → `after_block_change` сам зовёт `try_spawn_golem`.
                 self.set_block(front, *base);
                 self.emit_vibration(front.map(|v| v as f64 + 0.5), "minecraft:block_place");

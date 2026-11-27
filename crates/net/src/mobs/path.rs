@@ -1199,11 +1199,10 @@ impl<'q, 'a, 's, 'r> Search<'q, 'a, 's, 'r> {
     /// `BREACH`, если он разрешён), с надбавкой 8 за клетку без жидкости.
     fn swim_accepted(&mut self, p: [i32; 3]) -> Option<u32> {
         let t = self.cached(p);
-        let allowed = match (self.kind, t) {
-            (NavKind::Water { breaching: true }, PathType::Breach) => true,
-            (_, PathType::Water) => true,
-            _ => false,
-        };
+        let allowed = matches!(
+            (self.kind, t),
+            (NavKind::Water { breaching: true }, PathType::Breach) | (_, PathType::Water)
+        );
         if !allowed {
             return None;
         }
@@ -1621,6 +1620,7 @@ pub fn floor_level(w: &World, p: [i32; 3]) -> f64 {
 }
 
 /// `PathFinder.findPath` для наземного моба.
+#[allow(clippy::too_many_arguments)]
 pub fn find_path(
     w: &World,
     m: &Walker,
@@ -2844,15 +2844,17 @@ mod tests {
     /// требует пересчёта, далёкое — нет; после заявки — уже нет.
     #[test]
     fn block_change_requests_recompute_near_path() {
-        let mut nav = Navigation::default();
-        nav.path = Some(Path::new(
-            vec![
-                ([0, 64, 0], PathType::Walkable),
-                ([10, 64, 0], PathType::Walkable),
-            ],
-            [10, 64, 0],
-            true,
-        ));
+        let mut nav = Navigation {
+            path: Some(Path::new(
+                vec![
+                    ([0, 64, 0], PathType::Walkable),
+                    ([10, 64, 0], PathType::Walkable),
+                ],
+                [10, 64, 0],
+                true,
+            )),
+            ..Default::default()
+        };
         assert!(nav.should_recompute([5, 64, 0], [0.5, 64.0, 0.5]));
         assert!(!nav.should_recompute([20, 64, 0], [0.5, 64.0, 0.5]));
         nav.request_recompute();
