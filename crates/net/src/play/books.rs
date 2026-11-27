@@ -68,17 +68,38 @@ fn plain_text(v: &serde_json::Value) -> String {
     }
 }
 
-/// `ComponentUtils.resolve`: заменить `selector` и `score` на готовый текст,
-/// включая `extra` и аргументы `translate` (`with`).
+/// Источник NBT для `NbtContents` (`{"nbt": "...", "entity": "..."}`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum NbtSource {
+    /// Селектор или имя сущности.
+    Entity(String),
+    /// Абсолютные координаты блока `x y z`.
+    Block(String),
+}
+
+/// Запрос `NbtContents` к компоненту страницы.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct NbtQuery {
+    pub path: String,
+    pub source: NbtSource,
+    /// `interpret`: строка пути сама является JSON-компонентом.
+    pub interpret: bool,
+    /// `separator` для нескольких значений (сейчас путь даёт одно).
+    pub separator: Option<String>,
+}
+
+/// `ComponentUtils.resolve`: заменить `selector`, `score` и `nbt` на готовый
+/// текст/компонент, включая `extra` и аргументы `translate` (`with`).
 pub(super) fn resolve_page(
     json: &str,
     selector: &dyn Fn(&str, Option<&str>) -> String,
     score: &dyn Fn(&str, &str) -> Option<String>,
+    nbt: &dyn Fn(&NbtQuery) -> Option<serde_json::Value>,
 ) -> String {
     let Ok(mut value) = serde_json::from_str::<serde_json::Value>(json) else {
         return json.to_owned();
     };
-    resolve_component(&mut value, selector, score);
+    resolve_component(&mut value, selector, score, nbt);
     value.to_string()
 }
 
@@ -86,6 +107,7 @@ fn resolve_component(
     value: &mut serde_json::Value,
     selector: &dyn Fn(&str, Option<&str>) -> String,
     score: &dyn Fn(&str, &str) -> Option<String>,
+    nbt: &dyn Fn(&NbtQuery) -> Option<serde_json::Value>,
 ) {
     match value {
         serde_json::Value::Object(map) => {
@@ -112,16 +134,58 @@ fn resolve_component(
                 };
                 map.remove("score");
                 map.insert("text".into(), serde_json::Value::String(text));
+            } else if let Some(serde_json::Value::String(path)) = map.get("nbt") {
+                let path = path.clone();
+                let source = match (map.get("entity"), map.get("block")) {
+                    (Some(serde_json::Value::String(entity)), _) => {
+                        Some(NbtSource::Entity(entity.clone()))
+                    }
+                    (_, Some(serde_json::Value::String(block))) => {
+                        Some(NbtSource::Block(block.clone()))
+                    }
+                    _ => None,
+                };
+                if let Some(source) = source {
+                    let interpret = map
+                        .get("interpret")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    let separator = map.get("separator").map(plain_text);
+                    let query = NbtQuery {
+                        path,
+                        source,
+                        interpret,
+                        separator,
+                    };
+                    let resolved = nbt(&query);
+                    for key in ["nbt", "entity", "block", "interpret", "separator"] {
+                        map.remove(key);
+                    }
+                    match resolved {
+                        // `interpret`: содержимое — готовый компонент.
+                        Some(serde_json::Value::Object(contents)) => {
+                            for (key, value) in contents {
+                                map.insert(key, value);
+                            }
+                        }
+                        Some(other) => {
+                            map.insert("text".into(), other);
+                        }
+                        None => {
+                            map.insert("text".into(), serde_json::Value::String(String::new()));
+                        }
+                    }
+                }
             }
             for key in ["extra", "with"] {
                 if let Some(child) = map.get_mut(key) {
-                    resolve_component(child, selector, score);
+                    resolve_component(child, selector, score, nbt);
                 }
             }
         }
         serde_json::Value::Array(items) => {
             for item in items {
-                resolve_component(item, selector, score);
+                resolve_component(item, selector, score, nbt);
             }
         }
         _ => {}
@@ -273,13 +337,46 @@ impl PlayPlan {
             self.score(&holder, objective)
                 .map(|value| value.to_string())
         };
+        // `NbtContents.resolve`: данные сущности/блока по NBT-пути. `interpret`
+        // разбирает строку как JSON-компонент, иначе — SNBT-текст.
+        let nbt = |query: &NbtQuery| -> Option<serde_json::Value> {
+            use crate::play::commands::snbt;
+            let root = match &query.source {
+                NbtSource::Entity(entity) => {
+                    let target = ctx.select_first(&source, entity, true)?;
+                    chunkwake_world::nbt::Tag::Compound(ctx.plan.entity_nbt(&target))
+                }
+                NbtSource::Block(pos) => {
+                    let mut it = pos.split_whitespace();
+                    let at = [
+                        it.next()?.parse::<i32>().ok()?,
+                        it.next()?.parse::<i32>().ok()?,
+                        it.next()?.parse::<i32>().ok()?,
+                    ];
+                    if it.next().is_some() {
+                        return None;
+                    }
+                    chunkwake_world::nbt::Tag::Compound(ctx.plan.block_nbt(at)?)
+                }
+            };
+            let steps = snbt::parse_path(&query.path)?;
+            let found = snbt::get_path(&root, &steps)?;
+            if query.interpret {
+                match found {
+                    chunkwake_world::nbt::Tag::String(text) => serde_json::from_str(&text).ok(),
+                    _ => None,
+                }
+            } else {
+                Some(serde_json::Value::String(snbt::format_tag(&found)))
+            }
+        };
         let mut e = (*extra).clone();
         if let Some(book) = e.book.as_mut() {
             for (page, filtered) in &mut book.pages {
-                let resolved = resolve_page(page, &selector, &score);
+                let resolved = resolve_page(page, &selector, &score, &nbt);
                 *page = resolved;
                 if let Some(filtered) = filtered {
-                    let resolved = resolve_page(filtered, &selector, &score);
+                    let resolved = resolve_page(filtered, &selector, &score, &nbt);
                     *filtered = resolved;
                 }
             }
@@ -331,7 +428,7 @@ mod tests {
             _ => None,
         };
         let value: serde_json::Value =
-            serde_json::from_str(&resolve_page(json, &selector, &score)).unwrap();
+            serde_json::from_str(&resolve_page(json, &selector, &score, &|_| None)).unwrap();
         assert_eq!(value["extra"][0]["text"], "Steve | Alex");
         assert_eq!(value["extra"][1]["text"], "7");
         assert_eq!(value["extra"][2]["text"], "!");
@@ -347,7 +444,7 @@ mod tests {
             (name == "Steve" && objective == "deaths").then(|| "0".to_owned())
         };
         let value: serde_json::Value =
-            serde_json::from_str(&resolve_page(json, &selector, &score)).unwrap();
+            serde_json::from_str(&resolve_page(json, &selector, &score, &|_| None)).unwrap();
         assert_eq!(value["with"][0]["text"], "Steve");
         assert_eq!(value["with"][1]["text"], "0");
     }
@@ -358,10 +455,48 @@ mod tests {
         let selector = |_: &str, _: Option<&str>| "Steve".to_owned();
         let score = |_: &str, _: &str| None;
         let value: serde_json::Value =
-            serde_json::from_str(&resolve_page(json, &selector, &score)).unwrap();
+            serde_json::from_str(&resolve_page(json, &selector, &score, &|_| None)).unwrap();
         assert_eq!(value["text"], "");
         // Не компонент и битый JSON не трогаются.
-        assert_eq!(resolve_page("plain text", &selector, &score), "plain text");
-        assert_eq!(resolve_page("{oops", &selector, &score), "{oops");
+        assert_eq!(
+            resolve_page("plain text", &selector, &score, &|_| None),
+            "plain text"
+        );
+        assert_eq!(resolve_page("{oops", &selector, &score, &|_| None), "{oops");
+    }
+
+    #[test]
+    fn page_resolves_nbt_entity_and_interpreted_component() {
+        // `{"nbt":"SelectedItem.id","entity":"@p"}` — строка выводится SNBT.
+        let json = r#"{"text":"","extra":[{"nbt":"SelectedItem.id","entity":"@p"},{"nbt":"Display","entity":"@p","interpret":true}]}"#;
+        let nbt = |query: &NbtQuery| match (query.path.as_str(), &query.source, query.interpret) {
+            ("SelectedItem.id", NbtSource::Entity(sel), false) if sel == "@p" => {
+                Some(serde_json::Value::String("\"minecraft:stone\"".into()))
+            }
+            ("Display", NbtSource::Entity(sel), true) if sel == "@p" => {
+                Some(serde_json::json!({"text": "Hi", "color": "gold"}))
+            }
+            _ => None,
+        };
+        let selector = |_: &str, _: Option<&str>| "Steve".to_owned();
+        let score = |_: &str, _: &str| None;
+        let value: serde_json::Value =
+            serde_json::from_str(&resolve_page(json, &selector, &score, &nbt)).unwrap();
+        assert_eq!(value["extra"][0]["text"], "\"minecraft:stone\"");
+        assert_eq!(value["extra"][1]["text"], "Hi");
+        assert_eq!(value["extra"][1]["color"], "gold");
+        assert!(value["extra"][0].get("nbt").is_none());
+        assert!(value["extra"][1].get("interpret").is_none());
+    }
+
+    #[test]
+    fn page_nbt_missing_value_is_empty_text() {
+        let json = r#"{"nbt":"Absent","entity":"@p"}"#;
+        let nbt = |_: &NbtQuery| None;
+        let selector = |_: &str, _: Option<&str>| String::new();
+        let score = |_: &str, _: &str| None;
+        let value: serde_json::Value =
+            serde_json::from_str(&resolve_page(json, &selector, &score, &nbt)).unwrap();
+        assert_eq!(value["text"], "");
     }
 }
