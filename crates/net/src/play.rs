@@ -109,6 +109,7 @@ struct Ids {
     chunk_batch_finished: i32,
     player_position: i32,
     keep_alive: i32,
+    sb_resource_pack: i32,
     resource_pack_push: i32,
     resource_pack_pop: i32,
     forget_level_chunk: i32,
@@ -3610,6 +3611,7 @@ impl PlayPlan {
                 chunk_batch_finished: cb("chunk_batch_finished")?,
                 player_position: cb("player_position")?,
                 keep_alive: cb("keep_alive")?,
+                sb_resource_pack: sb("resource_pack")?,
                 resource_pack_push: cb("resource_pack_push")?,
                 resource_pack_pop: cb("resource_pack_pop")?,
                 forget_level_chunk: cb("forget_level_chunk")?,
@@ -16589,6 +16591,20 @@ impl PlayPlan {
                     }
                     if id == ids.sb_chunk_batch_received {
                         stream.sender.received(r.f32()?);
+                        continue;
+                    }
+                    if id == ids.sb_resource_pack {
+                        let pack = r.uuid()?;
+                        let action = r.var_int()?;
+                        // `ServerCommonPacketListenerImpl.handleResourcePackResponse`:
+                        // статус хранит Java (`PlayerImpl`), событие — плагинам.
+                        if let Some(hooks) = self.hooks() {
+                            let _ = hooks.event(
+                                Event::ResourcePack,
+                                uuid,
+                                format!("{pack} {action}"),
+                            );
+                        }
                         continue;
                     }
                     if id == ids.sb_client_information {

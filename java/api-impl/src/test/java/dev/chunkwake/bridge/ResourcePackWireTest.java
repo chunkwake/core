@@ -58,5 +58,23 @@ final class ResourcePackWireTest {
         PlayerImpl player = new PlayerImpl(server, UUID.randomUUID(), "Steve");
         assertFalse(player.hasResourcePack());
         assertNull(player.getResourcePackHash());
+        assertNull(player.getResourcePackStatus());
+    }
+
+    @Test
+    void tracksLastResourcePackStatus() {
+        PlayerImpl player = new PlayerImpl(server, UUID.randomUUID(), "Steve");
+        player.resourcePackStatus(
+                UUID.randomUUID(),
+                org.bukkit.event.player.PlayerResourcePackStatusEvent.Status.ACCEPTED);
+        assertEquals(
+                org.bukkit.event.player.PlayerResourcePackStatusEvent.Status.ACCEPTED,
+                player.getResourcePackStatus());
+        player.resourcePackStatus(
+                UUID.randomUUID(),
+                org.bukkit.event.player.PlayerResourcePackStatusEvent.Status.SUCCESSFULLY_LOADED);
+        assertEquals(
+                org.bukkit.event.player.PlayerResourcePackStatusEvent.Status.SUCCESSFULLY_LOADED,
+                player.getResourcePackStatus());
     }
 }

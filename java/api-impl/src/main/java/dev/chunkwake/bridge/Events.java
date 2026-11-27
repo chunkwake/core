@@ -144,6 +144,25 @@ final class Events {
             case Bridge.EVENT_SIGN_CHANGE -> signChange(plugins, p, arg);
             case Bridge.EVENT_OPEN_SIGN -> openSign(p, arg);
             case Bridge.EVENT_EDIT_BOOK -> editBook(plugins, p.api, arg);
+            case Bridge.EVENT_RESOURCE_PACK -> {
+                String[] f = arg.trim().split(" ");
+                if (f.length < 2) {
+                    yield "";
+                }
+                UUID pack;
+                org.bukkit.event.player.PlayerResourcePackStatusEvent.Status status;
+                try {
+                    pack = UUID.fromString(f[0]);
+                    status = org.bukkit.event.player.PlayerResourcePackStatusEvent.Status
+                            .values()[Integer.parseInt(f[1])];
+                } catch (RuntimeException bad) {
+                    yield "";
+                }
+                p.resourcePackStatus(pack, status);
+                plugins.callEvent(new org.bukkit.event.player.PlayerResourcePackStatusEvent(
+                        p.api, pack, status));
+                yield "";
+            }
             case Bridge.EVENT_CHANGED_WORLD -> {
                 plugins.callEvent(new org.bukkit.event.player.PlayerChangedWorldEvent(p.api, world(arg.trim())));
                 yield "";

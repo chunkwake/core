@@ -46,6 +46,8 @@ public final class PlayerImpl {
     private final java.util.Map<UUID, ResourcePack> packs =
             new java.util.concurrent.ConcurrentHashMap<>();
     private volatile String lastPackHash;
+    /** Последний статус набора (`ServerPlayer.resourcePackStatus`). */
+    private volatile org.bukkit.event.player.PlayerResourcePackStatusEvent.Status resourcePackStatus;
 
     /** Один набор ресурсов: URL, SHA-1, JSON подсказки, обязательность. */
     private record ResourcePack(String url, byte[] hash, String prompt, boolean required) {
@@ -383,6 +385,32 @@ public final class PlayerImpl {
 
     public String getResourcePackHash() {
         return lastPackHash;
+    }
+
+    public org.bukkit.event.player.PlayerResourcePackStatusEvent.Status getResourcePackStatus() {
+        return resourcePackStatus;
+    }
+
+    /**
+     * `ServerCommonPacketListenerImpl.handleResourcePackResponse`: запомнить
+     * статус и отключить, если обязательный набор отклонён или не скачался.
+     */
+    public void resourcePackStatus(
+            UUID pack,
+            org.bukkit.event.player.PlayerResourcePackStatusEvent.Status status) {
+        resourcePackStatus = status;
+        ResourcePack info = packs.get(pack);
+        if (info == null || !info.required()) {
+            return;
+        }
+        Component reason = switch (status) {
+            case SUCCESSFULLY_LOADED, ACCEPTED, DOWNLOADED -> null;
+            case DECLINED -> Component.translatable("multiplayer.disconnect.resource_pack_declined");
+            default -> Component.translatable("multiplayer.disconnect.resource_pack_failed_download");
+        };
+        if (reason != null) {
+            kick(reason, org.bukkit.event.player.PlayerKickEvent.Cause.RESOURCE_PACK_REJECTION);
+        }
     }
 
     private void clearPacks() {

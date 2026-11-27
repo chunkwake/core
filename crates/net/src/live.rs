@@ -583,6 +583,9 @@ pub enum Event {
     /// `ChunkLoadEvent`: `<измерение> <x> <z> <isNew>`; без игрока,
     /// событие вызывается на тике сервера (squaremap обновляет карту).
     ChunkLoad = 52,
+    /// `PlayerResourcePackStatusEvent`: `<uuid> <action>`; `action` — ordinal
+    /// `ServerboundResourcePackPacket.Action` (0..7), ответ не нужен.
+    ResourcePack = 54,
 }
 
 impl Event {

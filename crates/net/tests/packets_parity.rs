@@ -24,7 +24,6 @@ const UNHANDLED: &[&str] = &[
     "debug_subscription_request",
     "jigsaw_generate",
     "pong",
-    "resource_pack",
     "set_command_block",
     "set_command_minecart",
     "set_jigsaw_block",

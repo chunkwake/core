@@ -325,6 +325,9 @@ final class PluginManagerImpl {
         if (has(org.bukkit.event.player.PlayerEditBookEvent.getHandlerList())) {
             mask |= Bridge.listenBit(Bridge.EVENT_EDIT_BOOK);
         }
+        // Статус набора хранится в `PlayerImpl` как у `ServerPlayer`, поэтому
+        // ответ клиента принимается всегда: без слушателей `callEvent` дёшев.
+        mask |= Bridge.listenBit(Bridge.EVENT_RESOURCE_PACK);
         Bridge.setFlag(Bridge.FLAG_LISTENERS, mask);
         long tickFlag = has(com.destroystokyo.paper.event.server.ServerTickEndEvent.getHandlerList())
                 || has(com.destroystokyo.paper.event.server.ServerTickStartEvent.getHandlerList())
