@@ -13509,9 +13509,10 @@ impl PlayPlan {
                                 crate::mobs::Source::at(pos, owner.map(|u| u.as_u128())),
                                 0.0,
                             );
-                            // `igniteForSeconds(5)`.
-                            e.environment.burning = e.environment.burning.max(100);
+                            // `igniteForSeconds(5)`: при провалившемся ударе
+                            // ваниль возвращает прежние тики горения.
                             if hit.is_some() {
+                                e.environment.burning = e.environment.burning.max(100);
                                 animation = Some(id);
                             }
                         }
@@ -24243,6 +24244,20 @@ impl PlayPlan {
                     .unwrap_or(self.survival.arrow_entity_type);
                 let mut shot = crate::arrows::Arrow::flight(center, vel, true);
                 shot.thrown_kind = Some(kind);
+                self.hub.send(
+                    None,
+                    play::level_event(
+                        self.ids.level_event,
+                        if name == "minecraft:fire_charge" {
+                            1018
+                        } else {
+                            1051
+                        },
+                        front,
+                        0,
+                        false,
+                    ),
+                );
                 self.launch(ty, shot);
                 Some(true)
             }
