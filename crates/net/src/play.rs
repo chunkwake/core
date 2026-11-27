@@ -17180,7 +17180,8 @@ impl PlayPlan {
                             && let Some(held) = state.inv.slots[slot]
                             && self.item_name(held.item) == books::WRITTEN_BOOK
                         {
-                            let (open, changed) = self.open_written_book(held);
+                            let (open, changed) =
+                                self.open_written_book(uuid, &me.entry.name, held);
                             if let Some(s) = changed {
                                 state.inv.slots[slot] = Some(s);
                                 self.send_slots(conn, &mut state.inv, &[slot]).await?;

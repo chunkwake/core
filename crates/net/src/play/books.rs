@@ -54,6 +54,80 @@ fn literal(page: &str) -> String {
     serde_json::Value::String(page.to_owned()).to_string()
 }
 
+/// Простой текст компонента (для `separator`): строка, `text` или `extra`.
+fn plain_text(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(items) => items.iter().map(plain_text).collect(),
+        serde_json::Value::Object(map) => map
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+/// `ComponentUtils.resolve`: заменить `selector` и `score` на готовый текст,
+/// включая `extra` и аргументы `translate` (`with`).
+pub(super) fn resolve_page(
+    json: &str,
+    selector: &dyn Fn(&str, Option<&str>) -> String,
+    score: &dyn Fn(&str, &str) -> Option<String>,
+) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return json.to_owned();
+    };
+    resolve_component(&mut value, selector, score);
+    value.to_string()
+}
+
+fn resolve_component(
+    value: &mut serde_json::Value,
+    selector: &dyn Fn(&str, Option<&str>) -> String,
+    score: &dyn Fn(&str, &str) -> Option<String>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::String(sel)) = map.get("selector") {
+                let sel = sel.clone();
+                let separator = map.get("separator").map(plain_text);
+                let text = selector(&sel, separator.as_deref());
+                map.remove("selector");
+                map.remove("separator");
+                map.insert("text".into(), serde_json::Value::String(text));
+            } else if let Some(serde_json::Value::Object(contents)) = map.get("score") {
+                let name = contents
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let objective = contents
+                    .get("objective")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let text = if name.is_empty() || objective.is_empty() {
+                    String::new()
+                } else {
+                    score(name, objective).unwrap_or_default()
+                };
+                map.remove("score");
+                map.insert("text".into(), serde_json::Value::String(text));
+            }
+            for key in ["extra", "with"] {
+                if let Some(child) = map.get_mut(key) {
+                    resolve_component(child, selector, score);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                resolve_component(item, selector, score);
+            }
+        }
+        _ => {}
+    }
+}
+
 impl PlayPlan {
     /// `handleEditBook`: `Some(слот окна)`, если слот надо переслать клиенту.
     /// Слишком большая книга или правка чаще раза в секунду — кик, как в Paper.
@@ -158,9 +232,14 @@ impl PlayPlan {
     }
 
     /// `ServerPlayer.openItemGui`: у подписанной книги разрешить страницы
-    /// (`resolveForItem`) и открыть её клиенту. `Some(новая стопка)`, если
-    /// книга изменилась и слот надо переслать.
-    pub(super) fn open_written_book(&self, stack: Stack) -> (bool, Option<Stack>) {
+    /// (`resolveForItem`: селекторы и счёт) и открыть её клиенту.
+    /// `Some(новая стопка)`, если книга изменилась и слот надо переслать.
+    pub(super) fn open_written_book(
+        &self,
+        uuid: Uuid,
+        name: &str,
+        stack: Stack,
+    ) -> (bool, Option<Stack>) {
         let extra = components::get(stack.extra);
         let Some(book) = extra.book.as_ref().filter(|b| b.written) else {
             // Без `written_book_content` ваниль книгу не открывает.
@@ -169,10 +248,42 @@ impl PlayPlan {
         if book.resolved {
             return (true, None);
         }
-        // Компоненты с селекторами и счётом не разрешаются: только флаг.
+        let source = crate::play::commands::dispatch::Source::player(uuid, name, 0);
+        let ctx = crate::play::commands::Context::new(self);
+        // `SelectorContents.resolve`: список имён через `separator` (по умолчанию ", ").
+        let selector = |sel: &str, separator: Option<&str>| {
+            let list = ctx.select_any(&source, sel, true).unwrap_or_default();
+            let separator = separator.unwrap_or(", ");
+            list.iter()
+                .map(|target| target.name.as_str())
+                .collect::<Vec<_>>()
+                .join(separator)
+        };
+        // `ScoreContents.resolve`: селектор — первая цель, иначе имя как есть;
+        // нет цели или счёта — пустой компонент.
+        let score = |holder: &str, objective: &str| {
+            let holder = if holder.starts_with('@') {
+                ctx.select_any(&source, holder, true)
+                    .ok()
+                    .and_then(|list| list.into_iter().next())
+                    .map_or_else(|| holder.to_owned(), |target| target.name)
+            } else {
+                holder.to_owned()
+            };
+            self.score(&holder, objective)
+                .map(|value| value.to_string())
+        };
         let mut e = (*extra).clone();
-        if let Some(b) = e.book.as_mut() {
-            b.resolved = true;
+        if let Some(book) = e.book.as_mut() {
+            for (page, filtered) in &mut book.pages {
+                let resolved = resolve_page(page, &selector, &score);
+                *page = resolved;
+                if let Some(filtered) = filtered {
+                    let resolved = resolve_page(filtered, &selector, &score);
+                    *filtered = resolved;
+                }
+            }
+            book.resolved = true;
         }
         e.raw = None;
         (
@@ -206,5 +317,51 @@ mod tests {
         assert_eq!(book_window_slot(8), Some(44));
         assert_eq!(book_window_slot(40), Some(survival::OFFHAND));
         assert_eq!(book_window_slot(9), None);
+    }
+
+    #[test]
+    fn page_resolves_selectors_and_scores() {
+        let json = r#"{"text":"","extra":[{"selector":"@p","separator":" | "},{"score":{"name":"@a","objective":"kills"}},{"text":"!"}]}"#;
+        let selector = |sel: &str, separator: Option<&str>| match sel {
+            "@p" => ["Steve", "Alex"].join(separator.unwrap_or(", ")),
+            _ => String::new(),
+        };
+        let score = |name: &str, objective: &str| match (name, objective) {
+            ("@a", "kills") => Some("7".to_owned()),
+            _ => None,
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&resolve_page(json, &selector, &score)).unwrap();
+        assert_eq!(value["extra"][0]["text"], "Steve | Alex");
+        assert_eq!(value["extra"][1]["text"], "7");
+        assert_eq!(value["extra"][2]["text"], "!");
+        assert!(value["extra"][0].get("selector").is_none());
+        assert!(value["extra"][1].get("score").is_none());
+    }
+
+    #[test]
+    fn page_resolves_translate_arguments() {
+        let json = r#"{"translate":"chat.type.text","with":[{"selector":"@p"},{"score":{"name":"Steve","objective":"deaths"}}]}"#;
+        let selector = |_: &str, _: Option<&str>| "Steve".to_owned();
+        let score = |name: &str, objective: &str| {
+            (name == "Steve" && objective == "deaths").then(|| "0".to_owned())
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&resolve_page(json, &selector, &score)).unwrap();
+        assert_eq!(value["with"][0]["text"], "Steve");
+        assert_eq!(value["with"][1]["text"], "0");
+    }
+
+    #[test]
+    fn page_missing_score_and_plain_text_stay_usable() {
+        let json = r#"{"score":{"name":"@p","objective":"missing"}}"#;
+        let selector = |_: &str, _: Option<&str>| "Steve".to_owned();
+        let score = |_: &str, _: &str| None;
+        let value: serde_json::Value =
+            serde_json::from_str(&resolve_page(json, &selector, &score)).unwrap();
+        assert_eq!(value["text"], "");
+        // Не компонент и битый JSON не трогаются.
+        assert_eq!(resolve_page("plain text", &selector, &score), "plain text");
+        assert_eq!(resolve_page("{oops", &selector, &score), "{oops");
     }
 }
