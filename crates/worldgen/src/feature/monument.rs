@@ -1907,7 +1907,11 @@ mod tests {
             .with_features(&data, &states, &state, &biome_ids)
             .unwrap();
         let pos = world
-            .locate_structure("minecraft:monument", [0, 64, 0])
+            .locate_structure(
+                "minecraft:monument",
+                [0, 64, 0],
+                &std::collections::HashSet::new(),
+            )
             .expect("монумент");
         eprintln!("monument {pos:?}");
         assert_eq!(pos[0].rem_euclid(16), 0);

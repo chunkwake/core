@@ -679,12 +679,16 @@ impl Structures {
         columns: &dyn Columns,
         origin: [i32; 3],
         name: &str,
+        excluded: &HashSet<[i32; 3]>,
     ) -> Option<[i32; 3]> {
         // `ChunkGenerator.findNearestMapStructure`: кольца целиком, затем
         // `random_spread` по радиусам; на первом радиусе с находкой — ближайшая
         // из находок всех наборов по `distSqr` с высотой.
         let wanted = self.wanted(name)?;
         let offer = |p: [i32; 3], best: &mut Option<([i32; 3], i64)>| {
+            if excluded.contains(&p) {
+                return;
+            }
             let d = (0..3)
                 .map(|i| (p[i] as i64 - origin[i] as i64).pow(2))
                 .sum();
@@ -714,7 +718,7 @@ impl Structures {
             }
             let mut found = false;
             for &si in &spread {
-                if let Some(p) = self.spread_ring(si, cx, cz, radius, columns, &wanted) {
+                if let Some(p) = self.spread_ring(si, cx, cz, radius, columns, &wanted, excluded) {
                     found = true;
                     offer(p, &mut best);
                 }
@@ -727,6 +731,7 @@ impl Structures {
     }
 
     /// Первая находка набора на кольце `radius` в порядке x, затем z.
+    #[allow(clippy::too_many_arguments)]
     fn spread_ring(
         &self,
         si: usize,
@@ -735,6 +740,7 @@ impl Structures {
         radius: i32,
         columns: &dyn Columns,
         wanted: &HashSet<String>,
+        excluded: &HashSet<[i32; 3]>,
     ) -> Option<[i32; 3]> {
         let set = &self.sets[si];
         for x in -radius..=radius {
@@ -753,6 +759,9 @@ impl Structures {
                     set.triangular,
                 );
                 if let Some(p) = self.probe(si, sx, sz, columns, wanted) {
+                    if excluded.contains(&p) {
+                        continue;
+                    }
                     return Some(p);
                 }
             }
@@ -4375,12 +4384,22 @@ mod tests {
         let cols = FlatCols { seed: 7, biome };
         // Крепость теперь ищется по кольцам: в равнине биом подходит.
         let keep = structures
-            .nearest(&cols, [0, 64, 0], "minecraft:stronghold")
+            .nearest(
+                &cols,
+                [0, 64, 0],
+                "minecraft:stronghold",
+                &std::collections::HashSet::new(),
+            )
             .expect("крепость");
         assert_eq!(keep[0].rem_euclid(16), 0);
         assert_eq!(keep[2].rem_euclid(16), 0);
         let pos = structures
-            .nearest(&cols, [0, 64, 0], "#minecraft:village")
+            .nearest(
+                &cols,
+                [0, 64, 0],
+                "#minecraft:village",
+                &std::collections::HashSet::new(),
+            )
             .expect("деревня");
         let (sx, sz) = (pos[0].div_euclid(16), pos[2].div_euclid(16));
         assert!(structures.is_structure_start(sx, sz, 7), "{pos:?}");
@@ -4392,6 +4411,15 @@ mod tests {
             0,
             "поиск не должен собирать jigsaw"
         );
+        // `skip_existing`: отмеченная деревня пропускается, находится другая.
+        let mut excluded = HashSet::new();
+        excluded.insert(pos);
+        let next = structures
+            .nearest(&cols, [0, 64, 0], "#minecraft:village", &excluded)
+            .expect("вторая деревня");
+        assert_ne!(next, pos);
+        assert_eq!(next[0].rem_euclid(16), 0);
+        assert_eq!(next[2].rem_euclid(16), 0);
     }
 
     fn locate_data() -> Option<std::path::PathBuf> {

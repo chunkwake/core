@@ -19,7 +19,9 @@ use std::sync::Arc;
 const DIMENSION: &str = "overworld";
 
 /// `/locate`: ближайшая точка от блока. Функция нужна и биомам, и структурам.
-type Locate = std::sync::Arc<dyn Fn(&str, [i32; 3]) -> Option<[i32; 3]> + Send + Sync>;
+type Locate = std::sync::Arc<
+    dyn Fn(&str, [i32; 3], &std::collections::HashSet<[i32; 3]>) -> Option<[i32; 3]> + Send + Sync,
+>;
 type StructuresAtFn =
     std::sync::Arc<dyn Fn([i32; 3]) -> std::collections::HashSet<String> + Send + Sync>;
 
@@ -189,11 +191,13 @@ fn dynamic_world_factory(
             std::sync::Arc::new(move || trim_world.trim_idle());
         let locate_world = world.clone();
         let locate_biome: chunkwake_net::play::LocateFn =
-            std::sync::Arc::new(move |name, origin| locate_world.locate_biome(name, origin));
+            std::sync::Arc::new(move |name, origin, _excluded| {
+                locate_world.locate_biome(name, origin)
+            });
         let locate_struct_world = world.clone();
         let locate_structure: chunkwake_net::play::LocateFn =
-            std::sync::Arc::new(move |name, origin| {
-                locate_struct_world.locate_structure(name, origin)
+            std::sync::Arc::new(move |name, origin, excluded| {
+                locate_struct_world.locate_structure(name, origin, excluded)
             });
         let structures_world = world;
         let structures_at: chunkwake_net::play::StructuresAtFn =
@@ -438,13 +442,14 @@ pub fn build_play_plan(
                         dim.has_skylight,
                     );
                     let locate_world = overworld.clone();
-                    let locate: Locate = std::sync::Arc::new(move |name, origin| {
+                    let locate: Locate = std::sync::Arc::new(move |name, origin, _excluded| {
                         locate_world.locate_biome(name, origin)
                     });
                     let locate_struct_world = overworld.clone();
-                    let locate_structure: Locate = std::sync::Arc::new(move |name, origin| {
-                        locate_struct_world.locate_structure(name, origin)
-                    });
+                    let locate_structure: Locate =
+                        std::sync::Arc::new(move |name, origin, excluded| {
+                            locate_struct_world.locate_structure(name, origin, excluded)
+                        });
                     let structures_world = overworld.clone();
                     let structures_at: StructuresAtFn =
                         std::sync::Arc::new(move |pos| structures_world.structures_at(pos));
@@ -1897,13 +1902,14 @@ fn build_dimension(
     });
     let locate_world = built.clone();
     let locate_biome: Locate =
-        std::sync::Arc::new(move |name, origin| locate_world.locate_biome(name, origin));
+        std::sync::Arc::new(move |name, origin, _excluded| locate_world.locate_biome(name, origin));
     let structures_world = built.clone();
     let structures_at: StructuresAtFn =
         std::sync::Arc::new(move |pos| structures_world.structures_at(pos));
     let locate_struct_world = built;
-    let locate_structure: Locate =
-        std::sync::Arc::new(move |name, origin| locate_struct_world.locate_structure(name, origin));
+    let locate_structure: Locate = std::sync::Arc::new(move |name, origin, excluded| {
+        locate_struct_world.locate_structure(name, origin, excluded)
+    });
     tracing::info!(
         "{settings}: генератор готов (min_y {min_y}, высота {height}, море {sea_level})"
     );

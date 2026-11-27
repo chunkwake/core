@@ -113,12 +113,24 @@ impl PlayPlan {
 
     /// `/locate biome`: ближайшая точка или `None` (плоский мир, нет такого биома).
     pub(crate) fn locate_biome(&self, name: &str, origin: [i32; 3]) -> Option<[i32; 3]> {
-        self.locate_biome_fn().and_then(|f| f(name, origin))
+        self.locate_biome_fn()
+            .and_then(|f| f(name, origin, &HashSet::new()))
     }
 
     /// `/locate structure`: ближайший старт или `None` (плоский мир, такой структуры нет).
     pub(crate) fn locate_structure(&self, name: &str, origin: [i32; 3]) -> Option<[i32; 3]> {
-        self.locate_structure_fn().and_then(|f| f(name, origin))
+        self.locate_structure_excluding(name, origin, &HashSet::new())
+    }
+
+    /// `/locate structure`, пропуская уже отмеченные позиции (`skip_existing`).
+    pub(crate) fn locate_structure_excluding(
+        &self,
+        name: &str,
+        origin: [i32; 3],
+        excluded: &HashSet<[i32; 3]>,
+    ) -> Option<[i32; 3]> {
+        self.locate_structure_fn()
+            .and_then(|f| f(name, origin, excluded))
     }
 
     /// `StructureManager.getStructureAt` из генератора мира.

@@ -1156,6 +1156,7 @@ impl PlayPlan {
             let decoration = *self.survival.map_decorations.get(&spec.decoration)?;
             let map_id = self.create_map(pos[0], pos[2], spec.zoom, true, true);
             self.add_map_target(map_id, decoration, pos[0], pos[2], "+");
+            self.claim_map_structure(pos);
             extra.map_id = Some(map_id);
             decorated = true;
         }

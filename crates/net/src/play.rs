@@ -440,6 +440,8 @@ pub struct PlayPlan {
     dragon_fight: Mutex<DragonFight>,
     /// `/data … storage`: корни командных хранилищ (`namespace:path`).
     pub(super) command_storage: Mutex<HashMap<String, Compound>>,
+    /// Уже отмеченные на картах структуры (`skip_existing`).
+    pub(super) map_claims: Mutex<HashSet<(Dimension, [i32; 3])>>,
     /// Активные рейды (`Raid`): волны разбойников и `raid_win`.
     raids: Mutex<Vec<raids::Raid>>,
     /// Режим игры по умолчанию (`/defaultgamemode`).
@@ -499,8 +501,10 @@ pub struct PlayPlan {
 /// Генератор столбца по координатам чанка: `None` — чанк уже отдан.
 pub type TerrainFn = Arc<dyn Fn(i32, i32) -> Option<ChunkColumn> + Send + Sync>;
 pub type TerrainTrimFn = Arc<dyn Fn() + Send + Sync>;
-/// `/locate`: ближайшая точка от блока.
-pub type LocateFn = Arc<dyn Fn(&str, [i32; 3]) -> Option<[i32; 3]> + Send + Sync>;
+/// `/locate`: ближайшая точка от блока; `excluded` — уже отмеченные
+/// структуры (`skip_existing` у карт).
+pub type LocateFn =
+    Arc<dyn Fn(&str, [i32; 3], &HashSet<[i32; 3]>) -> Option<[i32; 3]> + Send + Sync>;
 /// `StructureManager.getStructureAt`: имена структур в точке (радиус кусков).
 pub type StructuresAtFn = Arc<dyn Fn([i32; 3]) -> HashSet<String> + Send + Sync>;
 
@@ -3784,6 +3788,7 @@ impl PlayPlan {
             active: AtomicU8::new(Dimension::Overworld.slot()),
             dragon_fight: Mutex::new(DragonFight::default()),
             command_storage: Mutex::new(HashMap::new()),
+            map_claims: Mutex::new(HashSet::new()),
             raids: Mutex::new(Vec::new()),
             trees,
             dynamic_factory,
@@ -10523,7 +10528,7 @@ impl PlayPlan {
             feet[1].floor() as i32,
             feet[2].floor() as i32,
         ];
-        let Some(found) = locate("#minecraft:eye_of_ender_located", block) else {
+        let Some(found) = locate("#minecraft:eye_of_ender_located", block, &HashSet::new()) else {
             return false;
         };
         {
@@ -20297,6 +20302,26 @@ impl PlayPlan {
             .collect()
     }
 
+    /// `skip_existing`: отметить структуру, уже выданную на карте.
+    fn claim_map_structure(&self, pos: [i32; 3]) {
+        self.map_claims
+            .lock()
+            .unwrap()
+            .insert((self.active_dim(), pos));
+    }
+
+    /// Позиции структур этого измерения, уже отмеченные на картах.
+    fn claimed_structures(&self) -> HashSet<[i32; 3]> {
+        let dim = self.active_dim();
+        self.map_claims
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(d, _)| *d == dim)
+            .map(|(_, pos)| *pos)
+            .collect()
+    }
+
     /// `ExplorationMapFunction.run`: карта к ближайшей структуре тега и значок
     /// `+`. `None` — структура не найдена (у лут-функции `on_fail: discard`).
     fn loot_extra(&self, drop: &crate::loot::LootDrop, origin: Option<[i32; 3]>) -> Option<u32> {
@@ -20304,7 +20329,12 @@ impl PlayPlan {
             return Some(0);
         };
         let origin = origin?;
-        let pos = self.locate_structure(&spec.destination, origin)?;
+        let excluded = if spec.skip_existing {
+            self.claimed_structures()
+        } else {
+            HashSet::new()
+        };
+        let pos = self.locate_structure_excluding(&spec.destination, origin, &excluded)?;
         // `findNearestMapStructure` ищет в радиусе `search_radius` чанков.
         let reach = i64::from(spec.search_radius.max(0)) * 16;
         let dx = i64::from(pos[0]) - i64::from(origin[0]);
@@ -20313,11 +20343,9 @@ impl PlayPlan {
             return None;
         }
         let decoration = *self.survival.map_decorations.get(&spec.decoration)?;
-        // `skip_existing` в ванили не выбирает структуры, уже отмеченные на
-        // картах; нашего реестра «известных» структур пока нет.
-        let _ = spec.skip_existing;
         let map_id = self.create_map(pos[0], pos[2], spec.zoom, true, true);
         self.add_map_target(map_id, decoration, pos[0], pos[2], "+");
+        self.claim_map_structure(pos);
         Some(chunkwake_protocol::components::intern(
             chunkwake_protocol::components::Extra {
                 map_id: Some(map_id),

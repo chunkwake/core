@@ -1814,7 +1814,11 @@ mod tests {
             .with_features(&data, &states, &state, &biome_ids)
             .unwrap();
         let pos = world
-            .locate_structure("minecraft:stronghold", [0, 64, 0])
+            .locate_structure(
+                "minecraft:stronghold",
+                [0, 64, 0],
+                &std::collections::HashSet::new(),
+            )
             .expect("крепость");
         // `/locate` у `server.jar` на сиде 12345: `[-560, ~, -1648]` — угол
         // чанка (−35, −103), `getLocatePos`.
@@ -1849,7 +1853,11 @@ mod tests {
             .with_features(&data, &states, &state, &biome_ids)
             .unwrap();
         let pos = world
-            .locate_structure("minecraft:stronghold", [0, 64, 0])
+            .locate_structure(
+                "minecraft:stronghold",
+                [0, 64, 0],
+                &std::collections::HashSet::new(),
+            )
             .expect("крепость");
         // `/locate` отдаёт только x/z: ищем высоту, на которой кусок крепости
         // накрывает точку (`StructureManager.getStructureAt`).
@@ -1889,7 +1897,11 @@ mod tests {
             .with_features(&data, &states, &state, &biome_ids)
             .unwrap();
         let pos = world
-            .locate_structure("minecraft:mansion", [0, 64, 0])
+            .locate_structure(
+                "minecraft:mansion",
+                [0, 64, 0],
+                &std::collections::HashSet::new(),
+            )
             .expect("особняк");
         eprintln!(
             "mansion {pos:?} chunk {}, {}",

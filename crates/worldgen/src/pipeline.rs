@@ -480,10 +480,16 @@ impl Overworld {
         Some(hit)
     }
 
-    /// Ближайшая поставленная структура для `/locate structure`. Чанк не строится.
-    pub fn locate_structure(&self, name: &str, origin: [i32; 3]) -> Option<[i32; 3]> {
+    /// Ближайшая поставленная структура для `/locate structure`. Чанк не
+    /// строится. `excluded` — уже отмеченные на картах позиции.
+    pub fn locate_structure(
+        &self,
+        name: &str,
+        origin: [i32; 3],
+        excluded: &std::collections::HashSet<[i32; 3]>,
+    ) -> Option<[i32; 3]> {
         let structures = self.features.as_ref()?.structures.as_ref()?;
-        structures.nearest(&self.columns()?, origin, name)
+        structures.nearest(&self.columns()?, origin, name, excluded)
     }
 
     /// `StructureManager.getStructureAt`: структуры, в которые попадает точка.

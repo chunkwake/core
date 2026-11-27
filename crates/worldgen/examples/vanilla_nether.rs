@@ -146,7 +146,7 @@ fn compare(regions: &Path, data: &Path, seed: i64, radius: i32) -> Result<(), St
             let origin = [x.parse().unwrap_or(0), 64, z.parse().unwrap_or(0)];
             println!(
                 "{name} от {origin:?}: {:?}",
-                world.locate_structure(name, origin)
+                world.locate_structure(name, origin, &std::collections::HashSet::new())
             );
         }
     }
