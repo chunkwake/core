@@ -972,7 +972,7 @@ enum Feature {
     Chorus(Arc<end::Blocks>),
 }
 
-pub(crate) mod end;
+pub mod end;
 pub(crate) mod end_city;
 mod fortress;
 pub(crate) mod mansion;

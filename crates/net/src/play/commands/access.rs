@@ -704,6 +704,7 @@ impl PlayPlan {
         self.reload_dir = Some(props.server_dir.to_owned());
         self.debug_dir = world_dir.to_owned();
         self.world_dir = Some(world_dir.to_owned());
+        self.load_dragon_fight(world_dir);
         self.whitelist_enabled
             .store(props.whitelist, std::sync::atomic::Ordering::Relaxed);
         self.allow_flight

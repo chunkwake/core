@@ -120,6 +120,7 @@ impl PlayPlan {
             fight.has_previously_killed = true;
             first
         };
+        self.save_dragon_fight();
         let pos = self.exit_portal_pos();
         self.end_podium(pos, true);
         if first {

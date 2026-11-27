@@ -577,6 +577,8 @@ type SpawnFrameCache = FastMap<
 /// дракона (`summoned_entity` для `end/respawn_dragon`).
 #[derive(Default)]
 struct DragonFight {
+    /// `EnderDragonFight`: бой уже начинался (дракон появлялся).
+    started: bool,
     /// `dragonKilled`: без убитого дракона возрождение не начинается.
     killed: bool,
     /// `hasPreviouslyKilledDragon`: драконье яйцо только за первое убийство.
@@ -587,6 +589,24 @@ struct DragonFight {
     respawn_at: Option<i64>,
     /// Точка появления во время анимации возрождения.
     respawn_pos: Option<[f64; 3]>,
+}
+
+/// Состояние боя в NBT (`EnderDragonFight` в `level.dat`).
+fn dragon_fight_nbt(started: bool, killed: bool, previously: bool) -> Compound {
+    Compound::from([
+        ("started".into(), Tag::Byte(started as i8)),
+        ("killed".into(), Tag::Byte(killed as i8)),
+        ("has_previously_killed".into(), Tag::Byte(previously as i8)),
+    ])
+}
+
+fn parse_dragon_fight(root: &Compound) -> (bool, bool, bool) {
+    let flag = |key: &str| root.get(key).and_then(Tag::as_i64).is_some_and(|v| v != 0);
+    (
+        flag("started"),
+        flag("killed"),
+        flag("has_previously_killed"),
+    )
 }
 
 fn sleep_required(players: usize, percentage: i64) -> usize {
@@ -4647,11 +4667,13 @@ impl PlayPlan {
         {
             let mut fight = self.dragon_fight.lock().unwrap();
             fight.killed = false;
+            fight.started = true;
             fight.crystals.clear();
             // `DragonRespawnAnimation`: 100 тиков лучей и взрывов кристаллов.
             fight.respawn_at = Some(self.game_time.load(Ordering::Relaxed) + 100);
             fight.respawn_pos = Some(spawn);
         }
+        self.save_dragon_fight();
         for (pos, _) in &crystals {
             self.dragon_crystal_burst([
                 f64::from(pos[0]) + 0.5,
@@ -4695,63 +4717,166 @@ impl PlayPlan {
         );
     }
 
+    /// Файл состояния боя (`started`/`killed`/`hasPreviouslyKilled`).
+    fn dragon_fight_path(&self) -> Option<std::path::PathBuf> {
+        self.world_dir
+            .as_deref()
+            .map(|dir| dir.join("data").join("chunkwake_dragon_fight.dat"))
+    }
+
+    /// Сохранить состояние боя (`EnderDragonFight` в `level.dat`).
+    fn save_dragon_fight(&self) {
+        let Some(path) = self.dragon_fight_path() else {
+            return;
+        };
+        let (started, killed, previously) = {
+            let fight = self.dragon_fight.lock().unwrap();
+            (fight.started, fight.killed, fight.has_previously_killed)
+        };
+        let root = dragon_fight_nbt(started, killed, previously);
+        if let Some(parent) = path.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            tracing::warn!("dragon fight {}: {error}", parent.display());
+            return;
+        }
+        if let Err(error) = chunkwake_world::nbt::write_gzip_file(&path, &root) {
+            tracing::warn!("dragon fight state: {error}");
+        }
+    }
+
+    /// Прочитать состояние боя при старте сервера.
+    fn load_dragon_fight(&self, world_dir: &std::path::Path) {
+        let path = world_dir.join("data").join("chunkwake_dragon_fight.dat");
+        let Ok(Some(root)) = chunkwake_world::nbt::read_gzip_file(&path) else {
+            return;
+        };
+        let (started, killed, previously) = parse_dragon_fight(&root);
+        let mut fight = self.dragon_fight.lock().unwrap();
+        fight.started = started;
+        fight.killed = killed;
+        fight.has_previously_killed = previously;
+    }
+
+    /// Появление дракона с активным боем (`EnderDragonFight.updateDragon`).
+    fn spawn_fight_dragon(&self, pos: [f64; 3]) -> Option<i32> {
+        let id = self.spawn_mob(
+            crate::mobs::Species::EnderDragon,
+            pos,
+            0.0,
+            false,
+            Some("TRIGGERED"),
+        )?;
+        if let Some(e) = self.sim().mobs.lock().unwrap().get_mut(&id) {
+            e.mob.dragon_phase = crate::mobs::DRAGON_HOLDING;
+        }
+        self.trigger_summoned_entity(pos, crate::mobs::Species::EnderDragon, 192.0);
+        Some(id)
+    }
+
+    /// `EnderDragonFight.findOrCreateDragon`: первый тик Края поднимает бой —
+    /// дракон в `(0, 128, 0)` и кристаллы на десяти шипах.
+    fn start_natural_end_fight(&self) {
+        let has_crystals = self
+            .sim()
+            .mobs
+            .lock()
+            .unwrap()
+            .values()
+            .any(|e| e.mob.alive() && e.mob.species == crate::mobs::Species::EndCrystal);
+        {
+            let mut fight = self.dragon_fight.lock().unwrap();
+            if fight.killed {
+                return;
+            }
+            fight.started = true;
+        }
+        self.save_dragon_fight();
+        if self.spawn_fight_dragon([0.5, 128.0, 0.5]).is_none() || has_crystals {
+            return;
+        }
+        for spike in chunkwake_worldgen::feature::end::spikes_for_seed(self.seed) {
+            let pos = [
+                f64::from(spike.center_x) + 0.5,
+                f64::from(spike.height + 1),
+                f64::from(spike.center_z) + 0.5,
+            ];
+            let _ = self.spawn_mob_with(
+                crate::mobs::Species::EndCrystal,
+                pos,
+                0.0,
+                false,
+                Some("STRUCTURE"),
+                |m| {
+                    m.no_gravity = true;
+                    m.no_ai = true;
+                    m.persistent = true;
+                },
+            );
+        }
+    }
+
     /// Тик анимации возрождения дракона (`EnderDragonFight.tick`).
     fn tick_dragon_fight(&self) {
         if self.active_dim() != Dimension::End {
             return;
         }
         let now = self.game_time.load(Ordering::Relaxed);
-        let (at, spawn) = {
+        let (at, spawn, killed) = {
             let fight = self.dragon_fight.lock().unwrap();
-            (fight.respawn_at, fight.respawn_pos)
+            (fight.respawn_at, fight.respawn_pos, fight.killed)
         };
-        let (Some(at), Some(spawn)) = (at, spawn) else {
-            return;
-        };
-        if now % 10 == 0 {
-            if let Some(&particle) = self.particle_types.lock().unwrap().get("minecraft:end_rod") {
-                self.hub.send(
+        if let (Some(at), Some(spawn)) = (at, spawn) {
+            if now % 10 == 0 {
+                if let Some(&particle) =
+                    self.particle_types.lock().unwrap().get("minecraft:end_rod")
+                {
+                    self.hub.send(
+                        None,
+                        play::level_particles(
+                            self.ids.level_particles,
+                            particle,
+                            false,
+                            spawn,
+                            [0.5; 3],
+                            0.1,
+                            8,
+                        ),
+                    );
+                }
+                self.play_sound(
                     None,
-                    play::level_particles(
-                        self.ids.level_particles,
-                        particle,
-                        false,
-                        spawn,
-                        [0.5; 3],
-                        0.1,
-                        8,
-                    ),
+                    "minecraft:entity.ender_dragon.growl",
+                    crate::sounds::HOSTILE,
+                    spawn,
+                    1.0,
+                    0.8,
                 );
             }
-            self.play_sound(
-                None,
-                "minecraft:entity.ender_dragon.growl",
-                crate::sounds::HOSTILE,
-                spawn,
-                1.0,
-                0.8,
-            );
-        }
-        if now < at {
-            return;
-        }
-        {
-            let mut fight = self.dragon_fight.lock().unwrap();
-            fight.respawn_at = None;
-            fight.respawn_pos = None;
-        }
-        if let Some(id) = self.spawn_mob(
-            crate::mobs::Species::EnderDragon,
-            spawn,
-            0.0,
-            false,
-            Some("TRIGGERED"),
-        ) {
-            // `EnderDragonFight.updateDragon`: дракон с боем сразу в holding.
-            if let Some(e) = self.sim().mobs.lock().unwrap().get_mut(&id) {
-                e.mob.dragon_phase = crate::mobs::DRAGON_HOLDING;
+            if now >= at {
+                {
+                    let mut fight = self.dragon_fight.lock().unwrap();
+                    fight.respawn_at = None;
+                    fight.respawn_pos = None;
+                    fight.started = true;
+                }
+                self.save_dragon_fight();
+                self.spawn_fight_dragon(spawn);
             }
-            self.trigger_summoned_entity(spawn, crate::mobs::Species::EnderDragon, 192.0);
+        }
+        // `findOrCreateDragon`: в Крае без дракона бой поднимается снова
+        // (например, дракон не сохранился при перезапуске).
+        if !killed && at.is_none() {
+            let occupied = self
+                .sim()
+                .mobs
+                .lock()
+                .unwrap()
+                .values()
+                .any(|e| e.mob.alive() && e.mob.species == crate::mobs::Species::EnderDragon);
+            if !occupied {
+                self.start_natural_end_fight();
+            }
         }
     }
 
@@ -29392,12 +29517,23 @@ mod tests {
         DynamicFactoryFn, DynamicGen, FastMap, GameModeChange, LOAD_GATED_PACKETS,
         acknowledge_player_save, add_banner_pattern, apply_inventory_open_reply,
         block_entity_data_nbt, chunks_around, container_entity, create_dynamic_world, derived_seed,
-        dominant_axis, dynamic_world_args, game_mode_change, in_view, lectern_page_request,
-        update_container_viewers, within_pick_range,
+        dominant_axis, dragon_fight_nbt, dynamic_world_args, game_mode_change, in_view,
+        lectern_page_request, parse_dragon_fight, update_container_viewers, within_pick_range,
     };
     use crate::survival::PlayerState;
     use chunkwake_world::nbt::{Compound, Tag};
     use uuid::Uuid;
+
+    /// `EnderDragonFight` в `level.dat`: `started`/`killed`/`hasPreviouslyKilled`.
+    #[test]
+    fn dragon_fight_state_roundtrips() {
+        let c = dragon_fight_nbt(true, false, true);
+        assert_eq!(parse_dragon_fight(&c), (true, false, true));
+        let c = dragon_fight_nbt(false, true, false);
+        assert_eq!(parse_dragon_fight(&c), (false, true, false));
+        // Пустой compound — бой ещё не начинался.
+        assert_eq!(parse_dragon_fight(&Compound::new()), (false, false, false));
+    }
 
     /// `hasClientLoaded`: таймер после входа/респауна, экран смерти и
     /// снятие ожидания по `player_loaded`.
