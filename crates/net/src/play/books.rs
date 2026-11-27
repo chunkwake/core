@@ -337,6 +337,12 @@ impl PlayPlan {
         let mut new_extra = (*extra).clone();
         // Сырой патч держал прежнюю книгу: новая пишется разобранной.
         new_extra.raw = None;
+        // Если книга не разобрана (неизвестный компонент стоял раньше неё),
+        // старый `written_book_content` лежит в хвосте — иначе получилась бы
+        // вторая книга. В этом редком случае хвост отбрасываем.
+        if new_extra.book.is_none() {
+            new_extra.raw_tail = None;
+        }
         let book = match e.title {
             // `signBook`: `transmuteCopy(WRITTEN_BOOK)` с подписью игрока.
             Some(title) => Book {

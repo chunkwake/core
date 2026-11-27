@@ -364,8 +364,11 @@ fn write_patch(w: &mut Writer, s: &Stack) {
         e.entity_data.is_some() && id_of(&crate::components::ENTITY_DATA_COMPONENT) >= 0,
     ];
 
-    w.var_int(parts.iter().filter(|&&p| p).count() as i32)
-        .var_int(0);
+    w.var_int(
+        parts.iter().filter(|&&p| p).count() as i32
+            + e.raw_tail.as_ref().map_or(0, |tail| tail.added),
+    )
+    .var_int(0);
     if parts[0] {
         w.var_int(damage).var_int(s.damage);
     }
@@ -530,6 +533,9 @@ fn write_patch(w: &mut Writer, s: &Stack) {
             .var_int(data.kind);
         w.buf.extend_from_slice(&data.tag);
     }
+    if let Some(tail) = &e.raw_tail {
+        w.buf.extend_from_slice(&tail.bytes);
+    }
 }
 
 /// Номер компонента книги в реестре; -1 — нет книги или реестр не задан.
@@ -637,7 +643,8 @@ fn read_stack_tail(r: &mut Reader, item: i32, count: i32, depth: u8) -> Result<S
         return Err(crate::ProtocolError::BadLength(added));
     }
     let mut known = true;
-    for _ in 0..added {
+    for i in 0..added {
+        let start = patch.len() - r.remaining().len();
         let t = r.var_int()?;
         if t == id_of(&DAMAGE_COMPONENT) {
             s.damage = r.var_int()?.max(0);
@@ -716,6 +723,16 @@ fn read_stack_tail(r: &mut Reader, item: i32, count: i32, depth: u8) -> Result<S
         } else if t == id_of(&crate::components::UNBREAKABLE_COMPONENT) {
             e.unbreakable = true;
         } else {
+            // Неизвестный компонент: сохраняем хвост, чтобы известные поля
+            // (книгу) можно было переписать, не теряя его. Удалённые
+            // компоненты лежат после добавленных, поэтому хвост берём только
+            // при `removed == 0`.
+            if removed == 0 {
+                e.raw_tail = Some(crate::components::RawTail {
+                    bytes: patch[start..].to_vec(),
+                    added: added - i,
+                });
+            }
             known = false;
             break;
         }
@@ -724,7 +741,7 @@ fn read_stack_tail(r: &mut Reader, item: i32, count: i32, depth: u8) -> Result<S
         for _ in 0..removed {
             r.var_int()?;
         }
-    } else if !patch.is_empty() {
+    } else if e.raw_tail.is_none() && !patch.is_empty() {
         e.raw = Some(patch);
     }
     s.extra = intern(e);
@@ -1622,6 +1639,54 @@ mod tests {
         let mut w = Writer::new();
         write_stack(&mut w, Some(stack));
         assert_eq!(read_stack(&mut Reader::new(&w.buf)).unwrap(), Some(stack));
+    }
+
+    #[test]
+    fn book_edit_keeps_unknown_component_tail() {
+        use std::sync::atomic::Ordering;
+        crate::components::WRITTEN_BOOK_CONTENT_COMPONENT.store(127, Ordering::Relaxed);
+        let book = crate::components::Book {
+            written: true,
+            pages: vec![(serde_json::json!("old").to_string(), None)],
+            title: (serde_json::json!("T").to_string(), None),
+            author: "A".into(),
+            generation: 0,
+            resolved: true,
+        };
+        // Патч: книга, затем неизвестный компонент 200 с полезной нагрузкой 42.
+        let mut patch = Writer::new();
+        patch.var_int(2).var_int(0).var_int(127);
+        super::write_book(&mut patch, &book);
+        patch.var_int(250).var_int(42);
+        let stack = super::read_stack_tail(&mut Reader::new(&patch.buf), 1, 1, 0)
+            .unwrap()
+            .unwrap();
+        let extra = crate::components::get(stack.extra);
+        assert!(extra.raw.is_none());
+        assert!(extra.raw_tail.is_some(), "хвост не сохранился");
+        assert!(extra.book.is_some());
+        // Правим страницу: известное поле переписывается, хвост остаётся.
+        let mut edited = (*extra).clone();
+        if let Some(book) = edited.book.as_mut() {
+            book.pages[0].0 = serde_json::json!("new").to_string();
+        }
+        let edited = Stack {
+            extra: crate::components::intern(edited),
+            ..stack
+        };
+        let mut w = Writer::new();
+        write_patch(&mut w, &edited);
+        assert!(
+            w.buf.ends_with(&[0xfa, 0x01, 0x2a]),
+            "неизвестный компонент потерян"
+        );
+        let round = super::read_stack_tail(&mut Reader::new(&w.buf), 1, 1, 0)
+            .unwrap()
+            .unwrap();
+        let extra = crate::components::get(round.extra);
+        let page = &extra.book.as_ref().unwrap().pages[0].0;
+        assert!(page.contains("new"), "{page}");
+        assert!(extra.raw_tail.is_some());
     }
 
     #[test]

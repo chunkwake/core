@@ -1667,6 +1667,7 @@ mod tests {
             book: None,
             lore: vec![r#""строка""#.into()],
             raw: None,
+            raw_tail: None,
             rest: None,
             map_id: Some(12),
             map_post_processing: None,

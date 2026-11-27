@@ -3239,6 +3239,7 @@ fn charged_extra(extra: u32, charged: Vec<Stack>) -> u32 {
     let mut e = (*chunkwake_protocol::components::get(extra)).clone();
     e.charged = charged;
     e.raw = None;
+    e.raw_tail = None;
     chunkwake_protocol::components::intern(e)
 }
 

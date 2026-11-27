@@ -8,6 +8,14 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
+/// Неразобранный хвост `DataComponentPatch`: байты от id первого неизвестного
+/// компонента до конца добавленных и их количество.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RawTail {
+    pub bytes: Vec<u8>,
+    pub added: i32,
+}
+
 /// Компоненты одной стопки. Имя и строки описания — текст в JSON (Adventure).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Extra {
@@ -32,6 +40,11 @@ pub struct Extra {
     /// Сырой патч компонентов с провода, если в нём было что-то кроме известных
     /// (зелья и прочее). Пишется как есть, чтобы клиент не терял состав.
     pub raw: Option<Vec<u8>>,
+    /// Неразобранный хвост патча: байты от первого неизвестного компонента
+    /// (включая его id) до конца списка добавленных и число компонентов.
+    /// Позволяет переписать известные поля (например, книгу), не теряя
+    /// неизвестные компоненты после них.
+    pub raw_tail: Option<RawTail>,
     /// `custom_data`: сетевой NBT (безымянный корневой compound), в т. ч.
     /// `PublicBukkitValues` плагинов (`PersistentDataContainer`).
     pub custom_data: Option<Vec<u8>>,
@@ -167,6 +180,7 @@ impl Extra {
             && self.book.is_none()
             && self.lore.is_empty()
             && self.raw.is_none()
+            && self.raw_tail.is_none()
             && self.custom_data.is_none()
             && self.charged.is_empty()
             && self.container.is_empty()
