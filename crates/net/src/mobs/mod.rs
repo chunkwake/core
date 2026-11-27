@@ -1713,6 +1713,8 @@ pub struct Prey {
     pub uuid: u128,
     /// Ноги.
     pub pos: [f64; 3],
+    /// `Player.isSwimming`: плывёт (для Dolphin's Grace).
+    pub swimming: bool,
 }
 
 impl Prey {
@@ -2667,6 +2669,13 @@ pub fn tick(m: &mut Mob, w: &World, s: &mut Senses) -> bool {
     if m.species == Species::Pufferfish {
         pufferfish_tick(m, s);
     }
+    if m.species == Species::Dolphin && m.alive() {
+        for p in s.players {
+            if p.swimming && dist2(p.pos, m.pos) <= 16.0 * 16.0 {
+                m.out.push(goals::Out::DolphinGrace { target: p.uuid });
+            }
+        }
+    }
     // Прыжок: в воде — всплытие (`jumpInLiquid`, +0.04), с земли — не чаще
     // раза в 10 тиков подряд.
     let water = in_water(m, w);
@@ -3372,6 +3381,7 @@ mod tests {
         let players = [Prey {
             uuid: 7,
             pos: [0.5, 70.0, 5.5],
+            swimming: false,
         }];
         let mut rnd = || 0.5;
         let sight = |_: [f64; 3], _: [f64; 3]| true;
@@ -3565,10 +3575,12 @@ mod tests {
             Prey {
                 uuid: 7,
                 pos: [8.5, 64.0, 8.5],
+                swimming: false,
             },
             Prey {
                 uuid: 8,
                 pos: [9.5, 64.0, 8.5],
+                swimming: false,
             },
         ];
         let sight = |_: [f64; 3], _: [f64; 3]| true;
@@ -4057,7 +4069,11 @@ mod tests {
         };
         let mut m = Mob::new(Species::Zombie, [0.5, 64.0, 0.5], 1);
         m.on_ground = true;
-        let prey = [Prey { uuid: 7, pos: at }];
+        let prey = [Prey {
+            uuid: 7,
+            pos: at,
+            swimming: false,
+        }];
         let players = prey;
         // 0.05: выбор цели (< 0.1) проходит, прогулка (< 1/120) — нет.
         let mut rnd = || 0.05;
@@ -4119,7 +4135,11 @@ mod tests {
         let mut m = Mob::new(Species::Zombie, [0.5, 64.0, 0.5], 1);
         m.on_ground = true;
         let at = [6.5, 64.0, 0.5];
-        let prey = [Prey { uuid: 7, pos: at }];
+        let prey = [Prey {
+            uuid: 7,
+            pos: at,
+            swimming: false,
+        }];
         let players = prey;
         let mut rnd = || 0.05;
         let mut s = Senses {
@@ -4216,7 +4236,11 @@ mod tests {
         // прижать его к полу, и первый шаг идёт уже с земли.
         settle(&mut m, &w);
         let at = [0.5, 64.0, 0.5];
-        let prey = [Prey { uuid: 7, pos: at }];
+        let prey = [Prey {
+            uuid: 7,
+            pos: at,
+            swimming: false,
+        }];
         let players = prey;
         let mut rnd = || 0.05;
         let mut s = Senses {
@@ -4344,6 +4368,7 @@ mod tests {
         let prey = [Prey {
             uuid: 7,
             pos: [20.5, 64.0, 0.5],
+            swimming: false,
         }];
         let visible = std::cell::Cell::new(true);
         let sight = |_: [f64; 3], _: [f64; 3]| visible.get();
@@ -4391,6 +4416,7 @@ mod tests {
         let player = Prey {
             uuid: 7,
             pos: [10.5, 64.0, 0.5],
+            swimming: false,
         };
         for (prey, want) in [(vec![player], Some(7)), (vec![], None)] {
             let mut m = Mob::new(Species::Zombie, [0.5, 64.0, 0.5], 1);
@@ -4752,6 +4778,7 @@ mod tests {
         let prey = [Prey {
             uuid: 7,
             pos: [0.5, 64.5, 0.5],
+            swimming: false,
         }];
         let mut rnd = || 0.5;
         let mut s = Senses {
@@ -4789,6 +4816,69 @@ mod tests {
                 poison: 120
             } if *damage == 3.0
         )));
+    }
+
+    /// Дельфин даёт `Dolphin's Grace` только плывущему игроку в 16 блоках.
+    #[test]
+    fn dolphin_grace_only_for_swimming_player() {
+        let (shape, water) = flat_world(&floor);
+        let w = World {
+            shape: &*shape,
+            water: &*water,
+            cell: None,
+            info: None,
+            min_y: -64,
+        };
+        let mut m = Mob::new(Species::Dolphin, [0.5, 64.0, 0.5], 1);
+        let swimmer = [Prey {
+            uuid: 7,
+            pos: [2.5, 64.0, 0.5],
+            swimming: true,
+        }];
+        let walker = [Prey {
+            uuid: 8,
+            pos: [2.5, 64.0, 0.5],
+            swimming: false,
+        }];
+        let mut rnd = || 0.5;
+        let mut s = Senses {
+            players: &swimmer,
+            rand: &mut rnd,
+            prey: &[],
+            tempters: &[],
+            kin: &[],
+            sight: &always_visible,
+            difficulty: 2,
+            entity_id: 1,
+            bright_outside: true,
+            mob_griefing: false,
+            jump_boost: None,
+        };
+        tick(&mut m, &w, &mut s);
+        assert!(
+            m.out
+                .iter()
+                .any(|o| matches!(o, goals::Out::DolphinGrace { target: 7 }))
+        );
+        let mut s = Senses {
+            players: &walker,
+            rand: &mut rnd,
+            prey: &[],
+            tempters: &[],
+            kin: &[],
+            sight: &always_visible,
+            difficulty: 2,
+            entity_id: 1,
+            bright_outside: true,
+            mob_griefing: false,
+            jump_boost: None,
+        };
+        tick(&mut m, &w, &mut s);
+        assert!(
+            !m.out
+                .iter()
+                .any(|o| matches!(o, goals::Out::DolphinGrace { .. }))
+        );
     }
 
     /// `PotentialCalculator` и локальный лимит на игрока.
@@ -4896,7 +4986,11 @@ mod tests {
         };
         let mut m = Mob::new(species, from, 1);
         m.on_ground = true;
-        let prey = [Prey { uuid: 7, pos: at }];
+        let prey = [Prey {
+            uuid: 7,
+            pos: at,
+            swimming: false,
+        }];
         let mut s = Senses {
             players: &prey,
             rand: rnd,
@@ -5104,6 +5198,7 @@ mod tests {
         let prey = [Prey {
             uuid: 7,
             pos: [3.5, 64.0, 0.5],
+            swimming: false,
         }];
         let mut rnd = || 0.0;
         let mut s = Senses {
@@ -5251,6 +5346,7 @@ mod tests {
         let prey = [Prey {
             uuid: 7,
             pos: [3.5, 66.0, 0.5],
+            swimming: false,
         }];
         let mut rnd = || 0.5;
         let mut s = Senses {

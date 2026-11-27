@@ -601,6 +601,14 @@ impl PlayPlan {
         // на тик, а не на каждого моба: раньше здесь на моба строился `Vec`
         // с `is_food` по строкам предметов.
         let dim = self.active_dim();
+        let swimming = |p: [f64; 3]| {
+            self.block([
+                p[0].floor() as i32,
+                (p[1] + 0.1).floor() as i32,
+                p[2].floor() as i32,
+            ])
+            .is_some_and(|s| self.water_at(Some(s)))
+        };
         // Кого монстры могут атаковать: игроки этого мира не в творческом.
         let mut prey: Vec<mb::Prey> = Vec::new();
         let hands: Vec<Hands> = {
@@ -615,6 +623,7 @@ impl PlayPlan {
                         prey.push(mb::Prey {
                             uuid: p.entry.uuid.as_u128(),
                             pos: p.pos,
+                            swimming: swimming(p.pos),
                         });
                     }
                     let held = l.map_or([None, None], |l| {
@@ -647,6 +656,7 @@ impl PlayPlan {
             .map(|h| mb::Prey {
                 uuid: h.2,
                 pos: h.0,
+                swimming: swimming(h.0),
             })
             .collect();
         let peaceful = self.difficulty() == Difficulty::Peaceful;
@@ -4517,6 +4527,20 @@ impl PlayPlan {
                             pos,
                             1.0,
                             1.0,
+                        );
+                    }
+                }
+                // `DolphinSwimWithPlayerGoal.start/tick`: 100 тиков
+                // `minecraft:dolphins_grace` плывущему игроку рядом.
+                Out::DolphinGrace { target } => {
+                    if let Some(&effect) = self.survival.effects.get("minecraft:dolphins_grace") {
+                        self.push_control(
+                            Uuid::from_u128(target),
+                            Control::Effect {
+                                effect: crate::survival::Effect::plain(effect, 0, 100),
+                                force: false,
+                                command: false,
+                            },
                         );
                     }
                 }

@@ -68,6 +68,8 @@ pub enum Out {
     },
     /// `Pufferfish.tick`: звук раздувания (`true`) или сдувания.
     PufferSound { blow_up: bool },
+    /// `DolphinSwimWithPlayerGoal`: игроку рядом с дельфином — Dolphin's Grace.
+    DolphinGrace { target: u128 },
 }
 
 /// Сородич рядом: для `BreedGoal` и `FollowParentGoal`.
