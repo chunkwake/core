@@ -454,6 +454,8 @@ pub struct PlayPlan {
     pub(crate) allow_flight: AtomicBool,
     /// Каталог сервера для `/reload` (`ops.json`).
     pub(crate) reload_dir: Option<std::path::PathBuf>,
+    /// Каталог мира: `data/command_storage_<namespace>.dat`.
+    pub(crate) world_dir: Option<std::path::PathBuf>,
     /// Таблица счёта `scoreboard`.
     pub(crate) scoreboard: Mutex<crate::play::commands::scoreboard::Scoreboard>,
     /// Команды `/team`.
@@ -3867,6 +3869,7 @@ impl PlayPlan {
             whitelist_enabled: AtomicBool::new(false),
             allow_flight: AtomicBool::new(false),
             reload_dir: None,
+            world_dir: None,
             scoreboard: Mutex::new(crate::play::commands::scoreboard::Scoreboard::default()),
             teams: Mutex::new(crate::play::commands::team::Board::default()),
             entity_extra: Mutex::new(HashMap::new()),
