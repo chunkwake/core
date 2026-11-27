@@ -1720,7 +1720,8 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
         | Species::Salmon
         | Species::GlowSquid
         | Species::Squid
-        | Species::TropicalFish => {
+        | Species::TropicalFish
+        | Species::Pufferfish => {
             return (
                 Selector::new(vec![(
                     4,
