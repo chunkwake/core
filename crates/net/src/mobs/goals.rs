@@ -1703,15 +1703,20 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
                 Selector::new(vec![nearest(1, false)]),
             );
         }
-        // Аксолотль: вода/суша (`AmphibiousPathNavigation`) и случайное
-        // плавание.
+        // Аксолотль: вода/суша (`AmphibiousPathNavigation`), охота на
+        // `#minecraft:axolotl_hunt_targets` (`MeleeAttack(20)`, урон 2) и
+        // случайное плавание.
         Species::Axolotl => {
+            let mut attack = Melee::new(0.6, false);
+            attack.follow = true;
             return (
                 Selector::new(vec![
+                    (1, Goal::Float),
+                    (2, Goal::Melee(Box::new(attack))),
                     (
                         4,
                         Goal::Stroll {
-                            speed: 1.0,
+                            speed: 0.5,
                             interval: 40,
                             avoid_water: false,
                             swim: true,

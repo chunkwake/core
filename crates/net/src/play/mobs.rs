@@ -70,6 +70,8 @@ struct MobMeta {
     tropical: i32,
     /// `EnderDragon.DATA_PHASE` (индекс 16).
     dragon_phase: u8,
+    /// `Axolotl.DATA_PLAYING_DEAD` (индекс 19).
+    axolotl_dead: bool,
 }
 
 impl Default for MobMeta {
@@ -87,6 +89,7 @@ impl Default for MobMeta {
             puff: 0,
             tropical: 0,
             dragon_phase: crate::mobs::DRAGON_HOVERING,
+            axolotl_dead: false,
         }
     }
 }
@@ -105,6 +108,7 @@ impl MobMeta {
             puff: i32::from(m.puff_state),
             tropical: m.tropical_variant,
             dragon_phase: m.dragon_phase,
+            axolotl_dead: m.axolotl_play_dead > 0,
         }
     }
 
@@ -159,6 +163,11 @@ impl MobMeta {
             // `EnderDragon.DATA_PHASE`: 16 после полей `Mob`.
             Species::EnderDragon if old.is_none_or(|m| m.dragon_phase != self.dragon_phase) => {
                 out.push((16, Meta::Int(i32::from(self.dragon_phase))));
+            }
+            // `Axolotl.DATA_PLAYING_DEAD`: 19 после `AgeableMob` (16–17) и
+            // `DATA_VARIANT` (18).
+            Species::Axolotl if old.is_none_or(|m| m.axolotl_dead != self.axolotl_dead) => {
+                out.push((19, Meta::Bool(self.axolotl_dead)));
             }
             _ => {}
         }
@@ -791,6 +800,16 @@ impl PlayPlan {
                 .values()
                 .filter(|e| e.mob.species == Species::EndCrystal && e.mob.alive())
                 .count() as i32;
+            // `#minecraft:axolotl_hunt_targets`: кого ищет аксолотль.
+            let hunt: Vec<mb::Prey> = mobs
+                .values()
+                .filter(|e| e.mob.alive() && mb::axolotl_hunt_target(e.mob.species))
+                .map(|e| mb::Prey {
+                    uuid: e.mob.uuid,
+                    pos: e.mob.pos,
+                    swimming: true,
+                })
+                .collect();
             for e in mobs.values_mut() {
                 if e.mob.species == Species::EnderDragon {
                     e.mob.dragon_crystals = alive_crystals;
@@ -943,10 +962,43 @@ impl PlayPlan {
                             if species == Species::Dolphin {
                                 self.dolphin_item_tick(&mut e.mob);
                             }
+                            if species == Species::Axolotl {
+                                if e.mob.axolotl_play_dead > 0 {
+                                    e.mob.target = None;
+                                } else if e
+                                    .mob
+                                    .target
+                                    .is_none_or(|t| !hunt.iter().any(|p| p.uuid == t))
+                                {
+                                    e.mob.target = hunt
+                                        .iter()
+                                        .filter(|p| mb::dist2(p.pos, e.mob.pos) <= 16.0 * 16.0)
+                                        .min_by(|a, b| {
+                                            mb::dist2(a.pos, e.mob.pos)
+                                                .total_cmp(&mb::dist2(b.pos, e.mob.pos))
+                                        })
+                                        .map(|p| p.uuid);
+                                }
+                                // `PlayDead.start`: Регенерация I на 200 тиков.
+                                if e.mob.axolotl_play_dead > 0
+                                    && let Some(&regen) =
+                                        self.survival.effects.get("minecraft:regeneration")
+                                    && !e.mob.effects.iter().any(|x| x.id == regen)
+                                {
+                                    e.mob
+                                        .add_effect(crate::survival::Effect::plain(regen, 0, 200));
+                                }
+                            }
                             let mut senses = mb::Senses {
                                 players: &watchers,
                                 rand: &mut rand,
-                                prey: if monster { &prey[..] } else { &[] },
+                                prey: if species == Species::Axolotl {
+                                    &hunt[..]
+                                } else if monster {
+                                    &prey[..]
+                                } else {
+                                    &[]
+                                },
                                 // Уже отфильтрованные по виду: строки предметов не сравниваются.
                                 tempters: &food_by_species[species as usize][..],
                                 kin: if monster { &[] } else { &kin[..] },
@@ -6778,6 +6830,21 @@ mod tests {
         assert_eq!(statue_facing(180.0), "north");
         assert_eq!(statue_facing(-90.0), "east");
         assert_eq!(statue_facing(359.0), "south");
+    }
+
+    #[test]
+    fn axolotl_playing_dead_is_synced() {
+        let mut m = crate::mobs::Mob::new(crate::mobs::Species::Axolotl, [0.5, 64.0, 0.5], 1);
+        assert!(
+            MobMeta::of(&m)
+                .fields(m.species, Some(MobMeta::default()))
+                .is_empty()
+        );
+        m.axolotl_play_dead = 200;
+        assert_eq!(
+            MobMeta::of(&m).fields(m.species, Some(MobMeta::default())),
+            vec![(19, play::Meta::Bool(true))]
+        );
     }
 
     #[test]

@@ -1290,6 +1290,12 @@ pub struct Mob {
     pub dragon_cooldown: u8,
     /// `Bee`: оставшиеся тики злости (`AngerTime`).
     pub anger_time: u32,
+    /// `Axolotl`: оставшиеся тики притворной смерти (`PLAY_DEAD_TICKS`).
+    pub axolotl_play_dead: u16,
+    /// `Axolotl`: запас воздуха до высыхания (`getAirSupply`, максимум 6000).
+    pub axolotl_air: i32,
+    /// `Entity.isInWater` на прошлом тике (нужен урону аксолотля).
+    pub in_water: bool,
     /// `Bee`: есть нектар, счётчик выращенных культур и цель-цветок.
     pub has_nectar: bool,
     pub crops_grown: u8,
@@ -1419,6 +1425,9 @@ impl Mob {
             statue: false,
             dragon_cooldown: 0,
             anger_time: 0,
+            axolotl_play_dead: 0,
+            axolotl_air: 6000,
+            in_water: false,
             has_nectar: false,
             crops_grown: 0,
             flower_target: None,
@@ -2795,6 +2804,41 @@ pub fn copper_golem_weathering(m: &mut Mob) {
     }
 }
 
+/// `Axolotl.handleAirSupply` + `ValidatePlayDead`: высыхание вне воды и
+/// тик памяти `PLAY_DEAD_TICKS`.
+fn axolotl_tick(m: &mut Mob, w: &World) {
+    if !m.alive() {
+        return;
+    }
+    m.in_water = in_water(m, w);
+    if m.in_water {
+        m.axolotl_air = 6000;
+    } else {
+        m.axolotl_air -= 1;
+        // `shouldTakeDrowningDamage`: ниже -20 — сброс в 0 и 2 урона
+        // `minecraft:dry_out` (повторяется раз в 20 тиков).
+        if m.axolotl_air <= -20 {
+            m.axolotl_air = 0;
+            let _ = hurt(m, 2.0, Source::default(), 0.0);
+        }
+    }
+    m.axolotl_play_dead = m.axolotl_play_dead.saturating_sub(1);
+}
+
+/// Цели охоты аксолотля (`#minecraft:axolotl_hunt_targets`).
+pub fn axolotl_hunt_target(species: Species) -> bool {
+    matches!(
+        species,
+        Species::Drowned
+            | Species::Cod
+            | Species::Salmon
+            | Species::TropicalFish
+            | Species::Pufferfish
+            | Species::Squid
+            | Species::GlowSquid
+    )
+}
+
 pub fn tick(m: &mut Mob, w: &World, s: &mut Senses) -> bool {
     if m.death_time > 0 {
         m.death_time += 1;
@@ -2846,7 +2890,17 @@ pub fn tick(m: &mut Mob, w: &World, s: &mut Senses) -> bool {
     // `applyInput`: ход затухает до ИИ (`WAIT` гасит только `zza`).
     m.xxa = f64::from(m.xxa as f32 * 0.98);
     m.zza = f64::from(m.zza as f32 * 0.98);
-    server_ai_step(m, w, s);
+    if m.species == Species::Axolotl {
+        axolotl_tick(m, w);
+    }
+    if m.species == Species::Axolotl && m.axolotl_play_dead > 0 {
+        // `PlayDead`: не двигается, пока идёт память `PLAY_DEAD_TICKS`.
+        m.zza = 0.0;
+        m.xxa = 0.0;
+        m.vel = [0.0; 3];
+    } else {
+        server_ai_step(m, w, s);
+    }
     if m.species == Species::Pufferfish {
         pufferfish_tick(m, s);
     }
@@ -2979,6 +3033,12 @@ pub fn knockback(m: &mut Mob, power: f64, xd: f64, zd: f64) {
     }
 }
 
+/// `Axolotl.hurtServer`: `nextInt(3) == 0`, `nextInt(3) < damage`,
+/// урон не смертельный.
+pub fn axolotl_plays_dead(first: u8, second: u8, amount: f32, health: f32) -> bool {
+    first.is_multiple_of(3) && f32::from(second % 3) < amount && amount < health
+}
+
 pub fn hurt(m: &mut Mob, amount: f32, src: Source, knockback_power: f64) -> Option<bool> {
     if !m.alive() {
         return None;
@@ -2986,6 +3046,17 @@ pub fn hurt(m: &mut Mob, amount: f32, src: Source, knockback_power: f64) -> Opti
     // `EnderDragon.hurt`: в фазе `DYING` урон не проходит.
     if m.species == Species::EnderDragon && m.dragon_phase == DRAGON_DYING {
         return None;
+    }
+    // `Axolotl.hurtServer`: в воде после не смертельного удара притворяется
+    // мёртвым на 200 тиков (`PLAY_DEAD_TICKS`).
+    if m.species == Species::Axolotl
+        && !m.no_ai
+        && m.in_water
+        && m.axolotl_play_dead == 0
+        && (src.from.is_some() || src.attacker.is_some())
+        && axolotl_plays_dead(rand::random(), rand::random(), amount, m.health)
+    {
+        m.axolotl_play_dead = 200;
     }
     // `WitherBoss.hurtServer`: во второй половине здоровья (`isPowered`)
     // стрелы и ветряные заряды не ранят.
@@ -5085,6 +5156,85 @@ mod tests {
         assert_eq!(Species::Axolotl.info().loot, "minecraft:entities/axolotl");
         let m = Mob::new(Species::Axolotl, [0.5, 64.0, 0.5], 1);
         assert!(matches!(m.nav.kind, path::NavKind::Amphibious));
+    }
+
+    #[test]
+    fn axolotl_play_dead_roll_matches_vanilla() {
+        // 1/3 (nextInt(3) == 0), урон больше nextInt(3), удар не смертельный.
+        assert!(axolotl_plays_dead(0, 0, 1.0, 10.0));
+        assert!(axolotl_plays_dead(3, 1, 2.0, 10.0));
+        assert!(!axolotl_plays_dead(1, 0, 1.0, 10.0));
+        assert!(!axolotl_plays_dead(0, 2, 2.0, 10.0));
+        assert!(!axolotl_plays_dead(0, 0, 10.0, 10.0));
+    }
+
+    #[test]
+    fn axolotl_dries_out_after_air_runs_out() {
+        let (shape, water) = flat_world(&floor);
+        let w = World {
+            shape: &*shape,
+            water: &*water,
+            cell: None,
+            info: None,
+            min_y: -64,
+        };
+        let mut m = Mob::new(Species::Axolotl, [0.5, 64.0, 0.5], 1);
+        m.axolotl_air = -19;
+        let before = m.health;
+        let mut rnd = || 0.5;
+        let sight = |_: [f64; 3], _: [f64; 3]| true;
+        let mut s = Senses {
+            players: &[],
+            rand: &mut rnd,
+            prey: &[],
+            tempters: &[],
+            kin: &[],
+            sight: &sight,
+            difficulty: 2,
+            entity_id: 1,
+            bright_outside: true,
+            mob_griefing: true,
+            jump_boost: None,
+        };
+        tick(&mut m, &w, &mut s);
+        assert_eq!(m.axolotl_air, 0);
+        assert_eq!(m.health, before - 2.0);
+    }
+
+    #[test]
+    fn axolotl_stays_still_while_playing_dead() {
+        let (shape, water) = flat_world(&floor);
+        let w = World {
+            shape: &*shape,
+            water: &*water,
+            cell: None,
+            info: None,
+            min_y: -64,
+        };
+        let mut m = Mob::new(Species::Axolotl, [0.5, 64.0, 0.5], 1);
+        m.axolotl_play_dead = 2;
+        let mut rnd = || 0.5;
+        let sight = |_: [f64; 3], _: [f64; 3]| true;
+        let mut s = Senses {
+            players: &[],
+            rand: &mut rnd,
+            prey: &[],
+            tempters: &[],
+            kin: &[],
+            sight: &sight,
+            difficulty: 2,
+            entity_id: 1,
+            bright_outside: true,
+            mob_griefing: true,
+            jump_boost: None,
+        };
+        let pos = m.pos;
+        tick(&mut m, &w, &mut s);
+        assert_eq!(m.axolotl_play_dead, 1);
+        assert_eq!(m.pos[0], pos[0]);
+        assert_eq!(m.pos[2], pos[2]);
+        tick(&mut m, &w, &mut s);
+        assert_eq!(m.axolotl_play_dead, 0);
     }
 
     /// Иглобрюх раздувается у игрока и на контакте выдаёт `1 + puff` урона
