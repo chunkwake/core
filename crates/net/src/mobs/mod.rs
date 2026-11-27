@@ -1292,6 +1292,12 @@ pub struct Mob {
     pub has_nectar: bool,
     pub crops_grown: u8,
     pub flower_target: Option<[i32; 3]>,
+    /// `Bee`: улей, куда возвращаться, и точка входа в текущем тике.
+    pub hive_pos: Option<[i32; 3]>,
+    pub enter_hive: Option<[i32; 3]>,
+    /// `Bee`: жало потеряно; смерть через `time_since_sting`.
+    pub has_stung: bool,
+    pub time_since_sting: u32,
     /// `Pufferfish`: стадия раздувания 0..2 и счётчики `inflate/deflate`.
     pub puff_state: u8,
     pub inflate: u32,
@@ -1403,6 +1409,10 @@ impl Mob {
             has_nectar: false,
             crops_grown: 0,
             flower_target: None,
+            hive_pos: None,
+            enter_hive: None,
+            has_stung: false,
+            time_since_sting: 0,
             puff_state: 0,
             inflate: 0,
             deflate: 0,
@@ -2422,6 +2432,15 @@ fn bee_ai_step(m: &mut Mob, s: &mut Senses) {
     if m.anger_time > 0 {
         m.anger_time -= 1;
     }
+    if m.has_stung {
+        m.time_since_sting = m.time_since_sting.saturating_add(1);
+        if m.time_since_sting % 5 == 0 {
+            let bound = (1200i32 - m.time_since_sting as i32).clamp(1, 1200);
+            if ((s.rand)() * f64::from(bound)) as i32 == 0 {
+                hurt(m, m.health, Source::default(), 0.0);
+            }
+        }
+    }
     // `BeeHurtByOtherGoal`: удар делает игрока целью и злит.
     if m.target.is_none()
         && let Some((who, at)) = m.last_hurt_by
@@ -2440,6 +2459,21 @@ fn bee_ai_step(m: &mut Mob, s: &mut Senses) {
     }
     if m.anger_time == 0 && m.target.is_some() {
         m.target = None;
+    }
+    if m.anger_time == 0
+        && m.target.is_none()
+        && let Some(h) = m.hive_pos
+        && (m.has_nectar || !s.bright_outside)
+    {
+        let at = [h[0] as f64 + 0.5, h[1] as f64 + 0.5, h[2] as f64 + 0.5];
+        if dist2(at, m.pos) < 4.0 {
+            m.enter_hive = Some(h);
+            m.yya = 0.0;
+            m.zza = 0.0;
+        } else {
+            m.move_ctl.set_wanted(at, 1.0);
+        }
+        return;
     }
     if m.anger_time == 0 && m.target.is_none() && !m.has_nectar {
         if let Some(f) = m.flower_target {
@@ -2478,6 +2512,8 @@ fn bee_ai_step(m: &mut Mob, s: &mut Senses) {
             m.strike = Some(p.uuid);
             m.anger_time = 0;
             m.target = None;
+            m.has_stung = true;
+            m.time_since_sting = 0;
         }
         return;
     }
@@ -4894,6 +4930,70 @@ mod tests {
         assert!(m.has_nectar);
         assert_eq!(m.crops_grown, 0);
         assert!(m.flower_target.is_none());
+    }
+
+    /// Пчела с нектаром возвращается в свой улей и входит в него.
+    #[test]
+    fn bee_returns_and_enters_hive() {
+        let (shape, water) = flat_world(&floor);
+        let w = World {
+            shape: &*shape,
+            water: &*water,
+            cell: None,
+            info: None,
+            min_y: -64,
+        };
+        let mut m = Mob::new(Species::Bee, [0.5, 64.5, 0.5], 1);
+        m.has_nectar = true;
+        m.hive_pos = Some([0, 64, 0]);
+        let mut rnd = || 0.5;
+        let mut s = Senses {
+            players: &[],
+            rand: &mut rnd,
+            prey: &[],
+            tempters: &[],
+            kin: &[],
+            sight: &always_visible,
+            difficulty: 2,
+            entity_id: 1,
+            bright_outside: true,
+            mob_griefing: false,
+            jump_boost: None,
+        };
+        tick(&mut m, &w, &mut s);
+        assert_eq!(m.enter_hive, Some([0, 64, 0]));
+    }
+
+    /// `Bee.customServerAiStep`: без жала пчела умирает примерно через 1200 тиков.
+    #[test]
+    fn bee_dies_after_sting() {
+        let (shape, water) = flat_world(&floor);
+        let w = World {
+            shape: &*shape,
+            water: &*water,
+            cell: None,
+            info: None,
+            min_y: -64,
+        };
+        let mut m = Mob::new(Species::Bee, [0.5, 66.0, 0.5], 1);
+        m.has_stung = true;
+        m.time_since_sting = 1199;
+        let mut rnd = || 0.0;
+        let mut s = Senses {
+            players: &[],
+            rand: &mut rnd,
+            prey: &[],
+            tempters: &[],
+            kin: &[],
+            sight: &always_visible,
+            difficulty: 2,
+            entity_id: 1,
+            bright_outside: true,
+            mob_griefing: false,
+            jump_boost: None,
+        };
+        tick(&mut m, &w, &mut s);
+        assert!(!m.alive(), "bee survived the stinger death roll");
     }
 
     /// Дельфин даёт `Dolphin's Grace` только плывущему игроку в 16 блоках.

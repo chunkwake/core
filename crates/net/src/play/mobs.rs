@@ -908,6 +908,11 @@ impl PlayPlan {
                             e.mob.on_fire = e.environment.burning > 0;
                             let prev_target = e.mob.target;
                             let removed = mb::tick(&mut e.mob, &world, &mut senses);
+                            if let Some(hive) = e.mob.enter_hive.take() {
+                                self.bee_enter_hive(hive, &e.mob);
+                                despawned.push(id);
+                                continue;
+                            }
                             // `Vex.setLimitedLife`: истёк срок — discard без лута.
                             if e.mob.discard {
                                 despawned.push(id);
@@ -1919,6 +1924,44 @@ impl PlayPlan {
     }
 
     /// Вода ли в блоке (`state_fluid`).
+    /// `BeehiveBlockEntity.addOccupant`: пчела входит в улей, её NBT остаётся
+    /// в `bees`; мёд прибавляется на 1 (до 5).
+    fn bee_enter_hive(&self, hive: [i32; 3], m: &Mob) {
+        let mut be = self
+            .block_entity(hive)
+            .unwrap_or(chunkwake_world::BlockEntity {
+                id: "minecraft:beehive".into(),
+                nbt: Compound::new(),
+            });
+        let mut list = match be.nbt.get("bees") {
+            Some(Tag::List(list)) => list.clone(),
+            _ => Vec::new(),
+        };
+        let data = mob_to_nbt(m, &self.survival.effects, &self.item_names);
+        list.push(Tag::Compound(Compound::from([(
+            "entity_data".into(),
+            Tag::Compound(data),
+        )])));
+        be.nbt.insert("bees".into(), Tag::List(list));
+        self.set_block_entity(hive, Some(be));
+        if let Some(s) = self.block(hive) {
+            let level = self
+                .survival
+                .placement
+                .prop(s, "honey_level")
+                .and_then(|v| v.parse::<u8>().ok())
+                .unwrap_or(0);
+            if level < 5
+                && let Some(next) =
+                    self.survival
+                        .placement
+                        .with_prop(s, "honey_level", &(level + 1).to_string())
+            {
+                self.set_block(hive, next);
+            }
+        }
+    }
+
     /// Ближайший цветок (`#minecraft:flowers`) в радиусе 5 для `BeePollinateGoal`.
     fn bee_flower(&self, w: &WorldView<'_>, m: &Mob) -> Option<[i32; 3]> {
         let flowers = self.survival.block_tags.get("minecraft:flowers")?;
@@ -2261,6 +2304,14 @@ impl PlayPlan {
         if m.species == Species::Bee {
             if let Some(Tag::Byte(nectar)) = nbt.get("HasNectar") {
                 m.has_nectar = *nectar != 0;
+            }
+            if let Some(Tag::Byte(stung)) = nbt.get("HasStung") {
+                m.has_stung = *stung != 0;
+            }
+            if let Some(Tag::IntArray(a)) = nbt.get("HivePos")
+                && a.len() == 3
+            {
+                m.hive_pos = Some([a[0], a[1], a[2]]);
             }
             if let Some(crops) = nbt.get("CropsGrownSincePollination").and_then(Tag::as_i64) {
                 m.crops_grown = crops.clamp(0, 10) as u8;
@@ -4958,6 +5009,10 @@ pub(super) fn mob_to_nbt(
         Species::Bee => {
             c.insert("AngerTime".into(), Tag::Int(m.anger_time as i32));
             c.insert("HasNectar".into(), Tag::Byte(i8::from(m.has_nectar)));
+            c.insert("HasStung".into(), Tag::Byte(i8::from(m.has_stung)));
+            if let Some(h) = m.hive_pos {
+                c.insert("HivePos".into(), Tag::IntArray(h.to_vec()));
+            }
             c.insert(
                 "CropsGrownSincePollination".into(),
                 Tag::Int(i32::from(m.crops_grown)),

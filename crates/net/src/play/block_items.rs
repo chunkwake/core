@@ -125,6 +125,7 @@ impl PlayPlan {
                 None,
                 |m| {
                     m.persistent = false;
+                    m.hive_pos = Some(pos);
                     m.anger_time = if smoked { 0 } else { 400 };
                     m.target = if smoked { None } else { target };
                 },
