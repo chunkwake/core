@@ -1265,6 +1265,10 @@ pub struct Mob {
     pub dragon_cooldown: u8,
     /// `Bee`: оставшиеся тики злости (`AngerTime`).
     pub anger_time: u32,
+    /// `Pufferfish`: стадия раздувания 0..2 и счётчики `inflate/deflate`.
+    pub puff_state: u8,
+    pub inflate: u32,
+    pub deflate: u32,
     /// `Warden`: задержка до следующего sonic boom (`SONIC_BOOM_COOLDOWN`).
     pub sonic_cooldown: u32,
     /// `Warden`: оставшиеся тики зарядки sonic boom (34 до выстрела).
@@ -1369,6 +1373,9 @@ impl Mob {
             statue: false,
             dragon_cooldown: 0,
             anger_time: 0,
+            puff_state: 0,
+            inflate: 0,
+            deflate: 0,
             sonic_cooldown: 0,
             sonic_charge: 0,
             sonic_target: None,
@@ -2320,6 +2327,64 @@ fn dragon_ai_step(m: &mut Mob, s: &mut Senses) {
 
 /// `Vex`: полёт к цели, удар раз в 20 тиков и срок жизни
 /// (`setLimitedLife`, затем `discard` без лута).
+/// `Pufferfish`: раздувание при игроке в раздутой на 2 рамке и контактный
+/// урон/яд (`playerTouch`, `touch` для мобов не дублируем).
+fn pufferfish_tick(m: &mut Mob, s: &mut Senses) {
+    if !m.alive() {
+        return;
+    }
+    let (w, h) = m.size();
+    let near = s.players.iter().any(|p| {
+        (p.pos[0] - m.pos[0]).abs() <= w / 2.0 + 2.3
+            && (p.pos[2] - m.pos[2]).abs() <= w / 2.0 + 2.3
+            && p.pos[1] + 0.9 >= m.pos[1] - 2.0
+            && p.pos[1] + 0.9 <= m.pos[1] + h + 2.0
+    });
+    if near {
+        if m.inflate == 0 {
+            m.inflate = 1;
+        }
+        m.deflate = 0;
+    } else {
+        m.inflate = 0;
+    }
+    if m.inflate > 0 {
+        if m.puff_state == 0 {
+            m.out.push(goals::Out::PufferSound { blow_up: true });
+            m.puff_state = 1;
+        } else if m.inflate > 40 && m.puff_state == 1 {
+            m.out.push(goals::Out::PufferSound { blow_up: true });
+            m.puff_state = 2;
+        }
+        m.inflate += 1;
+    } else if m.puff_state != 0 {
+        if m.deflate > 60 && m.puff_state == 2 {
+            m.out.push(goals::Out::PufferSound { blow_up: false });
+            m.puff_state = 1;
+        } else if m.deflate > 100 && m.puff_state == 1 {
+            m.out.push(goals::Out::PufferSound { blow_up: false });
+            m.puff_state = 0;
+        }
+        m.deflate += 1;
+    }
+    if m.puff_state == 0 {
+        return;
+    }
+    for p in s.players {
+        let hit = (p.pos[0] - m.pos[0]).abs() <= w / 2.0 + 0.6
+            && (p.pos[2] - m.pos[2]).abs() <= w / 2.0 + 0.6
+            && p.pos[1] < m.pos[1] + h + 0.3
+            && p.pos[1] + PLAYER_SIZE.1 > m.pos[1] - 0.3;
+        if hit {
+            m.out.push(goals::Out::PufferSting {
+                target: p.uuid,
+                damage: 1.0 + f32::from(m.puff_state),
+                poison: 60 * i32::from(m.puff_state),
+            });
+        }
+    }
+}
+
 fn bee_ai_step(m: &mut Mob, s: &mut Senses) {
     m.no_gravity = true;
     if m.anger_time > 0 {
@@ -2599,6 +2664,9 @@ pub fn tick(m: &mut Mob, w: &World, s: &mut Senses) -> bool {
     m.xxa = f64::from(m.xxa as f32 * 0.98);
     m.zza = f64::from(m.zza as f32 * 0.98);
     server_ai_step(m, w, s);
+    if m.species == Species::Pufferfish {
+        pufferfish_tick(m, s);
+    }
     // Прыжок: в воде — всплытие (`jumpInLiquid`, +0.04), с земли — не чаще
     // раза в 10 тиков подряд.
     let water = in_water(m, w);
@@ -4666,6 +4734,61 @@ mod tests {
         assert_eq!(Species::Axolotl.info().loot, "minecraft:entities/axolotl");
         let m = Mob::new(Species::Axolotl, [0.5, 64.0, 0.5], 1);
         assert!(matches!(m.nav.kind, path::NavKind::Amphibious));
+    }
+
+    /// Иглобрюх раздувается у игрока и на контакте выдаёт `1 + puff` урона
+    /// и яд на `60 × puff` тиков.
+    #[test]
+    fn pufferfish_puffs_and_stings_nearby_player() {
+        let (shape, water) = flat_world(&floor);
+        let w = World {
+            shape: &*shape,
+            water: &*water,
+            cell: None,
+            info: None,
+            min_y: -64,
+        };
+        let mut m = Mob::new(Species::Pufferfish, [0.5, 64.5, 0.5], 1);
+        let prey = [Prey {
+            uuid: 7,
+            pos: [0.5, 64.5, 0.5],
+        }];
+        let mut rnd = || 0.5;
+        let mut s = Senses {
+            players: &prey,
+            rand: &mut rnd,
+            prey: &[],
+            tempters: &[],
+            kin: &[],
+            sight: &always_visible,
+            difficulty: 2,
+            entity_id: 1,
+            bright_outside: true,
+            mob_griefing: false,
+            jump_boost: None,
+        };
+        tick(&mut m, &w, &mut s);
+        assert_eq!(m.puff_state, 1);
+        assert!(m.out.iter().any(|o| matches!(
+            o,
+            goals::Out::PufferSting {
+                target: 7,
+                damage,
+                poison: 60
+            } if *damage == 2.0
+        )));
+        for _ in 0..45 {
+            tick(&mut m, &w, &mut s);
+        }
+        assert_eq!(m.puff_state, 2);
+        assert!(m.out.iter().any(|o| matches!(
+            o,
+            goals::Out::PufferSting {
+                target: 7,
+                damage,
+                poison: 120
+            } if *damage == 3.0
+        )));
     }
 
     /// `PotentialCalculator` и локальный лимит на игрока.

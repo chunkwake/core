@@ -60,6 +60,14 @@ pub enum Out {
     DragonBreathAt([f64; 3]),
     /// Слизень прыгнул (`jump`) или шлёпнулся на землю: звук `jump`/`squish`.
     CubeSound { jump: bool },
+    /// `Pufferfish.playerTouch`: урон `1 + puff` и яд на `60 × puff` тиков.
+    PufferSting {
+        target: u128,
+        damage: f32,
+        poison: i32,
+    },
+    /// `Pufferfish.tick`: звук раздувания (`true`) или сдувания.
+    PufferSound { blow_up: bool },
 }
 
 /// Сородич рядом: для `BreedGoal` и `FollowParentGoal`.

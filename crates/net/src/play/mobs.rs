@@ -64,6 +64,8 @@ struct MobMeta {
     weather: i32,
     /// `CopperGolem` `DATA_COPPER_GOLEM_STATE` (задача, пока всегда IDLE).
     golem: i32,
+    /// `Pufferfish.PUFF_STATE`.
+    puff: i32,
 }
 
 impl MobMeta {
@@ -77,6 +79,7 @@ impl MobMeta {
             cube_size: m.cube_size,
             weather: m.weather_state.id(),
             golem: 0,
+            puff: i32::from(m.puff_state),
         }
     }
 
@@ -118,6 +121,11 @@ impl MobMeta {
                 if old.is_none_or(|m| m.golem != self.golem) {
                     out.push((17, Meta::GolemState(self.golem)));
                 }
+            }
+            // `Pufferfish.PUFF_STATE` после полей `AgeableMob` и
+            // `AbstractFish` (18): 19.
+            Species::Pufferfish if old.is_none_or(|m| m.puff != self.puff) => {
+                out.push((19, Meta::Int(self.puff)));
             }
             _ => {}
         }
@@ -4464,6 +4472,54 @@ impl PlayPlan {
                 Out::ShootSkull { target } => self.mob_shoot_skull(id, Uuid::from_u128(target)),
                 Out::DragonBreath { target } => self.spawn_dragon_breath(Uuid::from_u128(target)),
                 Out::DragonBreathAt(pos) => self.spawn_dragon_breath_cloud(pos),
+                // `Pufferfish.tick`: звук раздувания/сдувания.
+                Out::PufferSound { blow_up } => {
+                    let pos = self.sim().mobs.lock().unwrap().get(&id).map(|e| e.mob.pos);
+                    if let Some(pos) = pos {
+                        self.play_sound(
+                            None,
+                            if blow_up {
+                                "minecraft:entity.puffer_fish.blow_up"
+                            } else {
+                                "minecraft:entity.puffer_fish.blow_out"
+                            },
+                            crate::sounds::NEUTRAL,
+                            pos,
+                            1.0,
+                            1.0,
+                        );
+                    }
+                }
+                // `Pufferfish.playerTouch`: урон `1 + puff` и яд.
+                Out::PufferSting {
+                    target,
+                    damage,
+                    poison,
+                } => {
+                    let target = Uuid::from_u128(target);
+                    let pos = self.sim().mobs.lock().unwrap().get(&id).map(|e| e.mob.pos);
+                    if let Some(pos) = pos {
+                        self.mob_strike(Species::Pufferfish, target, pos, damage);
+                        if let Some(&effect) = self.survival.effects.get("minecraft:poison") {
+                            self.push_control(
+                                target,
+                                Control::Effect {
+                                    effect: crate::survival::Effect::plain(effect, 0, poison),
+                                    force: false,
+                                    command: false,
+                                },
+                            );
+                        }
+                        self.play_sound(
+                            None,
+                            "minecraft:entity.puffer_fish.sting",
+                            crate::sounds::NEUTRAL,
+                            pos,
+                            1.0,
+                            1.0,
+                        );
+                    }
+                }
                 // `EatBlockGoal.start`: анимация опущенной головы.
                 Out::EatStart => self
                     .hub
