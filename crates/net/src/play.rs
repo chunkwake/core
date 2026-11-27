@@ -591,6 +591,21 @@ struct DragonFight {
     respawn_pos: Option<[f64; 3]>,
 }
 
+/// Кристаллы на десяти шипах Края (`EndSpikeFeature`): центр шипа +0.5,
+/// высота шипа +1.
+fn end_crystal_positions(seed: i64) -> Vec<[f64; 3]> {
+    chunkwake_worldgen::feature::end::spikes_for_seed(seed)
+        .into_iter()
+        .map(|spike| {
+            [
+                f64::from(spike.center_x) + 0.5,
+                f64::from(spike.height + 1),
+                f64::from(spike.center_z) + 0.5,
+            ]
+        })
+        .collect()
+}
+
 /// Состояние боя в NBT (`EnderDragonFight` в `level.dat`).
 fn dragon_fight_nbt(started: bool, killed: bool, previously: bool) -> Compound {
     Compound::from([
@@ -4795,12 +4810,7 @@ impl PlayPlan {
         if self.spawn_fight_dragon([0.5, 128.0, 0.5]).is_none() || has_crystals {
             return;
         }
-        for spike in chunkwake_worldgen::feature::end::spikes_for_seed(self.seed) {
-            let pos = [
-                f64::from(spike.center_x) + 0.5,
-                f64::from(spike.height + 1),
-                f64::from(spike.center_z) + 0.5,
-            ];
+        for pos in end_crystal_positions(self.seed) {
             let _ = self.spawn_mob_with(
                 crate::mobs::Species::EndCrystal,
                 pos,
@@ -29517,8 +29527,9 @@ mod tests {
         DynamicFactoryFn, DynamicGen, FastMap, GameModeChange, LOAD_GATED_PACKETS,
         acknowledge_player_save, add_banner_pattern, apply_inventory_open_reply,
         block_entity_data_nbt, chunks_around, container_entity, create_dynamic_world, derived_seed,
-        dominant_axis, dragon_fight_nbt, dynamic_world_args, game_mode_change, in_view,
-        lectern_page_request, parse_dragon_fight, update_container_viewers, within_pick_range,
+        dominant_axis, dragon_fight_nbt, dynamic_world_args, end_crystal_positions,
+        game_mode_change, in_view, lectern_page_request, parse_dragon_fight,
+        update_container_viewers, within_pick_range,
     };
     use crate::survival::PlayerState;
     use chunkwake_world::nbt::{Compound, Tag};
@@ -29533,6 +29544,26 @@ mod tests {
         assert_eq!(parse_dragon_fight(&c), (false, true, false));
         // Пустой compound — бой ещё не начинался.
         assert_eq!(parse_dragon_fight(&Compound::new()), (false, false, false));
+    }
+
+    #[test]
+    fn end_crystals_sit_above_spikes() {
+        let positions = end_crystal_positions(0);
+        let spikes = chunkwake_worldgen::feature::end::spikes_for_seed(0);
+        assert_eq!(positions.len(), 10);
+        assert_eq!(spikes.len(), 10);
+        for (pos, spike) in positions.iter().zip(spikes) {
+            assert_eq!(pos[0], f64::from(spike.center_x) + 0.5);
+            assert_eq!(pos[1], f64::from(spike.height + 1));
+            assert_eq!(pos[2], f64::from(spike.center_z) + 0.5);
+        }
+        // Шипы стоят кольцом радиуса 42, высота 76..103.
+        assert!(
+            positions
+                .iter()
+                .all(|p| (p[0] - 0.5).hypot(p[2] - 0.5) <= 43.0)
+        );
+        assert!(positions.iter().all(|p| (77.0..=104.0).contains(&p[1])));
     }
 
     /// `hasClientLoaded`: таймер после входа/респауна, экран смерти и
