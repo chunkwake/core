@@ -1693,6 +1693,27 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
                 Selector::new(vec![nearest(1, false)]),
             );
         }
+        // Дельфин: `RandomSwimmingGoal(1.0, 10)` и взгляд по сторонам
+        // (`RandomLookAroundGoal`/`LookAtPlayerGoal(6)`).
+        Species::Dolphin => {
+            return (
+                Selector::new(vec![
+                    (
+                        4,
+                        Goal::Stroll {
+                            speed: 1.0,
+                            interval: 10,
+                            avoid_water: false,
+                            swim: true,
+                            to: [0.0; 3],
+                        },
+                    ),
+                    around(4),
+                    look(5, 6.0),
+                ]),
+                Selector::default(),
+            );
+        }
         // Рыба, спрут и светящийся спрут: `FishSwimGoal` (
         // `RandomSwimmingGoal(1.0, 40)`); без целей.
         Species::Cod | Species::Salmon | Species::GlowSquid | Species::Squid => {

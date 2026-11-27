@@ -301,6 +301,7 @@ pub enum Species {
     GlowSquid,
     Bee,
     Squid,
+    Dolphin,
 }
 
 /// Всё о виде в одном месте. Встроенные значения — запасные: при старте
@@ -373,7 +374,7 @@ const fn base(name: &'static str, sound: &'static str, loot: &'static str) -> Sp
 
 /// Встроенная таблица в порядке [`Species::ALL`]: числа из `createAttributes`
 /// и `EntityType` 26.3.
-const BUILTIN: [SpeciesInfo; 34] = [
+const BUILTIN: [SpeciesInfo; 35] = [
     SpeciesInfo {
         size: (0.9, 1.4),
         eye_height: 1.3,
@@ -837,6 +838,20 @@ const BUILTIN: [SpeciesInfo; 34] = [
             "minecraft:entities/squid",
         )
     },
+    SpeciesInfo {
+        category: Category::WaterCreature,
+        size: (0.9, 0.6),
+        eye_height: 0.3,
+        max_health: 10.0,
+        speed: 1.2,
+        follow_range: 16.0,
+        attack_damage: 3.0,
+        ..base(
+            "minecraft:dolphin",
+            "minecraft:entity.dolphin",
+            "minecraft:entities/dolphin",
+        )
+    },
 ];
 
 static INSTALLED: std::sync::OnceLock<Vec<SpeciesInfo>> = std::sync::OnceLock::new();
@@ -876,7 +891,7 @@ fn merge(b: &SpeciesInfo, types: &[chunkwake_data::world::EntityTypeInfo]) -> Sp
 }
 
 impl Species {
-    pub const ALL: [Species; 34] = [
+    pub const ALL: [Species; 35] = [
         Species::Cow,
         Species::Pig,
         Species::Sheep,
@@ -911,6 +926,7 @@ impl Species {
         Species::GlowSquid,
         Species::Bee,
         Species::Squid,
+        Species::Dolphin,
     ];
 
     /// Данные вида: выгрузка, если она установлена, иначе встроенные.
@@ -1999,6 +2015,7 @@ fn navigation_for(species: Species) -> Navigation {
         Species::Cod | Species::Salmon | Species::GlowSquid | Species::Squid => {
             Navigation::water(false)
         }
+        Species::Dolphin => Navigation::water(true),
         Species::Bat | Species::Phantom => Navigation::flying(),
         Species::Bee => Navigation::flying(),
         Species::Drowned => Navigation::amphibious(),
@@ -2012,7 +2029,7 @@ pub fn walker(m: &Mob, w: &World, difficulty: u8, in_water: bool) -> path::Walke
     let animal = m.species.is_animal();
     let aquatic = matches!(
         m.species,
-        Species::Cod | Species::Salmon | Species::GlowSquid | Species::Squid
+        Species::Cod | Species::Salmon | Species::GlowSquid | Species::Squid | Species::Dolphin
     );
     path::Walker {
         pos: m.pos,
@@ -4517,6 +4534,21 @@ mod tests {
         };
         let walk = walker(&m, &w, 2, true);
         assert_eq!(walk.malus(path::PathType::Water), 0.0);
+    }
+
+    /// Дельфин: данные вида, океанский спавн и `allowBreaching` в навигации.
+    #[test]
+    fn dolphin_species_data_and_breaching_navigation() {
+        assert_eq!(Species::Dolphin.category(), Category::WaterCreature);
+        assert_eq!(Species::Dolphin.max_health(), 10.0);
+        assert_eq!(Species::Dolphin.size(), (0.9, 0.6));
+        assert_eq!(Species::Dolphin.speed(), 1.2);
+        assert_eq!(Species::Dolphin.info().loot, "minecraft:entities/dolphin");
+        let m = Mob::new(Species::Dolphin, [0.5, 64.0, 0.5], 1);
+        assert!(matches!(
+            m.nav.kind,
+            path::NavKind::Water { breaching: true }
+        ));
     }
 
     /// `PotentialCalculator` и локальный лимит на игрока.
