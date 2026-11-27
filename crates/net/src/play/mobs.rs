@@ -52,7 +52,7 @@ pub(super) struct MobEntry {
 }
 
 /// Синхронизируемые поля вида (`SynchedEntityData`), которые меняет тик.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct MobMeta {
     swell_dir: i32,
     powered: bool,
@@ -68,6 +68,27 @@ struct MobMeta {
     puff: i32,
     /// `TropicalFish.DATA_ID_TYPE_VARIANT`.
     tropical: i32,
+    /// `EnderDragon.DATA_PHASE` (индекс 16).
+    dragon_phase: u8,
+}
+
+impl Default for MobMeta {
+    fn default() -> Self {
+        // Клиентский `DATA_PHASE` тоже стартует с `HOVERING`.
+        Self {
+            swell_dir: 0,
+            powered: false,
+            ignited: false,
+            climbing: false,
+            using_item: false,
+            cube_size: 0,
+            weather: 0,
+            golem: 0,
+            puff: 0,
+            tropical: 0,
+            dragon_phase: crate::mobs::DRAGON_HOVERING,
+        }
+    }
 }
 
 impl MobMeta {
@@ -83,6 +104,7 @@ impl MobMeta {
             golem: 0,
             puff: i32::from(m.puff_state),
             tropical: m.tropical_variant,
+            dragon_phase: m.dragon_phase,
         }
     }
 
@@ -133,6 +155,10 @@ impl MobMeta {
             // `TropicalFish.DATA_ID_TYPE_VARIANT`: тот же 19 в своей иерархии.
             Species::TropicalFish if old.is_none_or(|m| m.tropical != self.tropical) => {
                 out.push((19, Meta::Int(self.tropical)));
+            }
+            // `EnderDragon.DATA_PHASE`: 16 после полей `Mob`.
+            Species::EnderDragon if old.is_none_or(|m| m.dragon_phase != self.dragon_phase) => {
+                out.push((16, Meta::Int(i32::from(self.dragon_phase))));
             }
             _ => {}
         }
@@ -6659,6 +6685,26 @@ mod tests {
         assert_eq!(statue_facing(180.0), "north");
         assert_eq!(statue_facing(-90.0), "east");
         assert_eq!(statue_facing(359.0), "south");
+    }
+
+    #[test]
+    fn dragon_phase_is_synced_and_defaults_to_hovering() {
+        let mut m = crate::mobs::Mob::new(crate::mobs::Species::EnderDragon, [0.5, 80.0, 0.5], 1);
+        // Клиент ждёт `HOVERING`, поэтому тот же дефолт не шлётся.
+        let hovering = MobMeta::of(&m);
+        assert!(
+            hovering
+                .fields(m.species, Some(MobMeta::default()))
+                .is_empty()
+        );
+        // Старт боя переводит в holding и уходит отдельным полем 16.
+        m.dragon_phase = crate::mobs::DRAGON_HOLDING;
+        let fields = MobMeta::of(&m).fields(m.species, Some(MobMeta::default()));
+        assert_eq!(fields, vec![(16, play::Meta::Int(0))]);
+        // Смерть — фаза `DYING` (9).
+        m.dragon_phase = crate::mobs::DRAGON_DYING;
+        let fields = MobMeta::of(&m).fields(m.species, Some(hovering));
+        assert_eq!(fields, vec![(16, play::Meta::Int(9))]);
     }
 
     #[test]

@@ -4726,16 +4726,17 @@ impl PlayPlan {
             fight.respawn_at = None;
             fight.respawn_pos = None;
         }
-        if self
-            .spawn_mob(
-                crate::mobs::Species::EnderDragon,
-                spawn,
-                0.0,
-                false,
-                Some("TRIGGERED"),
-            )
-            .is_some()
-        {
+        if let Some(id) = self.spawn_mob(
+            crate::mobs::Species::EnderDragon,
+            spawn,
+            0.0,
+            false,
+            Some("TRIGGERED"),
+        ) {
+            // `EnderDragonFight.updateDragon`: дракон с боем сразу в holding.
+            if let Some(e) = self.sim().mobs.lock().unwrap().get_mut(&id) {
+                e.mob.dragon_phase = crate::mobs::DRAGON_HOLDING;
+            }
             self.trigger_summoned_entity(spawn, crate::mobs::Species::EnderDragon, 192.0);
         }
     }

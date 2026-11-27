@@ -1444,7 +1444,7 @@ impl Mob {
             offer_flower: 0,
             offer_target: None,
             antenna: None,
-            dragon_phase: 0,
+            dragon_phase: DRAGON_HOVERING,
             dragon_phase_time: 0,
             dragon_target: None,
             dragon_flame_count: 0,
@@ -2204,7 +2204,7 @@ fn wither_period(health: f32, max: f32) -> u32 {
 /// `EnderDragon.customServerAiStep`: полёт по кругу вокруг портала
 /// (`[0.5, 80, 0.5]`, радиус 24) с рывками к ближайшему игроку.
 // `EnderDragonPhase` (подмножество, используемое сервером).
-const DRAGON_HOLDING: u8 = 0;
+pub const DRAGON_HOLDING: u8 = 0;
 const DRAGON_STRAFE: u8 = 1;
 const DRAGON_LANDING_APPROACH: u8 = 2;
 const DRAGON_LANDING: u8 = 3;
@@ -2212,6 +2212,10 @@ const DRAGON_TAKEOFF: u8 = 4;
 const DRAGON_SITTING_FLAMING: u8 = 5;
 const DRAGON_SITTING_SCANNING: u8 = 6;
 const DRAGON_SITTING_ATTACKING: u8 = 7;
+pub const DRAGON_DYING: u8 = 9;
+/// `EnderDragonPhase.HOVERING`: стартовая фаза и состояние дракона без боя
+/// (`EnderDragonPhaseManager` в конструкторе): висит на месте.
+pub const DRAGON_HOVERING: u8 = 10;
 
 fn dragon_begin(m: &mut Mob, phase: u8, target: Option<[f64; 3]>) {
     m.dragon_phase = phase;
@@ -2372,6 +2376,14 @@ fn dragon_ai_step(m: &mut Mob, s: &mut Senses) {
                 dragon_begin(m, DRAGON_HOLDING, None);
             }
         }
+        // `DragonHoverPhase`: дракон без боя висит на месте.
+        DRAGON_HOVERING => {
+            goal = None;
+        }
+        // `DragonDeathPhase`: летит к высоте подиума (0, 0), пока не погибнет.
+        DRAGON_DYING => {
+            goal = m.dragon_target;
+        }
         _ => dragon_begin(m, DRAGON_HOLDING, None),
     }
 
@@ -2396,6 +2408,31 @@ fn dragon_ai_step(m: &mut Mob, s: &mut Senses) {
     }
     m.zza = 0.0;
     m.xxa = 0.0;
+}
+
+/// `DragonDeathPhase.doServerTick`: цель — верх блоков на подиуме `(0, 0)`;
+/// в 10..150 блоках от неё дракон держит 1 HP, иначе погибает.
+fn dragon_death_tick(m: &mut Mob, w: &World) {
+    let target = match m.dragon_target {
+        Some(t) => t,
+        None => {
+            // `getHeightmapPos(MOTION_BLOCKING, podium)`: первый воздух над
+            // верхним блоком колонны.
+            let mut y = 319;
+            while y > w.min_y && (w.shape)([0, y, 0]).is_empty() {
+                y -= 1;
+            }
+            let t = [0.5, f64::from(y + 1), 0.5];
+            m.dragon_target = Some(t);
+            t
+        }
+    };
+    if (100.0..=22500.0).contains(&dist2(target, m.pos)) {
+        m.health = 1.0;
+    } else {
+        m.health = 0.0;
+        m.death_time = 1;
+    }
 }
 
 /// `Vex`: полёт к цели, удар раз в 20 тиков и срок жизни
@@ -2763,13 +2800,17 @@ pub fn tick(m: &mut Mob, w: &World, s: &mut Senses) -> bool {
         m.death_time += 1;
         m.xxa = 0.0;
         if m.species == Species::EnderDragon {
-            // `EnderDragon.tickDeath`: 200 тиков, подъём на 0.1 за тик.
-            m.vel = [0.0, 0.1, 0.0];
-            m.pos[1] += 0.1;
-            return m.death_time > DRAGON_DEATH_TICKS;
+            // `EnderDragon.tickDeath`: 200 тиков частиц и опыта, без движения.
+            return m.death_time >= DRAGON_DEATH_TICKS;
         }
         let _ = travel(m, 0.0, w);
         return m.death_time > DEATH_TICKS;
+    }
+    if m.species == Species::EnderDragon && m.dragon_phase == DRAGON_DYING {
+        dragon_death_tick(m, w);
+        if m.death_time > 0 {
+            return false;
+        }
     }
     copper_golem_weathering(m);
     m.out.clear();
@@ -2942,6 +2983,10 @@ pub fn hurt(m: &mut Mob, amount: f32, src: Source, knockback_power: f64) -> Opti
     if !m.alive() {
         return None;
     }
+    // `EnderDragon.hurt`: в фазе `DYING` урон не проходит.
+    if m.species == Species::EnderDragon && m.dragon_phase == DRAGON_DYING {
+        return None;
+    }
     // `WitherBoss.hurtServer`: во второй половине здоровья (`isPowered`)
     // стрелы и ветряные заряды не ранят.
     if src.projectile && m.species == Species::Wither && m.health <= m.max_health() / 2.0 {
@@ -2967,6 +3012,13 @@ pub fn hurt(m: &mut Mob, amount: f32, src: Source, knockback_power: f64) -> Opti
         knockback(m, knockback_power, from[0] - m.pos[0], from[2] - m.pos[2]);
     }
     if m.health <= 0.0 {
+        // `EnderDragon.handleKillingBlow`: кроме `HOVERING` (`isSitting`)
+        // дракон остаётся с 1 HP и уходит в `DYING`, чтобы долететь до подиума.
+        if m.species == Species::EnderDragon && m.dragon_phase != DRAGON_HOVERING {
+            m.health = 1.0;
+            dragon_begin(m, DRAGON_DYING, None);
+            return Some(false);
+        }
         m.death_time = 1;
         return Some(true);
     }
@@ -3473,6 +3525,7 @@ mod tests {
     #[test]
     fn dragon_flies_without_gravity() {
         let mut m = Mob::new(Species::EnderDragon, [0.0; 3], 1);
+        m.dragon_phase = DRAGON_HOLDING;
         let mut rnd = || 0.5;
         let sight = |_: [f64; 3], _: [f64; 3]| true;
         let mut s = Senses {
@@ -3494,7 +3547,21 @@ mod tests {
     }
 
     #[test]
-    fn dragon_death_lasts_200_ticks_and_rises() {
+    fn dragon_hovers_until_a_fight_starts() {
+        let mut m = Mob::new(Species::EnderDragon, [0.5, 80.0, 0.5], 1);
+        // `EnderDragonPhaseManager` в конструкторе выставляет `HOVERING`.
+        assert_eq!(m.dragon_phase, DRAGON_HOVERING);
+        let mut rnd = || 0.99;
+        let sight = |_: [f64; 3], _: [f64; 3]| true;
+        let mut s = dragon_senses(&[], &mut rnd, &sight);
+        dragon_ai_step(&mut m, &mut s);
+        assert_eq!(m.dragon_phase, DRAGON_HOVERING);
+        assert_eq!(m.vel, [0.0; 3]);
+        assert_eq!(m.dragon_target, None);
+    }
+
+    #[test]
+    fn dragon_lethal_blow_enters_dying_and_lands_at_podium() {
         let (shape, water) = flat_world(&floor);
         let w = World {
             shape: &*shape,
@@ -3504,29 +3571,36 @@ mod tests {
             min_y: -64,
         };
         let mut m = Mob::new(Species::EnderDragon, [0.5, 80.0, 0.5], 1);
-        m.death_time = 1;
-        let start = m.pos[1];
+        m.dragon_phase = DRAGON_HOLDING;
         let mut rnd = || 0.5;
         let sight = |_: [f64; 3], _: [f64; 3]| true;
-        let mut s = Senses {
-            players: &[],
-            rand: &mut rnd,
-            prey: &[],
-            tempters: &[],
-            kin: &[],
-            sight: &sight,
-            difficulty: 2,
-            entity_id: 1,
-            bright_outside: true,
-            mob_griefing: true,
-            jump_boost: None,
-        };
-        for _ in 0..150 {
+        let mut s = dragon_senses(&[], &mut rnd, &sight);
+        // `handleKillingBlow`: 1 HP и `DYING` вместо мгновенной смерти.
+        assert_eq!(
+            hurt(&mut m, 1000.0, Source::at([0.5, 80.0, 0.5], None), 0.0),
+            Some(false)
+        );
+        assert_eq!(m.dragon_phase, DRAGON_DYING);
+        assert_eq!(m.health, 1.0);
+        assert_eq!(
+            hurt(&mut m, 1000.0, Source::at([0.5, 80.0, 0.5], None), 0.0),
+            None
+        );
+        let start = m.pos[1];
+        let mut landed = false;
+        for _ in 0..600 {
             assert!(!tick(&mut m, &w, &mut s));
+            if m.death_time > 0 {
+                landed = true;
+                break;
+            }
         }
-        assert!(m.pos[1] > start + 10.0, "дракон не поднялся: {}", m.pos[1]);
+        assert!(landed, "дракон не долетел до подиума");
+        assert!(m.pos[1] < start, "дракон должен снижаться");
+        assert!(m.pos[1] < 75.0, "погиб слишком далеко: {}", m.pos[1]);
+        // `EnderDragon.tickDeath`: 200 тиков до исчезновения.
         let mut removed = false;
-        for _ in 0..60 {
+        for _ in 0..250 {
             if tick(&mut m, &w, &mut s) {
                 removed = true;
                 break;
@@ -3560,6 +3634,7 @@ mod tests {
     #[test]
     fn dragon_phases_include_landing_and_flaming_breath() {
         let mut m = Mob::new(Species::EnderDragon, [0.5, 80.0, 0.5], 3);
+        m.dragon_phase = DRAGON_HOLDING;
         let players = [Prey {
             uuid: 7,
             pos: [0.5, 70.0, 5.5],
@@ -3588,7 +3663,7 @@ mod tests {
             mob_griefing: true,
             jump_boost: None,
         };
-        let mut seen = [false; 9];
+        let mut seen = [false; 11];
         let mut breaths = 0;
         for _ in 0..4000 {
             m.out.clear();
@@ -3643,6 +3718,7 @@ mod tests {
     #[test]
     fn dragon_holding_lands_when_roll_is_zero() {
         let mut m = Mob::new(Species::EnderDragon, [0.5, 80.0, 0.5], 3);
+        m.dragon_phase = DRAGON_HOLDING;
         let mut rnd = || 0.0;
         let sight = |_: [f64; 3], _: [f64; 3]| true;
         let mut s = dragon_senses(&[], &mut rnd, &sight);
@@ -3655,6 +3731,7 @@ mod tests {
     #[test]
     fn dragon_holding_targets_next_ring_node() {
         let mut m = Mob::new(Species::EnderDragon, [0.5, 80.0, 0.5], 3);
+        m.dragon_phase = DRAGON_HOLDING;
         let mut rnd = || 0.99;
         let sight = |_: [f64; 3], _: [f64; 3]| true;
         let mut s = dragon_senses(&[], &mut rnd, &sight);
