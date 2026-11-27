@@ -41,6 +41,60 @@ impl PlayPlan {
             };
             return Some(if self.send_map(uuid, id) { "1" } else { "0" }.into());
         }
+        if let Some(rest) = command.strip_prefix("rpackpush ") {
+            let mut it = rest.split_whitespace();
+            let (Some(pack), Some(url), Some(hash), Some(required), Some(prompt)) =
+                (it.next(), it.next(), it.next(), it.next(), it.next())
+            else {
+                return Some("0".into());
+            };
+            if it.next().is_some() {
+                return Some("0".into());
+            }
+            let Ok(pack) = Uuid::parse_str(pack) else {
+                return Some("0".into());
+            };
+            let Some(url) = hex_utf8(url) else {
+                return Some("0".into());
+            };
+            let hash = if hash == "-" { "" } else { hash };
+            let required = required == "1";
+            let prompt = if prompt == "-" {
+                None
+            } else {
+                let Some(prompt) = hex_component(prompt) else {
+                    return Some("0".into());
+                };
+                Some(prompt)
+            };
+            let packet = play::resource_pack_push(
+                self.ids.resource_pack_push,
+                pack,
+                &url,
+                hash,
+                required,
+                prompt.as_ref(),
+            );
+            self.send_to(uuid, packet);
+            return Some("1".into());
+        }
+        if let Some(rest) = command.strip_prefix("rpackpop ") {
+            let Ok(pack) = Uuid::parse_str(rest.trim()) else {
+                return Some("0".into());
+            };
+            self.send_to(
+                uuid,
+                play::resource_pack_pop(self.ids.resource_pack_pop, Some(pack)),
+            );
+            return Some("1".into());
+        }
+        if command == "rpackpopall" {
+            self.send_to(
+                uuid,
+                play::resource_pack_pop(self.ids.resource_pack_pop, None),
+            );
+            return Some("1".into());
+        }
         if let Some(rest) = command.strip_prefix("hideplayer ") {
             let Ok(target) = Uuid::parse_str(rest.trim()) else {
                 return Some("0".into());
@@ -235,6 +289,19 @@ fn parse_effect(rest: &str) -> Option<(i32, [i32; 3], i32)> {
     ))
 }
 
+/// UTF-8 строка из hex (URL набора ресурсов и подсказка в `rpackpush`).
+fn hex_utf8(text: &str) -> Option<String> {
+    if !text.len().is_multiple_of(2) || text.len() > 65536 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(text.len() / 2);
+    for pair in text.as_bytes().as_chunks::<2>().0 {
+        let pair = std::str::from_utf8(pair).ok()?;
+        bytes.push(u8::from_str_radix(pair, 16).ok()?);
+    }
+    String::from_utf8(bytes).ok()
+}
+
 /// JSON-компонент из hex-байтов (Java присылает UTF-8 Gson JSON).
 fn hex_component(text: &str) -> Option<serde_json::Value> {
     if !text.len().is_multiple_of(2) || text.len() > 32768 {
@@ -271,7 +338,7 @@ fn sound_source(name: &str) -> Option<i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_effect, sound_source};
+    use super::{hex_utf8, parse_effect, sound_source};
 
     #[test]
     fn sound_categories_match_vanilla_ordinals() {
@@ -295,5 +362,18 @@ mod tests {
         assert_eq!(parse_effect("1003 1 2 3"), None);
         assert_eq!(parse_effect("x 1 2 3 0"), None);
         assert_eq!(parse_effect("1003 1 2 3 0 9"), None);
+    }
+
+    #[test]
+    fn resource_pack_url_hex_round_trips() {
+        let url = "https://example.test/pack.zip?x=1";
+        let hex: String = url
+            .bytes()
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join("");
+        assert_eq!(hex_utf8(&hex).as_deref(), Some(url));
+        assert_eq!(hex_utf8("abc"), None);
+        assert_eq!(hex_utf8("zz"), None);
     }
 }

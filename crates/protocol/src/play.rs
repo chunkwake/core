@@ -1283,6 +1283,49 @@ pub fn transfer(id: i32, host: &str, port: u16) -> Vec<u8> {
     w.buf
 }
 
+/// `ClientboundResourcePackPushPacket`: пачка, URL, SHA-1 hex, обязательность
+/// и необязательный запрос.
+pub fn resource_pack_push(
+    id: i32,
+    pack: Uuid,
+    url: &str,
+    hash: &str,
+    required: bool,
+    prompt: Option<&serde_json::Value>,
+) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id)
+        .uuid(pack)
+        .string(url)
+        .string(hash)
+        .bool(required);
+    match prompt {
+        Some(prompt) => {
+            w.bool(true);
+            crate::text::write_component(&mut w, prompt);
+        }
+        None => {
+            w.bool(false);
+        }
+    }
+    w.buf
+}
+
+/// `ClientboundResourcePackPopPacket`: снять пачку `pack` или все (`None`).
+pub fn resource_pack_pop(id: i32, pack: Option<Uuid>) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id);
+    match pack {
+        Some(pack) => {
+            w.bool(true).uuid(pack);
+        }
+        None => {
+            w.bool(false);
+        }
+    }
+    w.buf
+}
+
 /// `ClientboundSoundPacket`: звук из реестра в точке (координаты × 8), с зерном.
 pub fn sound(
     id: i32,
@@ -2121,5 +2164,41 @@ mod copper_golem_meta_tests {
         assert_eq!(r.var_int().unwrap(), 37);
         assert_eq!(r.var_int().unwrap(), 1);
         assert_eq!(r.u8().unwrap(), 0xff);
+    }
+
+    #[test]
+    fn resource_pack_push_and_pop_packets() {
+        let uuid = Uuid::from_u128(42);
+        let prompt = serde_json::json!({"text": "Need it"});
+        let push = resource_pack_push(
+            82,
+            uuid,
+            "https://example.test/p.zip",
+            "abcd",
+            true,
+            Some(&prompt),
+        );
+        let mut r = Reader::new(&push);
+        assert_eq!(r.var_int().unwrap(), 82);
+        assert_eq!(r.uuid().unwrap(), uuid);
+        assert_eq!(r.string(256).unwrap(), "https://example.test/p.zip");
+        assert_eq!(r.string(64).unwrap(), "abcd");
+        assert!(r.bool().unwrap());
+        assert!(r.bool().unwrap());
+        assert_eq!(crate::text::read_component(&mut r).unwrap(), prompt);
+        assert!(r.remaining().is_empty());
+
+        let pop = resource_pack_pop(81, None);
+        let mut r = Reader::new(&pop);
+        assert_eq!(r.var_int().unwrap(), 81);
+        assert!(!r.bool().unwrap());
+        assert!(r.remaining().is_empty());
+
+        let pop = resource_pack_pop(81, Some(uuid));
+        let mut r = Reader::new(&pop);
+        assert_eq!(r.var_int().unwrap(), 81);
+        assert!(r.bool().unwrap());
+        assert_eq!(r.uuid().unwrap(), uuid);
+        assert!(r.remaining().is_empty());
     }
 }

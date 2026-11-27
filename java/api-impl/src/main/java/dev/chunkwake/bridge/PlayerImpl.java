@@ -42,6 +42,14 @@ public final class PlayerImpl {
     /** Скрытые сущности: UUID -> набор плагинов (`*` — hidePlayer без плагина). */
     private final java.util.Map<UUID, Set<String>> hidden =
             new java.util.concurrent.ConcurrentHashMap<>();
+    /** Наборы ресурсов (`addResourcePack`/`setResourcePack`): id → данные. */
+    private final java.util.Map<UUID, ResourcePack> packs =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private volatile String lastPackHash;
+
+    /** Один набор ресурсов: URL, SHA-1, JSON подсказки, обязательность. */
+    private record ResourcePack(String url, byte[] hash, String prompt, boolean required) {
+    }
     private volatile boolean allowFlight;
     private volatile boolean flying;
     /** `Player.setSleepingIgnored`: не мешать спать (Essentials). */
@@ -297,6 +305,134 @@ public final class PlayerImpl {
             throw new IllegalArgumentException("MapView cannot be null");
         }
         playerEffect(MapWire.command(map));
+    }
+
+    /** Все `setResourcePack(…)` заменяют ранее выданные наборы (legacy API). */
+    public void setResourcePack(String url) {
+        legacyPack(url, null, null, false);
+    }
+
+    public void setResourcePack(String url, byte[] hash) {
+        legacyPack(url, hash, null, false);
+    }
+
+    public void setResourcePack(String url, String hashHex) {
+        legacyPack(url, hashBytes(hashHex), null, false);
+    }
+
+    public void setResourcePack(String url, byte[] hash, boolean required) {
+        legacyPack(url, hash, null, required);
+    }
+
+    public void setResourcePack(String url, byte[] hash, String prompt) {
+        legacyPack(url, hash, promptJson(prompt), false);
+    }
+
+    public void setResourcePack(String url, byte[] hash, Component prompt) {
+        legacyPack(url, hash, promptJson(prompt), false);
+    }
+
+    public void setResourcePack(String url, byte[] hash, String prompt, boolean required) {
+        legacyPack(url, hash, promptJson(prompt), required);
+    }
+
+    public void setResourcePack(String url, byte[] hash, Component prompt, boolean required) {
+        legacyPack(url, hash, promptJson(prompt), required);
+    }
+
+    public void setResourcePack(String url, String hashHex, boolean required, Component prompt) {
+        legacyPack(url, hashBytes(hashHex), promptJson(prompt), required);
+    }
+
+    public void setResourcePack(UUID pack, String url, byte[] hash, String prompt, boolean required) {
+        pushPack(pack, url, hash, promptJson(prompt), required);
+    }
+
+    public void setResourcePack(UUID pack, String url, byte[] hash, Component prompt, boolean required) {
+        pushPack(pack, url, hash, promptJson(prompt), required);
+    }
+
+    public void setResourcePack(UUID pack, String url, String hashHex, Component prompt, boolean required) {
+        pushPack(pack, url, hashBytes(hashHex), promptJson(prompt), required);
+    }
+
+    public void addResourcePack(UUID pack, String url, byte[] hash, String prompt, boolean required) {
+        pushPack(pack, url, hash, promptJson(prompt), required);
+    }
+
+    public void removeResourcePack(UUID pack) {
+        if (packs.remove(pack) != null) {
+            playerEffect(ResourcePackWire.pop(pack));
+            if (packs.isEmpty()) {
+                lastPackHash = null;
+            }
+        }
+    }
+
+    public void removeResourcePacks() {
+        clearPacks();
+    }
+
+    public void clearResourcePacks() {
+        clearPacks();
+    }
+
+    public boolean hasResourcePack() {
+        return !packs.isEmpty();
+    }
+
+    public String getResourcePackHash() {
+        return lastPackHash;
+    }
+
+    private void clearPacks() {
+        boolean any = !packs.isEmpty();
+        packs.clear();
+        lastPackHash = null;
+        if (any) {
+            playerEffect(ResourcePackWire.popAll());
+        }
+    }
+
+    private void legacyPack(String url, byte[] hash, String prompt, boolean required) {
+        if (!packs.isEmpty()) {
+            packs.clear();
+            playerEffect(ResourcePackWire.popAll());
+        }
+        byte[] realHash = hash != null && hash.length != 0 ? hash : null;
+        UUID pack = UUID.nameUUIDFromBytes(
+                (realHash != null ? Hex.encode(realHash) : url)
+                        .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        pushPack(pack, url, realHash, prompt, required);
+    }
+
+    private void pushPack(UUID pack, String url, byte[] hash, String prompt, boolean required) {
+        packs.put(pack, new ResourcePack(url, hash, prompt, required));
+        lastPackHash = hash == null || hash.length == 0 ? null : Hex.encode(hash);
+        playerEffect(ResourcePackWire.push(pack, url, hash, prompt, required));
+    }
+
+    private static String promptJson(String prompt) {
+        if (prompt == null || prompt.isEmpty()) {
+            return null;
+        }
+        return promptJson(net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer
+                .legacySection().deserialize(prompt));
+    }
+
+    private static String promptJson(Component prompt) {
+        return prompt == null ? null : GsonComponentSerializer.gson().serialize(prompt);
+    }
+
+    private static byte[] hashBytes(String hash) {
+        if (hash == null || hash.isEmpty()) {
+            return null;
+        }
+        try {
+            return Hex.decode(hash);
+        } catch (IllegalArgumentException error) {
+            return null;
+        }
     }
 
     private void spawnParticle0(Particle particle, double x, double y, double z, int count,
