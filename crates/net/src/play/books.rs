@@ -73,7 +73,8 @@ fn plain_text(v: &serde_json::Value) -> String {
 pub(super) enum NbtSource {
     /// Селектор или имя сущности.
     Entity(String),
-    /// Абсолютные координаты блока `x y z`.
+    /// Координаты блока: `x y z`, где компонента может быть `~[offset]`
+    /// (отсчёт от игрока, как `Coordinates.getBlockPos`).
     Block(String),
 }
 
@@ -84,8 +85,100 @@ pub(super) struct NbtQuery {
     pub source: NbtSource,
     /// `interpret`: строка пути сама является JSON-компонентом.
     pub interpret: bool,
-    /// `separator` для нескольких значений (сейчас путь даёт одно).
+    /// `separator` для нескольких значений (по умолчанию `", "`).
     pub separator: Option<String>,
+}
+
+/// `Coordinates.getBlockPos`: `x y z`, где координата — число, `~` или
+/// `~offset`; относительные считаются от позиции источника (ног игрока).
+fn block_coords(text: &str, origin: [f64; 3]) -> Option<[i32; 3]> {
+    let mut it = text.split_whitespace();
+    let mut out = [0; 3];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let token = it.next()?;
+        let value = if let Some(relative) = token.strip_prefix('~') {
+            let offset = if relative.is_empty() {
+                0.0
+            } else {
+                relative.parse::<f64>().ok()?
+            };
+            origin[i] + offset
+        } else {
+            token.parse::<f64>().ok()?
+        };
+        *slot = value.floor() as i32;
+    }
+    if it.next().is_some() {
+        return None;
+    }
+    Some(out)
+}
+
+/// `NbtContents.resolve`: значения одного пути (несколько совпадений — через
+/// `separator`, по умолчанию `", "`); `interpret` разбирает каждую строку
+/// как JSON-компонент и склеивает их в `extra`.
+fn nbt_result(
+    query: &NbtQuery,
+    found: Vec<chunkwake_world::nbt::Tag>,
+) -> Option<serde_json::Value> {
+    use chunkwake_world::nbt::Tag;
+    if found.is_empty() {
+        return None;
+    }
+    if query.interpret {
+        let parts: Vec<serde_json::Value> = found
+            .iter()
+            .filter_map(|tag| match tag {
+                Tag::String(text) => serde_json::from_str(text).ok(),
+                _ => None,
+            })
+            .collect();
+        if parts.is_empty() {
+            return None;
+        }
+        if let [single] = parts.as_slice() {
+            return Some(single.clone());
+        }
+        let separator = query.separator.clone().unwrap_or_else(|| ", ".to_owned());
+        let mut extra = Vec::with_capacity(parts.len() * 2);
+        for (i, part) in parts.into_iter().enumerate() {
+            if i > 0 {
+                extra.push(serde_json::json!({ "text": separator }));
+            }
+            extra.push(part);
+        }
+        return Some(serde_json::json!({ "text": "", "extra": extra }));
+    }
+    let separator = query.separator.as_deref().unwrap_or(", ");
+    Some(serde_json::Value::String(
+        found
+            .iter()
+            .map(crate::play::commands::snbt::format_tag)
+            .collect::<Vec<_>>()
+            .join(separator),
+    ))
+}
+
+/// Совпадения пути NBT: `[]` даёт все элементы списка.
+fn nbt_matches(
+    root: &chunkwake_world::nbt::Tag,
+    steps: &[crate::play::commands::snbt::Step],
+) -> Vec<chunkwake_world::nbt::Tag> {
+    use chunkwake_world::nbt::Tag;
+    let Some(found) = crate::play::commands::snbt::get_path(root, steps) else {
+        return Vec::new();
+    };
+    if steps
+        .last()
+        .is_some_and(|step| *step == crate::play::commands::snbt::Step::All)
+    {
+        match found {
+            Tag::List(items) => items,
+            other => vec![other],
+        }
+    } else {
+        vec![found]
+    }
 }
 
 /// `ComponentUtils.resolve`: заменить `selector`, `score` и `nbt` на готовый
@@ -337,38 +430,29 @@ impl PlayPlan {
             self.score(&holder, objective)
                 .map(|value| value.to_string())
         };
-        // `NbtContents.resolve`: данные сущности/блока по NBT-пути. `interpret`
+        // `NbtContents.resolve`: данные сущностей/блока по NBT-пути; каждое
+        // совпадение — отдельное значение, склеенное `separator`. `interpret`
         // разбирает строку как JSON-компонент, иначе — SNBT-текст.
         let nbt = |query: &NbtQuery| -> Option<serde_json::Value> {
-            use crate::play::commands::snbt;
-            let root = match &query.source {
-                NbtSource::Entity(entity) => {
-                    let target = ctx.select_first(&source, entity, true)?;
-                    chunkwake_world::nbt::Tag::Compound(ctx.plan.entity_nbt(&target))
-                }
+            let roots: Vec<chunkwake_world::nbt::Tag> = match &query.source {
+                NbtSource::Entity(entity) => ctx
+                    .select_any(&source, entity, true)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|target| chunkwake_world::nbt::Tag::Compound(ctx.plan.entity_nbt(&target)))
+                    .collect(),
                 NbtSource::Block(pos) => {
-                    let mut it = pos.split_whitespace();
-                    let at = [
-                        it.next()?.parse::<i32>().ok()?,
-                        it.next()?.parse::<i32>().ok()?,
-                        it.next()?.parse::<i32>().ok()?,
-                    ];
-                    if it.next().is_some() {
-                        return None;
-                    }
-                    chunkwake_world::nbt::Tag::Compound(ctx.plan.block_nbt(at)?)
+                    let origin = self.hub.players.lock().unwrap().get(&uuid).map(|p| p.pos)?;
+                    let at = block_coords(pos, origin)?;
+                    vec![chunkwake_world::nbt::Tag::Compound(ctx.plan.block_nbt(at)?)]
                 }
             };
-            let steps = snbt::parse_path(&query.path)?;
-            let found = snbt::get_path(&root, &steps)?;
-            if query.interpret {
-                match found {
-                    chunkwake_world::nbt::Tag::String(text) => serde_json::from_str(&text).ok(),
-                    _ => None,
-                }
-            } else {
-                Some(serde_json::Value::String(snbt::format_tag(&found)))
-            }
+            let steps = crate::play::commands::snbt::parse_path(&query.path)?;
+            let found: Vec<chunkwake_world::nbt::Tag> = roots
+                .iter()
+                .flat_map(|root| nbt_matches(root, &steps))
+                .collect();
+            nbt_result(query, found)
         };
         let mut e = (*extra).clone();
         if let Some(book) = e.book.as_mut() {
@@ -498,5 +582,73 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_str(&resolve_page(json, &selector, &score, &nbt)).unwrap();
         assert_eq!(value["text"], "");
+    }
+
+    #[test]
+    fn block_coordinates_accept_relative_offsets() {
+        let origin = [10.7, 64.0, -3.2];
+        assert_eq!(block_coords("~ ~1 ~-2", origin), Some([10, 65, -6]));
+        assert_eq!(block_coords("100 49 0", origin), Some([100, 49, 0]));
+        assert_eq!(
+            block_coords("~0.5 ~ ~", [10.0, 64.0, 0.0]),
+            Some([10, 64, 0])
+        );
+        assert_eq!(block_coords("1 2", origin), None);
+        assert_eq!(block_coords("a b c", origin), None);
+    }
+
+    #[test]
+    fn nbt_multiple_values_join_with_separator() {
+        use chunkwake_world::nbt::{Compound, Tag};
+        let mut root = Compound::new();
+        root.insert(
+            "List".into(),
+            Tag::List(vec![Tag::Int(1), Tag::Int(2), Tag::Int(3)]),
+        );
+        let steps = crate::play::commands::snbt::parse_path("List[]").unwrap();
+        let found = nbt_matches(&Tag::Compound(root), &steps);
+        let query = NbtQuery {
+            path: "List[]".into(),
+            source: NbtSource::Block("~ ~ ~".into()),
+            interpret: false,
+            separator: None,
+        };
+        assert_eq!(
+            nbt_result(&query, found.clone()),
+            Some(serde_json::Value::String("1, 2, 3".into()))
+        );
+        let custom = NbtQuery {
+            separator: Some(" | ".into()),
+            path: query.path.clone(),
+            source: query.source.clone(),
+            interpret: query.interpret,
+        };
+        assert_eq!(
+            nbt_result(&custom, found),
+            Some(serde_json::Value::String("1 | 2 | 3".into()))
+        );
+        // Одиночный путь — одно значение без склейки.
+        let steps = crate::play::commands::snbt::parse_path("List[0]").unwrap();
+        let mut root = Compound::new();
+        root.insert("List".into(), Tag::List(vec![Tag::Int(7)]));
+        assert_eq!(
+            nbt_result(&query, nbt_matches(&Tag::Compound(root), &steps)),
+            Some(serde_json::Value::String("7".into()))
+        );
+        // `interpret`: несколько компонентов склеиваются через `extra`.
+        let interpreted = NbtQuery {
+            interpret: true,
+            path: query.path.clone(),
+            source: query.source.clone(),
+            separator: None,
+        };
+        let found = vec![
+            Tag::String("{\"text\":\"a\"}".into()),
+            Tag::String("{\"text\":\"b\"}".into()),
+        ];
+        let value = nbt_result(&interpreted, found).unwrap();
+        assert_eq!(value["extra"][0]["text"], "a");
+        assert_eq!(value["extra"][1]["text"], ", ");
+        assert_eq!(value["extra"][2]["text"], "b");
     }
 }
