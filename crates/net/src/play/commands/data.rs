@@ -55,6 +55,16 @@ pub(super) fn specs() -> Vec<super::dispatch::Spec> {
                             vec![Spec::arg_leaf("sourcePath", GAMEMASTERS, nbt_path(), data)],
                         )],
                     ),
+                    Spec::group(
+                        "storage",
+                        GAMEMASTERS,
+                        vec![Spec::arg(
+                            "source",
+                            GAMEMASTERS,
+                            super::registry::resource_location(),
+                            vec![Spec::arg_leaf("sourcePath", GAMEMASTERS, nbt_path(), data)],
+                        )],
+                    ),
                 ],
             ),
             Spec::group(
@@ -118,6 +128,11 @@ pub(super) fn specs() -> Vec<super::dispatch::Spec> {
                             GAMEMASTERS,
                             vec![source("target", entity.clone())],
                         ),
+                        Spec::group(
+                            "storage",
+                            GAMEMASTERS,
+                            vec![source("target", super::registry::resource_location())],
+                        ),
                     ],
                 ),
                 Spec::group(
@@ -144,6 +159,16 @@ pub(super) fn specs() -> Vec<super::dispatch::Spec> {
                                 vec![nbt()],
                             )],
                         ),
+                        Spec::group(
+                            "storage",
+                            GAMEMASTERS,
+                            vec![Spec::arg(
+                                "target",
+                                GAMEMASTERS,
+                                super::registry::resource_location(),
+                                vec![nbt()],
+                            )],
+                        ),
                     ],
                 ),
                 Spec::group(
@@ -159,6 +184,14 @@ pub(super) fn specs() -> Vec<super::dispatch::Spec> {
                             "entity",
                             GAMEMASTERS,
                             vec![modify_target("target", entity.clone())],
+                        ),
+                        Spec::group(
+                            "storage",
+                            GAMEMASTERS,
+                            vec![modify_target(
+                                "target",
+                                super::registry::resource_location(),
+                            )],
                         ),
                     ],
                 ),
@@ -179,11 +212,14 @@ pub(super) fn data(ctx: &Context<'_>, call: &Call<'_>) -> Outcome {
     match (sub, kind) {
         ("get", "block") => get_block(ctx, call, &mut input),
         ("get", "entity") => get_entity(ctx, call, &mut input),
+        ("get", "storage") => get_storage(ctx, &mut input),
         ("merge", "block") => merge_block(ctx, call, &mut input),
         ("merge", "entity") => merge_entity(ctx, call, &mut input),
+        ("merge", "storage") => merge_storage(ctx, &mut input),
         ("modify", "block") => modify_block(ctx, call, &mut input),
         ("modify", "entity") => modify_entity(ctx, call, &mut input),
-        _ => usage("/data get|merge|modify <block|entity> …"),
+        ("modify", "storage") => modify_storage(ctx, call, &mut input),
+        _ => usage("/data get|merge|modify <block|entity|storage> …"),
     }
 }
 
@@ -203,6 +239,14 @@ fn get_entity(ctx: &Context<'_>, call: &Call<'_>, input: &mut super::args::Input
     };
     let root = ctx.plan.entity_nbt(&target);
     report_get("entity", &target.name, &Tag::Compound(root), input)
+}
+
+fn get_storage(ctx: &Context<'_>, input: &mut super::args::Input<'_>) -> Outcome {
+    let Some(id) = storage_target(input) else {
+        return usage("/data get storage <target> [<path> [<scale>]]");
+    };
+    let root = crate::play::command_storage::command_storage_get(ctx.plan, &id);
+    report_get("storage", &id, &Tag::Compound(root), input)
 }
 
 fn report_get(kind: &str, label: &str, root: &Tag, input: &mut super::args::Input<'_>) -> Outcome {
@@ -282,6 +326,47 @@ fn merge_entity(ctx: &Context<'_>, call: &Call<'_>, input: &mut super::args::Inp
     }
     ctx.plan.store_entity_nbt(&target, take_compound(root));
     modified_entity(&target.name)
+}
+
+fn merge_storage(ctx: &Context<'_>, input: &mut super::args::Input<'_>) -> Outcome {
+    let Some(id) = storage_target(input) else {
+        return usage("/data merge storage <target> <nbt>");
+    };
+    let Some(patch) = compound_rest(input) else {
+        return malformed();
+    };
+    if !crate::play::command_storage::command_storage_merge(ctx.plan, &id, &patch) {
+        return Outcome::Feedback(translate("commands.data.merge.failed", Vec::new()));
+    }
+    Outcome::Feedback(translate(
+        "commands.data.storage.modified",
+        vec![json!({"text": id})],
+    ))
+}
+
+fn modify_storage(
+    ctx: &Context<'_>,
+    call: &Call<'_>,
+    input: &mut super::args::Input<'_>,
+) -> Outcome {
+    let Some(id) = storage_target(input) else {
+        return usage("/data modify storage <target> <path> <mode> …");
+    };
+    let mut root = Tag::Compound(crate::play::command_storage::command_storage_get(
+        ctx.plan, &id,
+    ));
+    if let Err(error) = apply_modify(ctx, call, input, &mut root) {
+        return error;
+    }
+    crate::play::command_storage::command_storage_set(ctx.plan, &id, take_compound(root));
+    Outcome::Feedback(translate(
+        "commands.data.storage.modified",
+        vec![json!({"text": id})],
+    ))
+}
+
+fn storage_target(input: &mut super::args::Input<'_>) -> Option<String> {
+    crate::play::command_storage::storage_id(input.word()?)
 }
 
 fn modify_block(ctx: &Context<'_>, call: &Call<'_>, input: &mut super::args::Input<'_>) -> Outcome {
@@ -383,6 +468,15 @@ fn source_value(
                 let path = input.balanced().unwrap_or("");
                 let steps = snbt::parse_path(path)?;
                 let root = Tag::Compound(ctx.plan.entity_nbt(&target));
+                snbt::get_path(&root, &steps)
+            }
+            "storage" => {
+                let id = storage_target(input)?;
+                let path = input.balanced().unwrap_or("");
+                let steps = snbt::parse_path(path)?;
+                let root = Tag::Compound(crate::play::command_storage::command_storage_get(
+                    ctx.plan, &id,
+                ));
                 snbt::get_path(&root, &steps)
             }
             _ => None,

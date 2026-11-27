@@ -438,6 +438,8 @@ pub struct PlayPlan {
     sleepers: Mutex<HashMap<Uuid, [i32; 3]>>,
     /// Мини-`EnderDragonFight`: убийство и возрождение дракона Края.
     dragon_fight: Mutex<DragonFight>,
+    /// `/data … storage`: корни командных хранилищ (`namespace:path`).
+    pub(super) command_storage: Mutex<HashMap<String, Compound>>,
     /// Активные рейды (`Raid`): волны разбойников и `raid_win`.
     raids: Mutex<Vec<raids::Raid>>,
     /// Режим игры по умолчанию (`/defaultgamemode`).
@@ -2984,6 +2986,7 @@ mod block_items;
 mod boats;
 mod books;
 mod client_info;
+mod command_storage;
 /// Ванильные команды: дерево, права, селекторы и обработчики.
 pub mod commands;
 mod conduits;
@@ -3778,6 +3781,7 @@ impl PlayPlan {
             },
             active: AtomicU8::new(Dimension::Overworld.slot()),
             dragon_fight: Mutex::new(DragonFight::default()),
+            command_storage: Mutex::new(HashMap::new()),
             raids: Mutex::new(Vec::new()),
             trees,
             dynamic_factory,

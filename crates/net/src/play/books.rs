@@ -76,6 +76,8 @@ pub(super) enum NbtSource {
     /// Координаты блока: `x y z`, где компонента может быть `~[offset]`
     /// (отсчёт от игрока, как `Coordinates.getBlockPos`).
     Block(String),
+    /// Командное хранилище `namespace:path`.
+    Storage(String),
 }
 
 /// Запрос `NbtContents` к компоненту страницы.
@@ -229,12 +231,15 @@ fn resolve_component(
                 map.insert("text".into(), serde_json::Value::String(text));
             } else if let Some(serde_json::Value::String(path)) = map.get("nbt") {
                 let path = path.clone();
-                let source = match (map.get("entity"), map.get("block")) {
-                    (Some(serde_json::Value::String(entity)), _) => {
+                let source = match (map.get("entity"), map.get("block"), map.get("storage")) {
+                    (Some(serde_json::Value::String(entity)), _, _) => {
                         Some(NbtSource::Entity(entity.clone()))
                     }
-                    (_, Some(serde_json::Value::String(block))) => {
+                    (_, Some(serde_json::Value::String(block)), _) => {
                         Some(NbtSource::Block(block.clone()))
+                    }
+                    (_, _, Some(serde_json::Value::String(storage))) => {
+                        Some(NbtSource::Storage(storage.clone()))
                     }
                     _ => None,
                 };
@@ -251,7 +256,14 @@ fn resolve_component(
                         separator,
                     };
                     let resolved = nbt(&query);
-                    for key in ["nbt", "entity", "block", "interpret", "separator"] {
+                    for key in [
+                        "nbt",
+                        "entity",
+                        "block",
+                        "storage",
+                        "interpret",
+                        "separator",
+                    ] {
                         map.remove(key);
                     }
                     match resolved {
@@ -446,6 +458,12 @@ impl PlayPlan {
                     let at = block_coords(pos, origin)?;
                     vec![chunkwake_world::nbt::Tag::Compound(ctx.plan.block_nbt(at)?)]
                 }
+                NbtSource::Storage(storage) => {
+                    let id = crate::play::command_storage::storage_id(storage)?;
+                    vec![chunkwake_world::nbt::Tag::Compound(
+                        crate::play::command_storage::command_storage_get(ctx.plan, &id),
+                    )]
+                }
             };
             let steps = crate::play::commands::snbt::parse_path(&query.path)?;
             let found: Vec<chunkwake_world::nbt::Tag> = roots
@@ -582,6 +600,23 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_str(&resolve_page(json, &selector, &score, &nbt)).unwrap();
         assert_eq!(value["text"], "");
+    }
+
+    #[test]
+    fn page_nbt_storage_source_is_read() {
+        let json = r#"{"nbt":"Value","storage":"demo:test"}"#;
+        let nbt = |query: &NbtQuery| match &query.source {
+            NbtSource::Storage(id) if id == "demo:test" => {
+                Some(serde_json::Value::String("42".into()))
+            }
+            _ => None,
+        };
+        let selector = |_: &str, _: Option<&str>| String::new();
+        let score = |_: &str, _: &str| None;
+        let value: serde_json::Value =
+            serde_json::from_str(&resolve_page(json, &selector, &score, &nbt)).unwrap();
+        assert_eq!(value["text"], "42");
+        assert!(value.get("storage").is_none());
     }
 
     #[test]

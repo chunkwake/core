@@ -1367,11 +1367,17 @@ fn data_test<'a>(
             });
             Ok((ok, text))
         }
-        // Командного хранилища нет: узел есть, условие ложно.
+        // `CommandStorage.get`: отсутствующее хранилище — пустой compound.
         "storage" => {
-            let (_, text) = split(text);
-            let (_, text) = split(text);
-            Ok((false, text))
+            let (token, text) = split(text);
+            let (path, text) = split(text);
+            let Some(id) = crate::play::command_storage::storage_id(token) else {
+                return Ok((false, text));
+            };
+            let root = crate::play::command_storage::command_storage_get(ctx.plan, &id);
+            let ok = snbt::parse_path(path)
+                .is_some_and(|steps| snbt::get_path(&Tag::Compound(root), &steps).is_some());
+            Ok((ok, text))
         }
         _ => Err(Outcome::Feedback(error_component(
             "/execute if data <block|entity|storage> …",
