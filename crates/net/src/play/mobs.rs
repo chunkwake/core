@@ -759,6 +759,17 @@ impl PlayPlan {
                 );
                 list
             };
+            // `DragonHoldingPatternPhase.findNewTarget`: шанс посадки и атаки
+            // зависит от числа живых кристаллов Края.
+            let alive_crystals = mobs
+                .values()
+                .filter(|e| e.mob.species == Species::EndCrystal && e.mob.alive())
+                .count() as i32;
+            for e in mobs.values_mut() {
+                if e.mob.species == Species::EnderDragon {
+                    e.mob.dragon_crystals = alive_crystals;
+                }
+            }
             // Один замок мира на всю фазу: коробки коллизий читаются тысячами раз.
             self.with_world(|w| {
                 // Мобы считаются кусками на пуле тика (`crate::par`): каждый

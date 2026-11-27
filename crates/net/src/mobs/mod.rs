@@ -1338,6 +1338,11 @@ pub struct Mob {
     pub dragon_flame_count: u32,
     /// Счётчик циклов holding pattern.
     pub dragon_cycle: u32,
+    /// `DragonHoldingPatternPhase`: узел кольца (0..12) и направление облёта.
+    pub dragon_node: i32,
+    pub dragon_clockwise: bool,
+    /// Живых кристаллов Края: шанс посадки `1/(кристаллы + 3)`.
+    pub dragon_crystals: i32,
     /// `Raider.isCaptain`: лидер волны со знаменем.
     pub raid_leader: bool,
     /// `Witch`: кулдаун лечения союзников (`RangedAttackGoal`, 60 тиков).
@@ -1442,6 +1447,9 @@ impl Mob {
             dragon_target: None,
             dragon_flame_count: 0,
             dragon_cycle: 0,
+            dragon_node: 0,
+            dragon_clockwise: true,
+            dragon_crystals: 0,
             raid_leader: false,
             witch_heal_cooldown: 0,
             nav: navigation_for(species),
@@ -2202,7 +2210,6 @@ const DRAGON_TAKEOFF: u8 = 4;
 const DRAGON_SITTING_FLAMING: u8 = 5;
 const DRAGON_SITTING_SCANNING: u8 = 6;
 const DRAGON_SITTING_ATTACKING: u8 = 7;
-const DRAGON_CHARGING: u8 = 8;
 
 fn dragon_begin(m: &mut Mob, phase: u8, target: Option<[f64; 3]>) {
     m.dragon_phase = phase;
@@ -2240,31 +2247,45 @@ fn dragon_ai_step(m: &mut Mob, s: &mut Senses) {
     let mut speed = 0.3f64;
     match m.dragon_phase {
         DRAGON_HOLDING => {
-            if m.dragon_phase_time >= 200
-                && let Some(p) = target
-            {
-                m.dragon_cycle += 1;
-                match m.dragon_cycle % 3 {
-                    1 => {
+            // `DragonHoldingPatternPhase.doServerTick`: новая цель, когда
+            // долетели (100), ушли слишком далеко (22500) или цели нет.
+            let arrived = m
+                .dragon_target
+                .is_none_or(|t| !(100.0..=22500.0).contains(&dist2(t, m.pos)));
+            if arrived {
+                // `findNewTarget`: посадка с шансом `1/(кристаллы + 3)`.
+                let crystals = m.dragon_crystals.max(0);
+                if ((s.rand)() * f64::from(crystals + 3)) as i32 == 0 {
+                    dragon_begin(m, DRAGON_LANDING_APPROACH, Some(LAND));
+                    return dragon_ai_step(m, s);
+                }
+                if let Some(p) = target {
+                    // `podium.distToCenterSqr(player) / 512`, затем атака с
+                    // шансом `1/(i + 2)` или `1/(кристаллы + 2)`.
+                    let i = (dist2(CENTER, p.pos) / 512.0) as i32;
+                    if ((s.rand)() * f64::from(i + 2)) as i32 == 0
+                        || ((s.rand)() * f64::from(crystals + 2)) as i32 == 0
+                    {
                         dragon_begin(m, DRAGON_STRAFE, Some(p.pos));
                         return dragon_ai_step(m, s);
                     }
-                    2 => {
-                        dragon_begin(m, DRAGON_CHARGING, Some(p.pos));
-                        return dragon_ai_step(m, s);
-                    }
-                    _ => {
-                        dragon_begin(m, DRAGON_LANDING_APPROACH, Some(LAND));
-                        return dragon_ai_step(m, s);
-                    }
                 }
+                // Соседний узел кольца; раз в 8 — разворот и +6 узлов.
+                if ((s.rand)() * 8.0) as i32 == 0 {
+                    m.dragon_clockwise = !m.dragon_clockwise;
+                    m.dragon_node += 6;
+                }
+                m.dragon_node += if m.dragon_clockwise { 1 } else { -1 };
+                m.dragon_node = m.dragon_node.rem_euclid(12);
+                m.dragon_cycle = m.dragon_cycle.wrapping_add(1);
+                let angle = f64::from(m.dragon_node) * std::f64::consts::TAU / 12.0;
+                m.dragon_target = Some([
+                    CENTER[0] + angle.cos() * RADIUS,
+                    CENTER[1],
+                    CENTER[2] + angle.sin() * RADIUS,
+                ]);
             }
-            let angle = f64::from(m.tick_count) * 0.008 + f64::from(m.uuid as u32) * 0.5;
-            goal = Some([
-                CENTER[0] + angle.cos() * RADIUS,
-                CENTER[1],
-                CENTER[2] + angle.sin() * RADIUS,
-            ]);
+            goal = m.dragon_target;
         }
         DRAGON_STRAFE => {
             if let Some(p) = target {
@@ -2273,14 +2294,6 @@ fn dragon_ai_step(m: &mut Mob, s: &mut Senses) {
                 speed = 0.4;
             }
             if m.dragon_phase_time >= 80 {
-                dragon_begin(m, DRAGON_HOLDING, None);
-            }
-        }
-        DRAGON_CHARGING => {
-            goal = m.dragon_target;
-            speed = 0.5;
-            let close = goal.is_some_and(|g| dist2(g, m.pos) < 9.0);
-            if close || m.dragon_phase_time > 60 {
                 dragon_begin(m, DRAGON_HOLDING, None);
             }
         }
@@ -3502,7 +3515,15 @@ mod tests {
             pos: [0.5, 70.0, 5.5],
             swimming: false,
         }];
-        let mut rnd = || 0.5;
+        // Детерминированный `RandomSource` (LCG), чтобы расписание фаз
+        // охватило и посадку, и атаку.
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut rnd = move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
         let sight = |_: [f64; 3], _: [f64; 3]| true;
         let mut s = Senses {
             players: &players,
@@ -3522,6 +3543,10 @@ mod tests {
         for _ in 0..4000 {
             m.out.clear();
             dragon_ai_step(&mut m, &mut s);
+            // Простая интеграция скорости: цель кольца должна быть достигнута.
+            for (p, v) in m.pos.iter_mut().zip(m.vel) {
+                *p += v;
+            }
             seen[usize::from(m.dragon_phase)] = true;
             breaths += m
                 .out
@@ -3531,7 +3556,6 @@ mod tests {
         }
         for phase in [
             DRAGON_STRAFE,
-            DRAGON_CHARGING,
             DRAGON_LANDING_APPROACH,
             DRAGON_LANDING,
             DRAGON_SITTING_SCANNING,
@@ -3542,6 +3566,59 @@ mod tests {
             assert!(seen[usize::from(phase)], "фаза {phase} не встретилась");
         }
         assert!(breaths >= 1, "дыхание не появилось в sitting flaming");
+    }
+
+    fn dragon_senses<'a>(
+        players: &'a [Prey],
+        rnd: &'a mut dyn FnMut() -> f64,
+        sight: &'a dyn Fn([f64; 3], [f64; 3]) -> bool,
+    ) -> Senses<'a> {
+        Senses {
+            players,
+            rand: rnd,
+            prey: &[],
+            tempters: &[],
+            kin: &[],
+            sight,
+            difficulty: 2,
+            entity_id: 3,
+            bright_outside: true,
+            mob_griefing: true,
+            jump_boost: None,
+        }
+    }
+
+    /// `DragonHoldingPatternPhase.findNewTarget`: бросок 0 при нуле кристаллов
+    /// сразу уводит в посадку (`nextInt(0 + 3) == 0`).
+    #[test]
+    fn dragon_holding_lands_when_roll_is_zero() {
+        let mut m = Mob::new(Species::EnderDragon, [0.5, 80.0, 0.5], 3);
+        let mut rnd = || 0.0;
+        let sight = |_: [f64; 3], _: [f64; 3]| true;
+        let mut s = dragon_senses(&[], &mut rnd, &sight);
+        dragon_ai_step(&mut m, &mut s);
+        assert_eq!(m.dragon_phase, DRAGON_LANDING_APPROACH);
+        assert_eq!(m.dragon_target, Some([0.5, 70.0, 0.5]));
+    }
+
+    /// Иначе выбирается соседний узел кольца радиуса 24 на высоте 80.
+    #[test]
+    fn dragon_holding_targets_next_ring_node() {
+        let mut m = Mob::new(Species::EnderDragon, [0.5, 80.0, 0.5], 3);
+        let mut rnd = || 0.99;
+        let sight = |_: [f64; 3], _: [f64; 3]| true;
+        let mut s = dragon_senses(&[], &mut rnd, &sight);
+        dragon_ai_step(&mut m, &mut s);
+        assert_eq!(m.dragon_phase, DRAGON_HOLDING);
+        let t = m.dragon_target.expect("нет цели облёта");
+        let radius = ((t[0] - 0.5).powi(2) + (t[2] - 0.5).powi(2)).sqrt();
+        assert!((radius - 24.0).abs() < 1e-6, "{t:?}");
+        assert!((t[1] - 80.0).abs() < 1e-6, "{t:?}");
+        assert_eq!(m.dragon_node, 1);
+        // Долетели — выбирается следующий узел (2).
+        m.pos = t;
+        dragon_ai_step(&mut m, &mut s);
+        assert_eq!(m.dragon_node, 2);
     }
 
     #[test]
