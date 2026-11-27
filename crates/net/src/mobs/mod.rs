@@ -302,6 +302,7 @@ pub enum Species {
     Bee,
     Squid,
     Dolphin,
+    TropicalFish,
 }
 
 /// Всё о виде в одном месте. Встроенные значения — запасные: при старте
@@ -374,7 +375,7 @@ const fn base(name: &'static str, sound: &'static str, loot: &'static str) -> Sp
 
 /// Встроенная таблица в порядке [`Species::ALL`]: числа из `createAttributes`
 /// и `EntityType` 26.3.
-const BUILTIN: [SpeciesInfo; 35] = [
+const BUILTIN: [SpeciesInfo; 36] = [
     SpeciesInfo {
         size: (0.9, 1.4),
         eye_height: 1.3,
@@ -852,6 +853,19 @@ const BUILTIN: [SpeciesInfo; 35] = [
             "minecraft:entities/dolphin",
         )
     },
+    SpeciesInfo {
+        category: Category::WaterAmbient,
+        size: (0.5, 0.4),
+        eye_height: 0.26,
+        max_health: 3.0,
+        speed: 0.7,
+        follow_range: 16.0,
+        ..base(
+            "minecraft:tropical_fish",
+            "minecraft:entity.tropical_fish",
+            "minecraft:entities/tropical_fish",
+        )
+    },
 ];
 
 static INSTALLED: std::sync::OnceLock<Vec<SpeciesInfo>> = std::sync::OnceLock::new();
@@ -891,7 +905,7 @@ fn merge(b: &SpeciesInfo, types: &[chunkwake_data::world::EntityTypeInfo]) -> Sp
 }
 
 impl Species {
-    pub const ALL: [Species; 35] = [
+    pub const ALL: [Species; 36] = [
         Species::Cow,
         Species::Pig,
         Species::Sheep,
@@ -927,6 +941,7 @@ impl Species {
         Species::Bee,
         Species::Squid,
         Species::Dolphin,
+        Species::TropicalFish,
     ];
 
     /// Данные вида: выгрузка, если она установлена, иначе встроенные.
@@ -2012,9 +2027,11 @@ pub fn dist2(a: [f64; 3], b: [f64; 3]) -> f64 {
 /// `GroundPathNavigation`.
 fn navigation_for(species: Species) -> Navigation {
     match species {
-        Species::Cod | Species::Salmon | Species::GlowSquid | Species::Squid => {
-            Navigation::water(false)
-        }
+        Species::Cod
+        | Species::Salmon
+        | Species::GlowSquid
+        | Species::Squid
+        | Species::TropicalFish => Navigation::water(false),
         Species::Dolphin => Navigation::water(true),
         Species::Bat | Species::Phantom => Navigation::flying(),
         Species::Bee => Navigation::flying(),
@@ -2029,7 +2046,12 @@ pub fn walker(m: &Mob, w: &World, difficulty: u8, in_water: bool) -> path::Walke
     let animal = m.species.is_animal();
     let aquatic = matches!(
         m.species,
-        Species::Cod | Species::Salmon | Species::GlowSquid | Species::Squid | Species::Dolphin
+        Species::Cod
+            | Species::Salmon
+            | Species::GlowSquid
+            | Species::Squid
+            | Species::Dolphin
+            | Species::TropicalFish
     );
     path::Walker {
         pos: m.pos,
@@ -4548,6 +4570,28 @@ mod tests {
         assert!(matches!(
             m.nav.kind,
             path::NavKind::Water { breaching: true }
+        ));
+    }
+
+    /// Тропическая рыба: данные вида, водная навигация и имя для ведра/спавна.
+    #[test]
+    fn tropical_fish_species_data_and_water_navigation() {
+        assert_eq!(
+            Species::from_name("minecraft:tropical_fish"),
+            Some(Species::TropicalFish)
+        );
+        assert_eq!(Species::TropicalFish.category(), Category::WaterAmbient);
+        assert_eq!(Species::TropicalFish.max_health(), 3.0);
+        assert_eq!(Species::TropicalFish.size(), (0.5, 0.4));
+        assert_eq!(Species::TropicalFish.speed(), 0.7);
+        assert_eq!(
+            Species::TropicalFish.info().loot,
+            "minecraft:entities/tropical_fish"
+        );
+        let m = Mob::new(Species::TropicalFish, [0.5, 64.0, 0.5], 1);
+        assert!(matches!(
+            m.nav.kind,
+            path::NavKind::Water { breaching: false }
         ));
     }
 
