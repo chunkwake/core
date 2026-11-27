@@ -300,6 +300,7 @@ pub enum Species {
     Salmon,
     GlowSquid,
     Bee,
+    Squid,
 }
 
 /// Всё о виде в одном месте. Встроенные значения — запасные: при старте
@@ -372,7 +373,7 @@ const fn base(name: &'static str, sound: &'static str, loot: &'static str) -> Sp
 
 /// Встроенная таблица в порядке [`Species::ALL`]: числа из `createAttributes`
 /// и `EntityType` 26.3.
-const BUILTIN: [SpeciesInfo; 33] = [
+const BUILTIN: [SpeciesInfo; 34] = [
     SpeciesInfo {
         size: (0.9, 1.4),
         eye_height: 1.3,
@@ -823,6 +824,19 @@ const BUILTIN: [SpeciesInfo; 33] = [
             "minecraft:entities/bee",
         )
     },
+    SpeciesInfo {
+        category: Category::WaterCreature,
+        size: (0.8, 0.8),
+        eye_height: 0.4,
+        max_health: 10.0,
+        speed: 0.7,
+        follow_range: 16.0,
+        ..base(
+            "minecraft:squid",
+            "minecraft:entity.squid",
+            "minecraft:entities/squid",
+        )
+    },
 ];
 
 static INSTALLED: std::sync::OnceLock<Vec<SpeciesInfo>> = std::sync::OnceLock::new();
@@ -862,7 +876,7 @@ fn merge(b: &SpeciesInfo, types: &[chunkwake_data::world::EntityTypeInfo]) -> Sp
 }
 
 impl Species {
-    pub const ALL: [Species; 33] = [
+    pub const ALL: [Species; 34] = [
         Species::Cow,
         Species::Pig,
         Species::Sheep,
@@ -896,6 +910,7 @@ impl Species {
         Species::Salmon,
         Species::GlowSquid,
         Species::Bee,
+        Species::Squid,
     ];
 
     /// Данные вида: выгрузка, если она установлена, иначе встроенные.
@@ -1981,7 +1996,9 @@ pub fn dist2(a: [f64; 3], b: [f64; 3]) -> f64 {
 /// `GroundPathNavigation`.
 fn navigation_for(species: Species) -> Navigation {
     match species {
-        Species::Cod | Species::Salmon | Species::GlowSquid => Navigation::water(false),
+        Species::Cod | Species::Salmon | Species::GlowSquid | Species::Squid => {
+            Navigation::water(false)
+        }
         Species::Bat | Species::Phantom => Navigation::flying(),
         Species::Bee => Navigation::flying(),
         Species::Drowned => Navigation::amphibious(),
@@ -1995,7 +2012,7 @@ pub fn walker(m: &Mob, w: &World, difficulty: u8, in_water: bool) -> path::Walke
     let animal = m.species.is_animal();
     let aquatic = matches!(
         m.species,
-        Species::Cod | Species::Salmon | Species::GlowSquid
+        Species::Cod | Species::Salmon | Species::GlowSquid | Species::Squid
     );
     path::Walker {
         pos: m.pos,
@@ -4475,9 +4492,31 @@ mod tests {
             Species::GlowSquid.category(),
             Category::UndergroundWaterCreature
         );
+        assert_eq!(Species::Squid.category(), Category::WaterCreature);
         // Соседние игроки делят квадраты: 17 × 18, а не 2 × 289.
         assert_eq!(spawn_cap_chunks(&[(0, 0), (1, 0)]), 306);
         assert_eq!(spawn_cap_chunks(&[]), 0);
+    }
+
+    /// Спрут: данные вида, лут и водная навигация.
+    #[test]
+    fn squid_species_data_and_water_navigation() {
+        assert_eq!(Species::Squid.max_health(), 10.0);
+        assert_eq!(Species::Squid.size(), (0.8, 0.8));
+        assert_eq!(Species::Squid.speed(), 0.7);
+        assert_eq!(Species::Squid.info().loot, "minecraft:entities/squid");
+        let m = Mob::new(Species::Squid, [0.5, 64.0, 0.5], 1);
+        assert!(matches!(m.nav.kind, path::NavKind::Water { .. }));
+        let (shape, water) = flat_world(&floor);
+        let w = World {
+            shape: &*shape,
+            water: &*water,
+            cell: None,
+            info: None,
+            min_y: -64,
+        };
+        let walk = walker(&m, &w, 2, true);
+        assert_eq!(walk.malus(path::PathType::Water), 0.0);
     }
 
     /// `PotentialCalculator` и локальный лимит на игрока.

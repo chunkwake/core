@@ -1693,9 +1693,9 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
                 Selector::new(vec![nearest(1, false)]),
             );
         }
-        // Рыба и светящийся спрут: `FishSwimGoal` (
+        // Рыба, спрут и светящийся спрут: `FishSwimGoal` (
         // `RandomSwimmingGoal(1.0, 40)`); без целей.
-        Species::Cod | Species::Salmon | Species::GlowSquid => {
+        Species::Cod | Species::Salmon | Species::GlowSquid | Species::Squid => {
             return (
                 Selector::new(vec![(
                     4,
