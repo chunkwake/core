@@ -288,6 +288,17 @@ public final class PlayerImpl {
         playEffect(location, effect, value.intValue());
     }
 
+    /**
+     * Paper `Player.sendMap(MapView)`: полный кадр карты (128×128, без значков)
+     * уходит только этому игроку через `map_item_data`.
+     */
+    public void sendMap(org.bukkit.map.MapView map) {
+        if (map == null) {
+            throw new IllegalArgumentException("MapView cannot be null");
+        }
+        playerEffect(MapWire.command(map));
+    }
+
     private void spawnParticle0(Particle particle, double x, double y, double z, int count,
             double offsetX, double offsetY, double offsetZ, double speed,
             Object data, boolean force) {

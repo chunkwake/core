@@ -805,6 +805,23 @@ fn rotation(yaw: f64, nether_time: Option<i64>) -> i8 {
     (d * 16.0 / 360.0) as i32 as i8
 }
 
+/// `ClientboundMapItemDataPacket` для всей карты (`CraftPlayer.sendMap`):
+/// патч 128×128 с самого начала, без значков.
+pub fn full_update(scale: u8, locked: bool, colors: &[u8]) -> Option<Update> {
+    (colors.len() == 128 * 128).then(|| Update {
+        scale,
+        locked,
+        decorations: None,
+        patch: Some(Patch {
+            x: 0,
+            z: 0,
+            width: 128,
+            height: 128,
+            colors: colors.to_vec(),
+        }),
+    })
+}
+
 /// `ClientboundMapItemDataPacket`.
 pub fn encode(packet_id: i32, map_id: i32, u: &Update) -> Vec<u8> {
     let mut w = chunkwake_protocol::Writer::new();
@@ -1116,5 +1133,18 @@ mod tests {
             b,
             vec![52, 7, 1, 0, 1, 1, 0, 1, 255, 3, 0, 1, 1, 2, 3, 1, 9]
         );
+    }
+
+    #[test]
+    fn full_update_is_whole_patch_and_requires_16384_colors() {
+        let colors = vec![7u8; 128 * 128];
+        let u = full_update(2, true, &colors).expect("full update");
+        assert_eq!(u.scale, 2);
+        assert!(u.locked);
+        assert!(u.decorations.is_none());
+        let p = u.patch.expect("patch");
+        assert_eq!((p.x, p.z, p.width, p.height), (0, 0, 128, 128));
+        assert_eq!(p.colors.len(), 128 * 128);
+        assert!(full_update(0, false, &[0u8; 100]).is_none());
     }
 }

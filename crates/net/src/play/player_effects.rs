@@ -35,6 +35,12 @@ impl PlayPlan {
             );
             return Some("1".into());
         }
+        if let Some(rest) = command.strip_prefix("sendmap ") {
+            let Ok(id) = rest.trim().parse::<i32>() else {
+                return Some("0".into());
+            };
+            return Some(if self.send_map(uuid, id) { "1" } else { "0" }.into());
+        }
         if let Some(rest) = command.strip_prefix("hideplayer ") {
             let Ok(target) = Uuid::parse_str(rest.trim()) else {
                 return Some("0".into());

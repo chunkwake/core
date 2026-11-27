@@ -96,6 +96,23 @@ impl PlayPlan {
         store.maps.get_mut(&id).map(f)
     }
 
+    /// `CraftPlayer.sendMap`: полный кадр 128×128 этой карты только игроку.
+    /// `false` — карты нет (ни в памяти, ни на диске) или у неё нет цветов.
+    pub(super) fn send_map(&self, uuid: Uuid, id: i32) -> bool {
+        let packet = {
+            let mut store = self.maps.lock().unwrap();
+            self.with_map(&mut store, id, |map| {
+                crate::maps::full_update(map.scale, map.locked, &map.colors)
+                    .map(|u| crate::maps::encode(self.ids.map_item_data, id, &u))
+            })
+        };
+        let Some(packet) = packet.flatten() else {
+            return false;
+        };
+        self.send_to(uuid, packet);
+        true
+    }
+
     /// `ServerLevel.getFreeMapId`: следующий номер после `last_id.dat`.
     fn free_map_id(&self, store: &mut MapStore) -> i32 {
         let last = *store.last_id.get_or_insert_with(|| {
