@@ -197,10 +197,16 @@ impl PlayPlan {
             killed_by_player: false,
             smelt: &|_| None,
         };
-        for (drop, count) in crate::loot::roll(&self.survival.loot, &ctx, &mut rand::thread_rng()) {
-            if let Some(id) = self.item_id(&drop) {
-                self.pop_resource(pos, Stack::new(id, count.min(self.max_stack(id).max(1))));
-            }
+        for drop in crate::loot::roll(&self.survival.loot, &ctx, &mut rand::thread_rng()) {
+            let Some(id) = self.item_id(&drop.name) else {
+                continue;
+            };
+            let Some(extra) = self.loot_extra(&drop, Some(pos)) else {
+                continue;
+            };
+            let mut stack = Stack::new(id, drop.count.min(self.max_stack(id).max(1)));
+            stack.extra = extra;
+            self.pop_resource(pos, stack);
         }
         self.reset_honey(pos, s);
         self.release_hive_bees(pos, s, by);

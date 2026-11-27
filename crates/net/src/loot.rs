@@ -33,8 +33,26 @@ pub struct Ctx<'a> {
 /// Свойство сущности по ключу.
 pub type Props<'a> = dyn Fn(&str) -> Option<String> + 'a;
 
-/// Предметы (имя, количество) из таблицы блока `block`.
-pub fn roll(loot: &BlockLoot, c: &Ctx, rng: &mut impl Rng) -> Vec<(String, i32)> {
+/// `ExplorationMapFunction`: куда искать структуру и какой значок ставить.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExplorationMapSpec {
+    pub destination: String,
+    pub decoration: String,
+    pub zoom: u8,
+    pub search_radius: i32,
+    pub skip_existing: bool,
+}
+
+/// Выпавший предмет: имя, количество и (для `exploration_map`) параметры карты.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LootDrop {
+    pub name: String,
+    pub count: i32,
+    pub exploration: Option<ExplorationMapSpec>,
+}
+
+/// Предметы из таблицы блока `block`.
+pub fn roll(loot: &BlockLoot, c: &Ctx, rng: &mut impl Rng) -> Vec<LootDrop> {
     let mut out = Vec::new();
     roll_table(loot, c, c.table, rng, &mut out, 0);
     out
@@ -45,7 +63,7 @@ fn roll_table(
     c: &Ctx,
     name: &str,
     rng: &mut impl Rng,
-    out: &mut Vec<(String, i32)>,
+    out: &mut Vec<LootDrop>,
     depth: u8,
 ) {
     let Some(table) = loot.table(name) else {
@@ -90,14 +108,19 @@ fn roll_table(
             };
             let mut name = name.to_owned();
             let mut count = 1;
+            let mut exploration = None;
             for f in list(item.get("modifier"))
                 .chain(list(pool.get("modifier")))
                 .chain(list(table.get("modifier")))
             {
-                count = e.function(f, count, &mut name, rng);
+                count = e.function(f, count, &mut name, &mut exploration, rng);
             }
             if count > 0 {
-                out.push((name, count));
+                out.push(LootDrop {
+                    name,
+                    count,
+                    exploration,
+                });
             }
         }
     }
@@ -349,7 +372,14 @@ impl Eval<'_> {
     }
 
     /// Функция предмета над количеством.
-    fn function(&self, f: &Value, count: i32, name: &mut String, rng: &mut impl Rng) -> i32 {
+    fn function(
+        &self,
+        f: &Value,
+        count: i32,
+        name: &mut String,
+        exploration: &mut Option<ExplorationMapSpec>,
+        rng: &mut impl Rng,
+    ) -> i32 {
         if !self.conditions(f, rng) {
             return count;
         }
@@ -428,6 +458,32 @@ impl Eval<'_> {
                 }
                 n
             }
+            // `ExplorationMapFunction`: карту и значок делает вызывающий
+            // (`loot_extra`), здесь только параметры поиска.
+            "minecraft:exploration_map" => {
+                let text = |key, default| {
+                    f.get(key)
+                        .and_then(Value::as_str)
+                        .unwrap_or(default)
+                        .to_owned()
+                };
+                *exploration = Some(ExplorationMapSpec {
+                    destination: text("destination", "#minecraft:on_treasure_maps"),
+                    decoration: text("decoration", "minecraft:woodland_mansion"),
+                    zoom: f
+                        .get("zoom")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(2)
+                        .clamp(0, 255) as u8,
+                    search_radius: f.get("search_radius").and_then(Value::as_i64).unwrap_or(50)
+                        as i32,
+                    skip_existing: f
+                        .get("skip_existing_chunks")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true),
+                });
+                count
+            }
             _ => count,
         }
     }
@@ -491,6 +547,9 @@ mod tests {
             },
             rng,
         )
+        .into_iter()
+        .map(|d| (d.name, d.count))
+        .collect()
     }
 
     #[test]
@@ -543,6 +602,9 @@ mod tests {
                 },
                 &mut rand::rngs::StdRng::seed_from_u64(3),
             )
+            .into_iter()
+            .map(|d| (d.name, d.count))
+            .collect::<Vec<_>>()
         };
         assert_eq!(
             run("false", 0, 0),
@@ -552,6 +614,47 @@ mod tests {
             ]
         );
         assert_eq!(run("true", 1, 2), [("minecraft:cooked_mutton".into(), 3)]);
+    }
+
+    #[test]
+    fn exploration_map_function_keeps_spec() {
+        let mut l = BlockLoot::default();
+        l.tables.insert(
+            "minecraft:chests/shipwreck_map".into(),
+            json!({"pools": [{"rolls": 1, "entries": [
+                {"type": "minecraft:item", "name": "minecraft:buried_treasure_map", "modifier": [
+                    {"type": "minecraft:exploration_map",
+                     "decoration": "minecraft:red_x",
+                     "destination": "#minecraft:on_treasure_maps",
+                     "skip_existing_chunks": false,
+                     "zoom": 1}]}]}]}),
+        );
+        let out = roll(
+            &l,
+            &Ctx {
+                prop: &|_| None,
+                table: "minecraft:chests/shipwreck_map",
+                block: "",
+                tool: None,
+                level: &|_| 0,
+                entity: None,
+                killed_by_player: false,
+                smelt: &|_| None,
+            },
+            &mut rand::rngs::StdRng::seed_from_u64(1),
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "minecraft:buried_treasure_map");
+        assert_eq!(
+            out[0].exploration,
+            Some(ExplorationMapSpec {
+                destination: "#minecraft:on_treasure_maps".into(),
+                decoration: "minecraft:red_x".into(),
+                zoom: 1,
+                search_radius: 50,
+                skip_existing: false,
+            })
+        );
     }
 
     #[test]
@@ -586,6 +689,9 @@ mod tests {
                 },
                 rng,
             )
+            .into_iter()
+            .map(|d| (d.name, d.count))
+            .collect::<Vec<_>>()
         };
         let mut rng = rand::rngs::StdRng::seed_from_u64(5);
         let small: i32 = (0..300)

@@ -3089,17 +3089,21 @@ impl PlayPlan {
                     killed_by_player: false,
                     smelt: &|_| None,
                 };
-                for (item, count) in
-                    crate::loot::roll(&self.survival.loot, &ctx, &mut rand::thread_rng())
-                {
-                    if let Some(id) = self.item_id(&item) {
-                        self.drop_item(
-                            [p[0] as f64 + 0.5, p[1] as f64 + 0.5, p[2] as f64 + 0.5],
-                            [0.0, 0.2, 0.0],
-                            Stack::new(id, count.min(self.max_stack(id).max(1))),
-                            items::BLOCK_DELAY,
-                        );
-                    }
+                for drop in crate::loot::roll(&self.survival.loot, &ctx, &mut rand::thread_rng()) {
+                    let Some(id) = self.item_id(&drop.name) else {
+                        continue;
+                    };
+                    let Some(extra) = self.loot_extra(&drop, Some(p)) else {
+                        continue;
+                    };
+                    let mut stack = Stack::new(id, drop.count.min(self.max_stack(id).max(1)));
+                    stack.extra = extra;
+                    self.drop_item(
+                        [p[0] as f64 + 0.5, p[1] as f64 + 0.5, p[2] as f64 + 0.5],
+                        [0.0, 0.2, 0.0],
+                        stack,
+                        items::BLOCK_DELAY,
+                    );
                 }
                 self.finish_farm_action(v);
                 return;
@@ -4292,8 +4296,12 @@ impl PlayPlan {
                 smelt: &smelt,
             };
             let mut rng = rand::thread_rng();
-            for (name, count) in crate::loot::roll(&self.survival.loot, &ctx, &mut rng) {
-                let Some(item) = self.item_id(&name) else {
+            for drop in crate::loot::roll(&self.survival.loot, &ctx, &mut rng) {
+                let Some(item) = self.item_id(&drop.name) else {
+                    continue;
+                };
+                let origin = vpos.map(|v| v.floor() as i32);
+                let Some(extra) = self.loot_extra(&drop, Some(origin)) else {
                     continue;
                 };
                 let dx = ppos[0] - vpos[0];
@@ -4301,10 +4309,12 @@ impl PlayPlan {
                 let dz = ppos[2] - vpos[2];
                 let len = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-4);
                 let vel = [dx / len * 0.3, dy / len * 0.3 + 0.1, dz / len * 0.3];
+                let mut stack = Stack::new(item, drop.count.min(self.max_stack(item).max(1)));
+                stack.extra = extra;
                 self.drop_item(
                     [vpos[0], vpos[1] + 1.2, vpos[2]],
                     vel,
-                    Stack::new(item, count.min(self.max_stack(item).max(1))),
+                    stack,
                     items::BLOCK_DELAY,
                 );
             }

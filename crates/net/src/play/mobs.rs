@@ -2345,12 +2345,16 @@ impl PlayPlan {
             smelt: &smelt,
         };
         let center = [m.pos[0], m.pos[1] + m.size().1 / 2.0, m.pos[2]];
+        let origin = m.pos.map(|v| v.floor() as i32);
         let mut drops: Vec<Stack> =
             crate::loot::roll(&self.survival.loot, &ctx, &mut rand::thread_rng())
                 .into_iter()
-                .filter_map(|(name, count)| {
-                    let item = self.item_id(&name)?;
-                    Some(Stack::new(item, count.min(self.max_stack(item).max(1))))
+                .filter_map(|drop| {
+                    let item = self.item_id(&drop.name)?;
+                    let extra = self.loot_extra(&drop, Some(origin))?;
+                    let mut stack = Stack::new(item, drop.count.min(self.max_stack(item).max(1)));
+                    stack.extra = extra;
+                    Some(stack)
                 })
                 .collect();
         let mut xp = if e.killer.is_some() {

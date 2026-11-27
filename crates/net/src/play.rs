@@ -20297,6 +20297,35 @@ impl PlayPlan {
             .collect()
     }
 
+    /// `ExplorationMapFunction.run`: карта к ближайшей структуре тега и значок
+    /// `+`. `None` — структура не найдена (у лут-функции `on_fail: discard`).
+    fn loot_extra(&self, drop: &crate::loot::LootDrop, origin: Option<[i32; 3]>) -> Option<u32> {
+        let Some(spec) = &drop.exploration else {
+            return Some(0);
+        };
+        let origin = origin?;
+        let pos = self.locate_structure(&spec.destination, origin)?;
+        // `findNearestMapStructure` ищет в радиусе `search_radius` чанков.
+        let reach = i64::from(spec.search_radius.max(0)) * 16;
+        let dx = i64::from(pos[0]) - i64::from(origin[0]);
+        let dz = i64::from(pos[2]) - i64::from(origin[2]);
+        if dx.abs().max(dz.abs()) > reach {
+            return None;
+        }
+        let decoration = *self.survival.map_decorations.get(&spec.decoration)?;
+        // `skip_existing` в ванили не выбирает структуры, уже отмеченные на
+        // картах; нашего реестра «известных» структур пока нет.
+        let _ = spec.skip_existing;
+        let map_id = self.create_map(pos[0], pos[2], spec.zoom, true, true);
+        self.add_map_target(map_id, decoration, pos[0], pos[2], "+");
+        Some(chunkwake_protocol::components::intern(
+            chunkwake_protocol::components::Extra {
+                map_id: Some(map_id),
+                ..Default::default()
+            },
+        ))
+    }
+
     /// Дроп блока `state`, сломанного предметом `held`, по таблице лута.
     fn block_loot(&self, state: u32, held: Slot) -> Vec<Stack> {
         let Some(block) = self.survival.placement.name(state) else {
@@ -20324,9 +20353,12 @@ impl PlayPlan {
         };
         crate::loot::roll(&self.survival.loot, &ctx, &mut rand::thread_rng())
             .into_iter()
-            .filter_map(|(name, count)| {
-                let item = self.item_id(&name)?;
-                Some(Stack::new(item, count.min(self.max_stack(item).max(1))))
+            .filter_map(|drop| {
+                let item = self.item_id(&drop.name)?;
+                let extra = self.loot_extra(&drop, None)?;
+                let mut stack = Stack::new(item, drop.count.min(self.max_stack(item).max(1)));
+                stack.extra = extra;
+                Some(stack)
             })
             .collect()
     }
@@ -22625,13 +22657,15 @@ impl PlayPlan {
                     killed_by_player: true,
                     smelt: &|_| None,
                 };
-                for (drop, count) in
-                    crate::loot::roll(&self.survival.loot, &ctx, &mut rand::thread_rng())
-                {
-                    let Some(id) = self.item_id(&drop) else {
+                for drop in crate::loot::roll(&self.survival.loot, &ctx, &mut rand::thread_rng()) {
+                    let Some(id) = self.item_id(&drop.name) else {
                         continue;
                     };
-                    let stack = Stack::new(id, count.min(self.max_stack(id).max(1)));
+                    let Some(extra) = self.loot_extra(&drop, Some(pos)) else {
+                        continue;
+                    };
+                    let mut stack = Stack::new(id, drop.count.min(self.max_stack(id).max(1)));
+                    stack.extra = extra;
                     let (from, vel) = if tr.drop_from_face {
                         crate::transform::pop_from_face(pos, face, rand::random())
                     } else {
@@ -25263,19 +25297,24 @@ impl PlayPlan {
         };
         let mut slots = self.container_slots(pos).unwrap_or_default();
         let mut next = 0usize;
-        for (name, count) in drops {
-            let Some(item) = self.item_id(&name) else {
+        for drop in drops {
+            let Some(item) = self.item_id(&drop.name) else {
+                continue;
+            };
+            let Some(extra) = self.loot_extra(&drop, Some(pos)) else {
                 continue;
             };
             let max = self.max_stack(item).max(1);
-            let mut left = count;
+            let mut left = drop.count;
             while left > 0 && next < slots.len() {
                 if slots[next].is_some() {
                     next += 1;
                     continue;
                 }
                 let n = left.min(max);
-                slots[next] = Some(Stack::new(item, n));
+                let mut stack = Stack::new(item, n);
+                stack.extra = extra;
+                slots[next] = Some(stack);
                 left -= n;
                 next += 1;
             }

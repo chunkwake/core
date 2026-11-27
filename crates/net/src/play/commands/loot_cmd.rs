@@ -338,12 +338,15 @@ fn roll_table(ctx: &Context<'_>, source: &Source, table: &str) -> Result<Vec<Sta
     };
     let mut rng = rand::thread_rng();
     let out = crate::loot::roll(&ctx.plan.survival.loot, &loot_ctx, &mut rng);
-    let _ = source;
+    let origin = pose(ctx, source).0.map(|v| v.floor() as i32);
     Ok(out
         .into_iter()
-        .filter_map(|(item, count)| {
-            let id = ctx.plan.item_id_named(&item)?;
-            Some(Stack::new(id, count.min(ctx.plan.stack_limit(id))))
+        .filter_map(|drop| {
+            let id = ctx.plan.item_id_named(&drop.name)?;
+            let extra = ctx.plan.loot_extra(&drop, Some(origin))?;
+            let mut stack = Stack::new(id, drop.count.min(ctx.plan.stack_limit(id)));
+            stack.extra = extra;
+            Some(stack)
         })
         .collect())
 }
