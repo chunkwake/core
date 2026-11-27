@@ -66,6 +66,8 @@ struct MobMeta {
     golem: i32,
     /// `Pufferfish.PUFF_STATE`.
     puff: i32,
+    /// `TropicalFish.DATA_ID_TYPE_VARIANT`.
+    tropical: i32,
 }
 
 impl MobMeta {
@@ -80,6 +82,7 @@ impl MobMeta {
             weather: m.weather_state.id(),
             golem: 0,
             puff: i32::from(m.puff_state),
+            tropical: m.tropical_variant,
         }
     }
 
@@ -126,6 +129,10 @@ impl MobMeta {
             // `AbstractFish` (18): 19.
             Species::Pufferfish if old.is_none_or(|m| m.puff != self.puff) => {
                 out.push((19, Meta::Int(self.puff)));
+            }
+            // `TropicalFish.DATA_ID_TYPE_VARIANT`: тот же 19 в своей иерархии.
+            Species::TropicalFish if old.is_none_or(|m| m.tropical != self.tropical) => {
+                out.push((19, Meta::Int(self.tropical)));
             }
             _ => {}
         }
@@ -493,6 +500,14 @@ impl PlayPlan {
             m.set_size(
                 mb::cube::spawn_size(rand::random(), rand::random(), special),
                 true,
+            );
+        }
+        // `TropicalFish.finalizeSpawn`: случайный узор и цвета (0..12/16).
+        if finalize && species == Species::TropicalFish {
+            m.tropical_variant = mb::tropical_variant(
+                rand::random::<u8>() % 12,
+                rand::random::<u8>() % 16,
+                rand::random::<u8>() % 16,
             );
         }
         // `Zombie.finalizeSpawn`: шанс ломать двери `specialMultiplier × 0.1`.
@@ -2316,6 +2331,11 @@ impl PlayPlan {
             if let Some(crops) = nbt.get("CropsGrownSincePollination").and_then(Tag::as_i64) {
                 m.crops_grown = crops.clamp(0, 10) as u8;
             }
+        }
+        if m.species == Species::TropicalFish
+            && let Some(variant) = nbt.get("Variant").and_then(Tag::as_i64)
+        {
+            m.tropical_variant = variant as i32;
         }
         if m.species == Species::CopperGolem {
             // `getLongOr`: принимаем любое число (`1`, `1L`, ...).
@@ -5006,6 +5026,9 @@ pub(super) fn mob_to_nbt(
         Species::Chicken => {
             c.insert("EggLayTime".into(), Tag::Int(m.egg_time));
         }
+        Species::TropicalFish => {
+            c.insert("Variant".into(), Tag::Int(m.tropical_variant));
+        }
         Species::Bee => {
             c.insert("AngerTime".into(), Tag::Int(m.anger_time as i32));
             c.insert("HasNectar".into(), Tag::Byte(i8::from(m.has_nectar)));
@@ -5156,6 +5179,20 @@ pub(super) fn mob_from_nbt(
             .and_then(Tag::as_str)
             .and_then(crate::mobs::WeatherState::from_name)
             .unwrap_or_default();
+    }
+    if species == Species::TropicalFish {
+        m.tropical_variant = int("Variant").unwrap_or(0);
+    }
+    if species == Species::Bee {
+        m.anger_time = int("AngerTime").unwrap_or(0).max(0) as u32;
+        m.has_nectar = byte("HasNectar").is_some_and(|b| b != 0);
+        m.has_stung = byte("HasStung").is_some_and(|b| b != 0);
+        m.crops_grown = int("CropsGrownSincePollination").unwrap_or(0).clamp(0, 10) as u8;
+        if let Some(Tag::IntArray(a)) = c.get("HivePos")
+            && a.len() == 3
+        {
+            m.hive_pos = Some([a[0], a[1], a[2]]);
+        }
     }
     if species == Species::Creeper {
         m.powered = byte("powered").is_some_and(|b| b != 0);
@@ -6823,6 +6860,24 @@ mod tests {
         // Острота прибавляется до умножения на заряд.
         assert!(near(PlayPlan::sweep_damage(6.0, 1.5, 3, 1.0), 7.0));
         assert!(near(PlayPlan::sweep_damage(6.0, 1.5, 3, 0.5), 3.5));
+    }
+
+    #[test]
+    fn tropical_variant_nbt_roundtrip() {
+        let mut m = Mob::new(Species::TropicalFish, [0.5, 64.0, 0.5], 1);
+        m.tropical_variant = mb::tropical_variant(7, 3, 11);
+        let nbt = mob_to_nbt(&m, &std::collections::HashMap::new(), &[]);
+        assert_eq!(
+            nbt.get("Variant"),
+            Some(&Tag::Int(mb::tropical_variant(7, 3, 11)))
+        );
+        let back = mob_from_nbt(
+            &nbt,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(back.tropical_variant, m.tropical_variant);
     }
 
     #[test]

@@ -1295,7 +1295,8 @@ pub struct Mob {
     /// `Bee`: улей, куда возвращаться, и точка входа в текущем тике.
     pub hive_pos: Option<[i32; 3]>,
     pub enter_hive: Option<[i32; 3]>,
-    /// `Bee`: жало потеряно; смерть через `time_since_sting`.
+    /// `TropicalFish`: упакованный вариант (`Pattern | base << 16 | pattern << 24`).
+    pub tropical_variant: i32,
     pub has_stung: bool,
     pub time_since_sting: u32,
     /// `Pufferfish`: стадия раздувания 0..2 и счётчики `inflate/deflate`.
@@ -1413,6 +1414,7 @@ impl Mob {
             enter_hive: None,
             has_stung: false,
             time_since_sting: 0,
+            tropical_variant: 0,
             puff_state: 0,
             inflate: 0,
             deflate: 0,
@@ -2100,6 +2102,11 @@ fn wrap(a: f32) -> f32 {
 
 pub fn dist2(a: [f64; 3], b: [f64; 3]) -> f64 {
     (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)
+}
+
+/// `TropicalFish.packVariant`: `Pattern | baseColor << 16 | patternColor << 24`.
+pub fn tropical_variant(pattern: u8, base_color: u8, pattern_color: u8) -> i32 {
+    i32::from(pattern) | (i32::from(base_color) << 16) | (i32::from(pattern_color) << 24)
 }
 
 /// `Mob.createNavigation`: рыбы и светящийся спрут ходят
@@ -4802,6 +4809,8 @@ mod tests {
             m.nav.kind,
             path::NavKind::Water { breaching: false }
         ));
+        assert_eq!(tropical_variant(3, 4, 5), 3 | (4 << 16) | (5 << 24));
+        assert_eq!(tropical_variant(0, 0, 0), 0);
     }
 
     /// Иглобрюх: данные вида, водная навигация и имя для ведра/спавна.
