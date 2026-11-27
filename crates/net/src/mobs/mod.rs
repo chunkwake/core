@@ -1297,6 +1297,11 @@ pub struct Mob {
     pub enter_hive: Option<[i32; 3]>,
     /// `TropicalFish`: упакованный вариант (`Pattern | base << 16 | pattern << 24`).
     pub tropical_variant: i32,
+    /// `Dolphin`: предмет в пасти и цель подбора.
+    pub carried_item: Option<chunkwake_protocol::inventory::Stack>,
+    pub item_target: Option<[f64; 3]>,
+    pub item_target_id: Option<i32>,
+    pub play_ticks: u32,
     pub has_stung: bool,
     pub time_since_sting: u32,
     /// `Pufferfish`: стадия раздувания 0..2 и счётчики `inflate/deflate`.
@@ -1415,6 +1420,10 @@ impl Mob {
             has_stung: false,
             time_since_sting: 0,
             tropical_variant: 0,
+            carried_item: None,
+            item_target: None,
+            item_target_id: None,
+            play_ticks: 0,
             puff_state: 0,
             inflate: 0,
             deflate: 0,
@@ -2434,6 +2443,20 @@ fn pufferfish_tick(m: &mut Mob, s: &mut Senses) {
     }
 }
 
+/// `Dolphin`: плыть к предмету в воде, пока `ItemGoal` его не подберёт.
+fn dolphin_ai_step(m: &mut Mob) {
+    m.no_gravity = true;
+    let Some(p) = m.item_target else {
+        return;
+    };
+    if dist2(p, m.pos) < 4.0 {
+        m.yya = 0.0;
+        m.zza = 0.0;
+    } else {
+        m.move_ctl.set_wanted(p, 1.0);
+    }
+}
+
 fn bee_ai_step(m: &mut Mob, s: &mut Senses) {
     m.no_gravity = true;
     if m.anger_time > 0 {
@@ -2441,7 +2464,7 @@ fn bee_ai_step(m: &mut Mob, s: &mut Senses) {
     }
     if m.has_stung {
         m.time_since_sting = m.time_since_sting.saturating_add(1);
-        if m.time_since_sting % 5 == 0 {
+        if m.time_since_sting.is_multiple_of(5) {
             let bound = (1200i32 - m.time_since_sting as i32).clamp(1, 1200);
             if ((s.rand)() * f64::from(bound)) as i32 == 0 {
                 hurt(m, m.health, Source::default(), 0.0);
@@ -2482,20 +2505,22 @@ fn bee_ai_step(m: &mut Mob, s: &mut Senses) {
         }
         return;
     }
-    if m.anger_time == 0 && m.target.is_none() && !m.has_nectar {
-        if let Some(f) = m.flower_target {
-            let at = [f[0] as f64 + 0.5, f[1] as f64 + 0.5, f[2] as f64 + 0.5];
-            if dist2(at, m.pos) < 4.0 {
-                m.has_nectar = true;
-                m.crops_grown = 0;
-                m.flower_target = None;
-                m.yya = 0.0;
-                m.zza = 0.0;
-            } else {
-                m.move_ctl.set_wanted(at, 1.0);
-            }
-            return;
+    if m.anger_time == 0
+        && m.target.is_none()
+        && !m.has_nectar
+        && let Some(f) = m.flower_target
+    {
+        let at = [f[0] as f64 + 0.5, f[1] as f64 + 0.5, f[2] as f64 + 0.5];
+        if dist2(at, m.pos) < 4.0 {
+            m.has_nectar = true;
+            m.crops_grown = 0;
+            m.flower_target = None;
+            m.yya = 0.0;
+            m.zza = 0.0;
+        } else {
+            m.move_ctl.set_wanted(at, 1.0);
         }
+        return;
     }
     let Some(p) = m
         .target
@@ -2637,6 +2662,12 @@ fn server_ai_step(m: &mut Mob, w: &World, s: &mut Senses) {
     }
     if m.species == Species::Bee {
         bee_ai_step(m, s);
+        path::move_control(m, w, in_water(m, w));
+        goals::look_tick(m);
+        return;
+    }
+    if m.species == Species::Dolphin && m.item_target.is_some() {
+        dolphin_ai_step(m);
         path::move_control(m, w, in_water(m, w));
         goals::look_tick(m);
         return;
@@ -5003,6 +5034,40 @@ mod tests {
         };
         tick(&mut m, &w, &mut s);
         assert!(!m.alive(), "bee survived the stinger death roll");
+    }
+
+    /// Дельфин плывёт к цели-предмету (`Dolphin.ItemGoal`).
+    #[test]
+    fn dolphin_swims_to_item_target() {
+        let (shape, water) = flat_world(&floor);
+        let w = World {
+            shape: &*shape,
+            water: &*water,
+            cell: None,
+            info: None,
+            min_y: -64,
+        };
+        let mut m = Mob::new(Species::Dolphin, [0.5, 64.5, 0.5], 1);
+        m.item_target = Some([5.0, 64.5, 0.5]);
+        m.item_target_id = Some(1);
+        let mut rnd = || 0.5;
+        let mut s = Senses {
+            players: &[],
+            rand: &mut rnd,
+            prey: &[],
+            tempters: &[],
+            kin: &[],
+            sight: &always_visible,
+            difficulty: 2,
+            entity_id: 1,
+            bright_outside: true,
+            mob_griefing: false,
+            jump_boost: None,
+        };
+        for _ in 0..40 {
+            tick(&mut m, &w, &mut s);
+        }
+        assert!(m.pos[0] > 2.0, "dolphin did not chase item: {:?}", m.pos);
     }
 
     /// Дельфин даёт `Dolphin's Grace` только плывущему игроку в 16 блоках.

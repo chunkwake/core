@@ -903,6 +903,9 @@ impl PlayPlan {
                                     e.mob.crops_grown = e.mob.crops_grown.saturating_add(1);
                                 }
                             }
+                            if species == Species::Dolphin {
+                                self.dolphin_item_tick(&mut e.mob);
+                            }
                             let mut senses = mb::Senses {
                                 players: &watchers,
                                 rand: &mut rand,
@@ -1939,6 +1942,62 @@ impl PlayPlan {
     }
 
     /// Вода ли в блоке (`state_fluid`).
+    /// `Dolphin.ItemGoal`/`PlayWithItemsGoal`: подобрать ближайший предмет
+    /// в 8 блоках, поносить 100–160 тиков и выбросить.
+    fn dolphin_item_tick(&self, m: &mut Mob) {
+        if let Some(stack) = m.carried_item {
+            if m.play_ticks > 0 {
+                m.play_ticks -= 1;
+                return;
+            }
+            m.carried_item = None;
+            let vel = [
+                rand::random::<f64>() * 0.2 - 0.1,
+                0.2,
+                rand::random::<f64>() * 0.2 - 0.1,
+            ];
+            self.drop_item(m.pos, vel, stack, std::time::Duration::ZERO);
+            return;
+        }
+        if let Some(id) = m.item_target_id {
+            let hit = {
+                let dropped = self.sim().dropped.lock().unwrap();
+                dropped.get(&id).map(|d| (d.pos, d.stack))
+            };
+            let Some((pos, stack)) = hit else {
+                m.item_target = None;
+                m.item_target_id = None;
+                return;
+            };
+            m.item_target = Some(pos);
+            if crate::mobs::dist2(pos, m.pos) < 4.0 {
+                self.sim().dropped.lock().unwrap().remove(&id);
+                self.hub.remove_tracked(&[id]);
+                self.mark_drops_dirty();
+                m.item_target = None;
+                m.item_target_id = None;
+                m.carried_item = Some(stack);
+                m.play_ticks = 100 + rand::random::<u32>() % 61;
+            }
+            return;
+        }
+        let near = {
+            let dropped = self.sim().dropped.lock().unwrap();
+            dropped
+                .iter()
+                .filter(|(_, d)| crate::mobs::dist2(d.pos, m.pos) <= 8.0 * 8.0)
+                .min_by(|a, b| {
+                    crate::mobs::dist2(a.1.pos, m.pos)
+                        .total_cmp(&crate::mobs::dist2(b.1.pos, m.pos))
+                })
+                .map(|(&id, d)| (id, d.pos))
+        };
+        if let Some((id, pos)) = near {
+            m.item_target_id = Some(id);
+            m.item_target = Some(pos);
+        }
+    }
+
     /// `BeehiveBlockEntity.addOccupant`: пчела входит в улей, её NBT остаётся
     /// в `bees`; мёд прибавляется на 1 (до 5).
     fn bee_enter_hive(&self, hive: [i32; 3], m: &Mob) {
