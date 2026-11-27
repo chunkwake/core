@@ -138,6 +138,8 @@ pub fn safe_fall_distance(base: f32, jump_boost: Option<u8>) -> f32 {
 pub const INVULNERABLE: u8 = 20;
 /// Анимация смерти до исчезновения (`tickDeath`).
 pub const DEATH_TICKS: u16 = 20;
+/// `EnderDragon.DEATH_TICKS`: смерть длится 200 тиков, дракон поднимается.
+pub const DRAGON_DEATH_TICKS: u16 = 200;
 /// Отбрасывание от удара игрока (`knockback`).
 pub const KNOCKBACK: f64 = 0.4;
 /// Детёныш растёт 20 минут (`AgeableMob.BABY_START_AGE`).
@@ -2760,6 +2762,12 @@ pub fn tick(m: &mut Mob, w: &World, s: &mut Senses) -> bool {
     if m.death_time > 0 {
         m.death_time += 1;
         m.xxa = 0.0;
+        if m.species == Species::EnderDragon {
+            // `EnderDragon.tickDeath`: 200 тиков, подъём на 0.1 за тик.
+            m.vel = [0.0, 0.1, 0.0];
+            m.pos[1] += 0.1;
+            return m.death_time > DRAGON_DEATH_TICKS;
+        }
         let _ = travel(m, 0.0, w);
         return m.death_time > DEATH_TICKS;
     }
@@ -3483,6 +3491,48 @@ mod tests {
         dragon_ai_step(&mut m, &mut s);
         assert!(m.no_gravity);
         assert!(m.vel[1].abs() <= 0.3);
+    }
+
+    #[test]
+    fn dragon_death_lasts_200_ticks_and_rises() {
+        let (shape, water) = flat_world(&floor);
+        let w = World {
+            shape: &*shape,
+            water: &*water,
+            cell: None,
+            info: None,
+            min_y: -64,
+        };
+        let mut m = Mob::new(Species::EnderDragon, [0.5, 80.0, 0.5], 1);
+        m.death_time = 1;
+        let start = m.pos[1];
+        let mut rnd = || 0.5;
+        let sight = |_: [f64; 3], _: [f64; 3]| true;
+        let mut s = Senses {
+            players: &[],
+            rand: &mut rnd,
+            prey: &[],
+            tempters: &[],
+            kin: &[],
+            sight: &sight,
+            difficulty: 2,
+            entity_id: 1,
+            bright_outside: true,
+            mob_griefing: true,
+            jump_boost: None,
+        };
+        for _ in 0..150 {
+            assert!(!tick(&mut m, &w, &mut s));
+        }
+        assert!(m.pos[1] > start + 10.0, "дракон не поднялся: {}", m.pos[1]);
+        let mut removed = false;
+        for _ in 0..60 {
+            if tick(&mut m, &w, &mut s) {
+                removed = true;
+                break;
+            }
+        }
+        assert!(removed, "дракон не исчез через 200 тиков");
     }
 
     #[test]
