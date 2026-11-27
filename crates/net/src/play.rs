@@ -764,6 +764,28 @@ type FastSet<K> = FxHashSet<K>;
 /// Правленые и загруженные столбцы: столбец и номер правки.
 type Columns = FastMap<(i32, i32), (ChunkColumn, u64)>;
 
+thread_local! {
+    /// `edited` активного измерения, уже читаемый этим потоком в `with_world`.
+    /// Вложенный `block` из того же замыкания не берёт `RwLock` заново: если
+    /// в этот момент ждёт писатель (`light_ring`, `install_region`), повторный
+    /// `read` встал бы навсегда — поток держит read-guard и ждёт его же.
+    static HELD_WORLD: std::cell::Cell<Option<HeldColumns>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Чей `edited` и в каком измерении читается: план, измерение, карта.
+#[derive(Clone, Copy)]
+struct HeldColumns(*const PlayPlan, Dimension, *const Columns);
+
+/// Возвращает прежнее значение [`HELD_WORLD`] при выходе из `with_world`.
+struct HeldWorld(Option<HeldColumns>);
+
+impl Drop for HeldWorld {
+    fn drop(&mut self) {
+        HELD_WORLD.with(|c| c.set(self.0));
+    }
+}
+
 /// Изменения блоков по секциям: (локальный индекс, состояние).
 type PendingBlocks = FastMap<(Dimension, [i32; 3]), Vec<(u16, u32)>>;
 
@@ -7654,6 +7676,34 @@ impl PlayPlan {
             return None;
         }
         let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
+        // Под `with_world` карта уже читается этим потоком: второй `read`
+        // может встать за ждущим писателем, поэтому берём тот же снимок.
+        if let Some(HeldColumns(plan, held, ptr)) = HELD_WORLD.with(std::cell::Cell::get)
+            && std::ptr::eq(plan, self as *const PlayPlan)
+            && held == dim
+        {
+            // SAFETY: см. `with_world`: guard жив выше по стеку.
+            let columns: &Columns = unsafe { &*ptr };
+            if let Some((column, _)) = columns.get(&(x >> 4, z >> 4)) {
+                return Some(column.block(lx, ry as usize, lz));
+            }
+            // Столбец снят на пролив света: `light_lock` ждать нельзя, его
+            // держит поток, которому нужен наш read-guard.
+            if state.has_terrain() {
+                return None;
+            }
+            return Some(Self::flat_in(
+                state.void_platform,
+                state.min_y,
+                &state.template,
+                x,
+                y,
+                z,
+                lx,
+                ry as usize,
+                lz,
+            ));
+        }
         {
             let columns = state.edited.read().unwrap();
             if let Some((column, _)) = columns.get(&(x >> 4, z >> 4)) {
@@ -7974,7 +8024,29 @@ impl PlayPlan {
     /// Порядок замков не меняется: вызывающий сначала берёт свой замок
     /// (мобы, предметы, стрелы), потом мир — как было с `block()`.
     fn with_world<R>(&self, f: impl FnOnce(&WorldView<'_>) -> R) -> R {
+        let dim = self.active_dim();
+        // Вложенный `with_world`/`block` на этом потоке: замок уже читается.
+        if let Some(HeldColumns(plan, held, ptr)) = HELD_WORLD.with(std::cell::Cell::get)
+            && std::ptr::eq(plan, self as *const PlayPlan)
+            && held == dim
+        {
+            // SAFETY: указатель взят из живого `RwLockReadGuard` выше по стеку;
+            // пока он не отпущен, карту не может изменить ни один писатель.
+            let columns: &Columns = unsafe { &*ptr };
+            let view = WorldView {
+                columns,
+                template: self.template(),
+                min_y: self.min_y(),
+                flat: !self.has_terrain(),
+                void_platform: self.void_platform(),
+            };
+            return f(&view);
+        }
         let columns = self.dim_state().edited.read().unwrap();
+        let ptr: *const Columns = &*columns;
+        let held = HeldColumns(self as *const PlayPlan, dim, ptr);
+        let previous = HELD_WORLD.with(|c| c.replace(Some(held)));
+        let _held = HeldWorld(previous);
         let view = WorldView {
             columns: &columns,
             template: self.template(),
