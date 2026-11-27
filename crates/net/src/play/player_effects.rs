@@ -25,6 +25,16 @@ impl PlayPlan {
             self.send_to(uuid, packet);
             return Some("1".into());
         }
+        if let Some(rest) = command.strip_prefix("effect ") {
+            let Some((event, pos, data)) = parse_effect(rest) else {
+                return Some("0".into());
+            };
+            self.send_to(
+                uuid,
+                play::level_event(self.ids.level_event, event, pos, data, false),
+            );
+            return Some("1".into());
+        }
         if let Some(rest) = command.strip_prefix("hideplayer ") {
             let Ok(target) = Uuid::parse_str(rest.trim()) else {
                 return Some("0".into());
@@ -201,6 +211,24 @@ impl PlayPlan {
     }
 }
 
+/// `effect <level-event> <x> <y> <z> <data>`: `BlockPos.containing` для пакета.
+fn parse_effect(rest: &str) -> Option<(i32, [i32; 3], i32)> {
+    let mut it = rest.split_whitespace();
+    let event = it.next()?.parse::<i32>().ok()?;
+    let x = it.next()?.parse::<f64>().ok()?;
+    let y = it.next()?.parse::<f64>().ok()?;
+    let z = it.next()?.parse::<f64>().ok()?;
+    let data = it.next()?.parse::<i32>().ok()?;
+    if it.next().is_some() {
+        return None;
+    }
+    Some((
+        event,
+        [x.floor() as i32, y.floor() as i32, z.floor() as i32],
+        data,
+    ))
+}
+
 /// JSON-компонент из hex-байтов (Java присылает UTF-8 Gson JSON).
 fn hex_component(text: &str) -> Option<serde_json::Value> {
     if !text.len().is_multiple_of(2) || text.len() > 32768 {
@@ -237,7 +265,7 @@ fn sound_source(name: &str) -> Option<i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::sound_source;
+    use super::{parse_effect, sound_source};
 
     #[test]
     fn sound_categories_match_vanilla_ordinals() {
@@ -245,5 +273,21 @@ mod tests {
         assert_eq!(sound_source("BLOCKS"), Some(4));
         assert_eq!(sound_source("ui"), Some(10));
         assert_eq!(sound_source("unknown"), None);
+    }
+
+    /// `Player.playEffect`: id события, блок под координатой и data.
+    #[test]
+    fn effect_request_parses_and_floors_position() {
+        assert_eq!(
+            parse_effect("1003 1.5 64.0 -2.5 7"),
+            Some((1003, [1, 64, -3], 7))
+        );
+        assert_eq!(
+            parse_effect("2001 -0.5 64.9 -16.1 0"),
+            Some((2001, [-1, 64, -17], 0))
+        );
+        assert_eq!(parse_effect("1003 1 2 3"), None);
+        assert_eq!(parse_effect("x 1 2 3 0"), None);
+        assert_eq!(parse_effect("1003 1 2 3 0 9"), None);
     }
 }

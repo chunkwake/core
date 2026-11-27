@@ -263,6 +263,31 @@ public final class PlayerImpl {
         playerEffect(line);
     }
 
+    /**
+     * Paper `Player.playEffect(Location, Effect, int)`: клиенту уходит
+     * `level_event` с id эффекта и его data, позиция — блок под локацией.
+     */
+    public void playEffect(org.bukkit.Location location, org.bukkit.Effect effect, int data) {
+        if (location == null) {
+            throw new IllegalArgumentException("Location cannot be null");
+        }
+        if (effect == null) {
+            throw new IllegalArgumentException("Effect cannot be null");
+        }
+        playerEffect(EffectWire.command(location, effect, data));
+    }
+
+    /** `Player.playEffect(Location, Effect, Object)`: data обязана быть `Integer`. */
+    public void playEffect(org.bukkit.Location location, org.bukkit.Effect effect, Object data) {
+        if (data == null) {
+            throw new IllegalArgumentException("Data cannot be null");
+        }
+        if (!(data instanceof Integer value)) {
+            throw new IllegalArgumentException("Data must be an Integer");
+        }
+        playEffect(location, effect, value.intValue());
+    }
+
     private void spawnParticle0(Particle particle, double x, double y, double z, int count,
             double offsetX, double offsetY, double offsetZ, double speed,
             Object data, boolean force) {
