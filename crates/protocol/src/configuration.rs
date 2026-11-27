@@ -116,6 +116,8 @@ pub struct ClientInfo {
     pub skin_parts: u8,
     /// Основная рука: `HumanoidArm` 0 — левая, 1 — правая.
     pub main_hand: u8,
+    /// `text_filtering_enabled`: клиент просит отфильтрованный текст.
+    pub text_filtering: bool,
     pub allows_listing: bool,
 }
 
@@ -128,6 +130,7 @@ impl ClientInfo {
         view_distance: 2,
         skin_parts: 0,
         main_hand: 1,
+        text_filtering: false,
         allows_listing: false,
     };
 
@@ -146,19 +149,20 @@ pub fn read_client_information(r: &mut Reader) -> Result<ClientInfo> {
     let _chat_colors = r.bool()?;
     let skin_parts = r.u8()?;
     let main_hand = r.var_int()?.clamp(0, 1) as u8;
-    let _text_filtering = r.bool()?;
+    let text_filtering = r.bool()?;
     let allows_listing = r.bool()?;
     let _particles = r.var_int()?;
     Ok(ClientInfo {
         view_distance,
         skin_parts,
         main_hand,
+        text_filtering,
         allows_listing,
     })
 }
 
 /// `client_information` клиента (для ботов): язык `en_us`, чат виден и цветной,
-/// фильтра текста нет, частицы все.
+/// частицы все.
 pub fn client_information(id: i32, info: &ClientInfo) -> Vec<u8> {
     let mut w = Writer::new();
     w.var_int(id)
@@ -168,7 +172,7 @@ pub fn client_information(id: i32, info: &ClientInfo) -> Vec<u8> {
         .bool(true)
         .u8(info.skin_parts)
         .var_int(i32::from(info.main_hand))
-        .bool(false)
+        .bool(info.text_filtering)
         .bool(info.allows_listing)
         .var_int(0);
     w.buf
@@ -289,6 +293,7 @@ mod tests {
             view_distance: 12,
             skin_parts: 0x7f,
             main_hand: 0,
+            text_filtering: true,
             allows_listing: true,
         };
         let buf = client_information(3, &info);

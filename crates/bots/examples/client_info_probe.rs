@@ -91,6 +91,7 @@ async fn main() {
         view_distance: 32,
         skin_parts: 0x7f,
         main_hand: 1,
+        text_filtering: false,
         allows_listing: true,
     };
     let steps = [

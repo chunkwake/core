@@ -350,6 +350,7 @@ impl Client {
                 view_distance: view,
                 skin_parts: 0x7f,
                 main_hand: 1,
+                text_filtering: false,
                 allows_listing: true,
             },
         ))

@@ -21,6 +21,7 @@ impl PlayPlan {
             let old = (p.model, p.entry.show_hat);
             p.model = [info.main_hand, info.skin_parts];
             p.view_distance = info.view_distance;
+            p.text_filtering = info.text_filtering;
             p.entry.show_hat = info.shows_hat();
             old
         };

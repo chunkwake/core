@@ -121,10 +121,22 @@ pub(super) fn allow_op_features(nbt: &Compound) -> bool {
     matches!(nbt.get("allow_op_features"), Some(Tag::Byte(b)) if *b != 0)
 }
 
+/// `SignText.getMessages(filtered)`: при включённом фильтре клиента берётся
+/// `filtered_messages`, иначе исходные строки.
+pub(super) fn messages_for(side: &Compound, filtered: bool) -> Vec<Tag> {
+    if filtered
+        && let Some(list) = side.get("filtered_messages").and_then(Tag::as_list)
+        && list.len() >= 4
+    {
+        return list.iter().take(4).cloned().collect();
+    }
+    messages(side)
+}
+
 /// `Style.getClickEvent` каждой строки (`Component.getStyle` самой строки, без
 /// `extra`): сервер исполняет только `run_command`, остальное — клиент.
-pub(super) fn run_commands(side: &Compound) -> Vec<String> {
-    messages(side)
+pub(super) fn run_commands(side: &Compound, filtered: bool) -> Vec<String> {
+    messages_for(side, filtered)
         .iter()
         .filter_map(|line| {
             let Tag::Compound(line) = line else {
@@ -507,19 +519,19 @@ impl PlayPlan {
             return SignUse::Pass;
         }
         // `SignBlockEntity.executeClickCommandsIfPresent`: команды из стилей
-        // строк исполняет сервер; `allow_op_features` включает их как gamemaster.
-        let commands = run_commands(&side(&nbt, front));
+        // строк исполняет сервер (для клиента с фильтром — из
+        // `filtered_messages`); `allow_op_features` включает их как gamemaster.
+        let (name, filtered) = {
+            let players = self.hub.players.lock().unwrap();
+            players.get(&uuid).map_or((None, false), |p| {
+                (Some(p.entry.name.clone()), p.text_filtering)
+            })
+        };
+        let commands = run_commands(&side(&nbt, front), filtered);
         let mut clicked = false;
         if !commands.is_empty() {
             clicked = true;
             if allow_op_features(&nbt) {
-                let name = self
-                    .hub
-                    .players
-                    .lock()
-                    .unwrap()
-                    .get(&uuid)
-                    .map(|p| p.entry.name.clone());
                 if let Some(name) = name {
                     let source = crate::play::commands::dispatch::Source::player(uuid, name, 2);
                     for command in &commands {
@@ -891,7 +903,25 @@ mod tests {
                 Tag::String(String::new()),
             ]),
         );
-        assert_eq!(run_commands(&text), vec!["/say hi".to_owned()]);
+        assert_eq!(run_commands(&text, false), vec!["/say hi".to_owned()]);
+        // С включённым фильтром строка берётся из `filtered_messages`.
+        text.insert(
+            "filtered_messages".into(),
+            Tag::List(vec![
+                Tag::String(String::new()),
+                Tag::String(String::new()),
+                Tag::String(String::new()),
+                Tag::String(String::new()),
+            ]),
+        );
+        assert!(run_commands(&text, true).is_empty());
+        assert_eq!(run_commands(&text, false), vec!["/say hi".to_owned()]);
+        // Меньше четырёх фильтрованных строк — исходные (как `SignText`).
+        text.insert(
+            "filtered_messages".into(),
+            Tag::List(vec![Tag::String(String::new())]),
+        );
+        assert_eq!(run_commands(&text, true), vec!["/say hi".to_owned()]);
     }
 
     #[test]

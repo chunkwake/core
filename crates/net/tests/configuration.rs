@@ -46,6 +46,7 @@ const INFO: ClientInfo = ClientInfo {
     view_distance: 12,
     skin_parts: 0x7f,
     main_hand: 0,
+    text_filtering: false,
     allows_listing: true,
 };
 

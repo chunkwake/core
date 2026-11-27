@@ -1188,6 +1188,8 @@ struct Online {
     model: [u8; 2],
     /// Запрошенная клиентом дальность обзора (`requestedViewDistance`).
     view_distance: u8,
+    /// `text_filtering_enabled` из `client_information`.
+    text_filtering: bool,
     /// Живой и не наблюдатель: к нему тянутся сферы опыта.
     collects: bool,
     /// Измерение игрока: у каждого своё, как `ServerPlayer.level()` в ванили.
@@ -5507,6 +5509,7 @@ impl PlayPlan {
                 ClientInfo::DEFAULT.skin_parts,
             ],
             view_distance: ClientInfo::DEFAULT.view_distance,
+            text_filtering: false,
             collects: true,
             dimension: Dimension::Overworld,
         };
@@ -8530,6 +8533,7 @@ impl PlayPlan {
             sleeping: None,
             model: [player.client.main_hand, player.client.skin_parts],
             view_distance: player.client.view_distance,
+            text_filtering: player.client.text_filtering,
             collects: true,
             dimension: start_dim,
         };
