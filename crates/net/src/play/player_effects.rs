@@ -25,6 +25,26 @@ impl PlayPlan {
             self.send_to(uuid, packet);
             return Some("1".into());
         }
+        if let Some(rest) = command.strip_prefix("blocks ") {
+            let Some(sections) = parse_block_changes(rest, |name| self.parse_state(name)) else {
+                return Some("0".into());
+            };
+            let mut packets = Vec::with_capacity(sections.len());
+            for (section, mut blocks) in sections {
+                if blocks.len() > 1 {
+                    blocks = super::section_order::vanilla_order(&blocks);
+                }
+                packets.push(play::section_blocks_update(
+                    self.ids.section_blocks_update,
+                    section,
+                    &blocks,
+                ));
+            }
+            for packet in packets {
+                self.send_to(uuid, packet);
+            }
+            return Some("1".into());
+        }
         if let Some(rest) = command.strip_prefix("effect ") {
             let Some((event, pos, data)) = parse_effect(rest) else {
                 return Some("0".into());
@@ -289,6 +309,31 @@ fn parse_effect(rest: &str) -> Option<(i32, [i32; 3], i32)> {
     ))
 }
 
+/// Изменения блоков по секциям: `[sx, sy, sz]` → `(локальная позиция, состояние)`.
+type SectionChanges = std::collections::BTreeMap<[i32; 3], Vec<(u16, u32)>>;
+
+/// `blocks x y z state …` → секции и локальные позиции `x<<8|z<<4|y`.
+/// Состояние разбирает вызывающий (реестр блоков).
+fn parse_block_changes(rest: &str, state: impl Fn(&str) -> Option<u32>) -> Option<SectionChanges> {
+    let tokens: Vec<&str> = rest.split_whitespace().collect();
+    if tokens.is_empty() || !tokens.len().is_multiple_of(4) || tokens.len() / 4 > 4096 {
+        return None;
+    }
+    let mut sections = SectionChanges::new();
+    for chunk in tokens.chunks(4) {
+        let x = chunk[0].parse::<i32>().ok()?;
+        let y = chunk[1].parse::<i32>().ok()?;
+        let z = chunk[2].parse::<i32>().ok()?;
+        let id = state(chunk[3])?;
+        let local = (((x & 15) << 8) | ((z & 15) << 4) | (y & 15)) as u16;
+        sections
+            .entry([x >> 4, y >> 4, z >> 4])
+            .or_default()
+            .push((local, id));
+    }
+    Some(sections)
+}
+
 /// UTF-8 строка из hex (URL набора ресурсов и подсказка в `rpackpush`).
 fn hex_utf8(text: &str) -> Option<String> {
     if !text.len().is_multiple_of(2) || text.len() > 65536 {
@@ -338,7 +383,7 @@ fn sound_source(name: &str) -> Option<i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{hex_utf8, parse_effect, sound_source};
+    use super::{hex_utf8, parse_block_changes, parse_effect, sound_source};
 
     #[test]
     fn sound_categories_match_vanilla_ordinals() {
@@ -375,5 +420,19 @@ mod tests {
         assert_eq!(hex_utf8(&hex).as_deref(), Some(url));
         assert_eq!(hex_utf8("abc"), None);
         assert_eq!(hex_utf8("zz"), None);
+    }
+
+    #[test]
+    fn block_changes_group_by_section_and_pack_local_position() {
+        let got = parse_block_changes("1 2 3 stone 2 2 3 dirt 17 2 3 stone", |name| match name {
+            "stone" => Some(5),
+            "dirt" => Some(6),
+            _ => None,
+        })
+        .expect("изменения");
+        assert_eq!(got.get(&[0, 0, 0]).unwrap(), &vec![(306, 5), (562, 6)]);
+        assert_eq!(got.get(&[1, 0, 0]).unwrap(), &vec![(306, 5)]);
+        assert!(parse_block_changes("1 2 3", |_| Some(1)).is_none());
+        assert!(parse_block_changes("1 2 3 unknown", |_| None).is_none());
     }
 }

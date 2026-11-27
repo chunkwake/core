@@ -993,10 +993,22 @@ public final class PlayerImpl {
         if (blocks == null) {
             return;
         }
+        StringBuilder line = new StringBuilder("blocks");
+        int count = 0;
         for (org.bukkit.block.BlockState block : blocks) {
-            if (block != null) {
-                sendBlockChange(block.getLocation(), block.getBlockData());
+            if (block == null) {
+                continue;
             }
+            BlockChangeWire.append(line, block.getX(), block.getY(), block.getZ(),
+                    block.getBlockData().getAsString());
+            if (++count == BlockChangeWire.BATCH) {
+                playerEffect(line.toString());
+                line = new StringBuilder("blocks");
+                count = 0;
+            }
+        }
+        if (count != 0) {
+            playerEffect(line.toString());
         }
     }
 
