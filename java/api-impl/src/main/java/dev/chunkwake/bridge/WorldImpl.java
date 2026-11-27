@@ -838,17 +838,17 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
      * поэтому берём 48 блоков (радиус большинства сущностей) либо больше при volume > 1.
      */
     private void playEntitySound(Entity entity, Object sound, Object source,
-            float volume, float pitch) {
+            float volume, float pitch, long seed) {
         if (entity == null || sound == null || source == null || entity.getWorld() != api) {
             return;
         }
         Location at = entity.getLocation();
-        double range = Math.max(48.0D, soundRange(volume));
+        double range = soundRange(volume);
         double rangeSq = range * range;
         for (Player p : getPlayers()) {
             PlayerImpl impl = server.playerImpl(p);
             if (impl != null && p.getLocation().distanceSquared(at) <= rangeSq) {
-                impl.worldSound(sound, source, at.getX(), at.getY(), at.getZ(), volume, pitch);
+                impl.entitySound(entity.getEntityId(), sound, source, volume, pitch, seed);
             }
         }
     }
@@ -905,12 +905,12 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
 
     public void playSound(Entity entity, org.bukkit.Sound sound,
             org.bukkit.SoundCategory category, float volume, float pitch, long seed) {
-        playEntitySound(entity, sound, category, volume, pitch);
+        playEntitySound(entity, sound, category, volume, pitch, seed);
     }
 
     public void playSound(Entity entity, String sound,
             org.bukkit.SoundCategory category, float volume, float pitch, long seed) {
-        playEntitySound(entity, sound, category, volume, pitch);
+        playEntitySound(entity, sound, category, volume, pitch, seed);
     }
 
     public void playSound(net.kyori.adventure.sound.Sound sound) {
@@ -951,7 +951,7 @@ public final class WorldImpl extends org.bukkit.craftbukkit.CraftWorld implement
             return;
         }
         if (emitter instanceof Entity entity) {
-            playEntitySound(entity, sound, sound.source(), sound.volume(), sound.pitch());
+            playEntitySound(entity, sound, sound.source(), sound.volume(), sound.pitch(), 0L);
             return;
         }
         throw new IllegalArgumentException(

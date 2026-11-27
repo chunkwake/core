@@ -1349,6 +1349,28 @@ pub fn sound(
     w.buf
 }
 
+/// `ClientboundSoundEntityPacket`: звук из реестра, привязанный к сущности;
+/// клиент ведёт его за сущностью, координаты не передаются.
+pub fn sound_entity(
+    id: i32,
+    sound: i32,
+    source: i32,
+    entity: i32,
+    volume: f32,
+    pitch: f32,
+    seed: i64,
+) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id)
+        .var_int(sound + 1)
+        .var_int(source)
+        .var_int(entity)
+        .f32(volume)
+        .f32(pitch)
+        .i64(seed);
+    w.buf
+}
+
 /// `ClientboundLevelEventPacket`: событие мира (2001 — ломка блока с частицами и звуком).
 pub fn level_event(id: i32, event: i32, pos: [i32; 3], data: i32, global: bool) -> Vec<u8> {
     let mut w = Writer::new();
@@ -2164,6 +2186,20 @@ mod copper_golem_meta_tests {
         assert_eq!(r.var_int().unwrap(), 37);
         assert_eq!(r.var_int().unwrap(), 1);
         assert_eq!(r.u8().unwrap(), 0xff);
+    }
+
+    #[test]
+    fn sound_entity_packet_layout() {
+        let packet = sound_entity(61, 7, 2, 42, 0.8, 1.2, 99);
+        let mut r = Reader::new(&packet);
+        assert_eq!(r.var_int().unwrap(), 61);
+        assert_eq!(r.var_int().unwrap(), 8);
+        assert_eq!(r.var_int().unwrap(), 2);
+        assert_eq!(r.var_int().unwrap(), 42);
+        assert_eq!(r.f32().unwrap(), 0.8);
+        assert_eq!(r.f32().unwrap(), 1.2);
+        assert_eq!(r.i64().unwrap(), 99);
+        assert!(r.remaining().is_empty());
     }
 
     #[test]

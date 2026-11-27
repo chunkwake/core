@@ -218,6 +218,41 @@ impl PlayPlan {
             self.send_clear_titles(uuid, reset);
             return Some("1".into());
         }
+        if let Some(rest) = command.strip_prefix("soundent ") {
+            let mut it = rest.split_whitespace();
+            let (Some(entity), Some(name), Some(source)) = (it.next(), it.next(), it.next()) else {
+                return Some("0".into());
+            };
+            let (Some(volume), Some(pitch), Some(seed)) = (
+                it.next().and_then(|v| v.parse::<f32>().ok()),
+                it.next().and_then(|v| v.parse::<f32>().ok()),
+                it.next().and_then(|v| v.parse::<i64>().ok()),
+            ) else {
+                return Some("0".into());
+            };
+            let Ok(entity) = entity.parse::<i32>() else {
+                return Some("0".into());
+            };
+            let Some(&sound) = self.survival.sounds.get(normalize_sound(name)) else {
+                return Some("0".into());
+            };
+            let Some(source) = sound_source(source) else {
+                return Some("0".into());
+            };
+            self.send_to(
+                uuid,
+                play::sound_entity(
+                    self.ids.sound_entity,
+                    sound,
+                    source,
+                    entity,
+                    volume,
+                    pitch,
+                    seed,
+                ),
+            );
+            return Some("1".into());
+        }
         if let Some(rest) = command.strip_prefix("sound ") {
             let mut it = rest.split_whitespace();
             let (Some(name), Some(source)) = (it.next(), it.next()) else {

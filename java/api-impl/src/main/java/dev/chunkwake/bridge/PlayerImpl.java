@@ -861,34 +861,45 @@ public final class PlayerImpl {
         playSound(location, sound, source, volume, pitch);
     }
 
+    /** Звук, привязанный к сущности: клиент ведёт его за ней (`sound_entity`). */
+    void entitySound(int entityId, Object sound, Object source, float volume, float pitch,
+            long seed) {
+        playerEffect(SoundWire.entity(entityId, soundName(sound), soundSource(source),
+                volume, pitch, seed));
+    }
+
     public void playSound(org.bukkit.entity.Entity entity, org.bukkit.Sound sound,
             float volume, float pitch) {
-        playSound(entity == null ? null : entity.getLocation(), sound, volume, pitch);
+        playSound(entity, sound, org.bukkit.SoundCategory.MASTER, volume, pitch, 0L);
     }
 
     public void playSound(org.bukkit.entity.Entity entity, String sound,
             float volume, float pitch) {
-        playSound(entity == null ? null : entity.getLocation(), sound, volume, pitch);
+        playSound(entity, sound, org.bukkit.SoundCategory.MASTER, volume, pitch, 0L);
     }
 
     public void playSound(org.bukkit.entity.Entity entity, org.bukkit.Sound sound,
             org.bukkit.SoundCategory source, float volume, float pitch) {
-        playSound(entity == null ? null : entity.getLocation(), sound, source, volume, pitch);
+        playSound(entity, sound, source, volume, pitch, 0L);
     }
 
     public void playSound(org.bukkit.entity.Entity entity, String sound,
             org.bukkit.SoundCategory source, float volume, float pitch) {
-        playSound(entity == null ? null : entity.getLocation(), sound, source, volume, pitch);
+        playSound(entity, sound, source, volume, pitch, 0L);
     }
 
     public void playSound(org.bukkit.entity.Entity entity, org.bukkit.Sound sound,
             org.bukkit.SoundCategory source, float volume, float pitch, long seed) {
-        playSound(entity, sound, source, volume, pitch);
+        if (entity != null && sound != null) {
+            entitySound(entity.getEntityId(), sound, source, volume, pitch, seed);
+        }
     }
 
     public void playSound(org.bukkit.entity.Entity entity, String sound,
             org.bukkit.SoundCategory source, float volume, float pitch, long seed) {
-        playSound(entity, sound, source, volume, pitch);
+        if (entity != null && sound != null) {
+            entitySound(entity.getEntityId(), sound, source, volume, pitch, seed);
+        }
     }
 
     public void playSound(net.kyori.adventure.sound.Sound sound, double x, double y, double z) {
