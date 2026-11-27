@@ -6183,7 +6183,25 @@ impl PlayPlan {
                 .and_then(|s| crate::fluids::state_fluid(&self.survival.placement, s))
                 .is_some_and(|f| f.kind == crate::fluids::Kind::Water)
         };
-        if species.category() == mb::Category::UndergroundWaterCreature {
+        if species.category() == mb::Category::Axolotls {
+            // `Axolotl.checkAxolotlSpawnRules`: только тег
+            // `#minecraft:axolotls_spawnable_on` под водой; остальное — IN_WATER.
+            if !water(pos) {
+                return false;
+            }
+            let below = [pos[0], pos[1] - 1, pos[2]];
+            let Some(floor) = self.block(below) else {
+                return false;
+            };
+            if !self
+                .survival
+                .block_tags
+                .get("minecraft:axolotls_spawnable_on")
+                .is_some_and(|tags| tags.contains(self.state_name(floor)))
+            {
+                return false;
+            }
+        } else if species.category() == mb::Category::UndergroundWaterCreature {
             if pos[1] > sea - 33 {
                 return false;
             }

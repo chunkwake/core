@@ -1693,6 +1693,27 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
                 Selector::new(vec![nearest(1, false)]),
             );
         }
+        // Аксолотль: вода/суша (`AmphibiousPathNavigation`) и случайное
+        // плавание.
+        Species::Axolotl => {
+            return (
+                Selector::new(vec![
+                    (
+                        4,
+                        Goal::Stroll {
+                            speed: 1.0,
+                            interval: 40,
+                            avoid_water: false,
+                            swim: true,
+                            to: [0.0; 3],
+                        },
+                    ),
+                    look(6, 8.0),
+                    around(7),
+                ]),
+                Selector::default(),
+            );
+        }
         // Дельфин: `RandomSwimmingGoal(1.0, 10)` и взгляд по сторонам
         // (`RandomLookAroundGoal`/`LookAtPlayerGoal(6)`).
         Species::Dolphin => {

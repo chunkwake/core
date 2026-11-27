@@ -86,6 +86,7 @@ final class MobImpl {
         "ravager", "wither", "snow_golem", "copper_golem", "ender_dragon",
         "parrot", "warden", "cat", "bat", "salmon", "glow_squid",
         "bee", "squid", "dolphin", "tropical_fish", "pufferfish",
+        "axolotl",
     };
 
     /** Вид для {@link EntityType}; {@code null} — такого моба сервер не умеет. */

@@ -304,6 +304,7 @@ pub enum Species {
     Dolphin,
     TropicalFish,
     Pufferfish,
+    Axolotl,
 }
 
 /// Всё о виде в одном месте. Встроенные значения — запасные: при старте
@@ -376,7 +377,7 @@ const fn base(name: &'static str, sound: &'static str, loot: &'static str) -> Sp
 
 /// Встроенная таблица в порядке [`Species::ALL`]: числа из `createAttributes`
 /// и `EntityType` 26.3.
-const BUILTIN: [SpeciesInfo; 37] = [
+const BUILTIN: [SpeciesInfo; 38] = [
     SpeciesInfo {
         size: (0.9, 1.4),
         eye_height: 1.3,
@@ -880,6 +881,20 @@ const BUILTIN: [SpeciesInfo; 37] = [
             "minecraft:entities/pufferfish",
         )
     },
+    SpeciesInfo {
+        category: Category::Axolotls,
+        size: (0.75, 0.42),
+        eye_height: 0.2751,
+        max_health: 14.0,
+        speed: 1.0,
+        follow_range: 16.0,
+        attack_damage: 2.0,
+        ..base(
+            "minecraft:axolotl",
+            "minecraft:entity.axolotl",
+            "minecraft:entities/axolotl",
+        )
+    },
 ];
 
 static INSTALLED: std::sync::OnceLock<Vec<SpeciesInfo>> = std::sync::OnceLock::new();
@@ -919,7 +934,7 @@ fn merge(b: &SpeciesInfo, types: &[chunkwake_data::world::EntityTypeInfo]) -> Sp
 }
 
 impl Species {
-    pub const ALL: [Species; 37] = [
+    pub const ALL: [Species; 38] = [
         Species::Cow,
         Species::Pig,
         Species::Sheep,
@@ -957,6 +972,7 @@ impl Species {
         Species::Dolphin,
         Species::TropicalFish,
         Species::Pufferfish,
+        Species::Axolotl,
     ];
 
     /// Данные вида: выгрузка, если она установлена, иначе встроенные.
@@ -2052,6 +2068,7 @@ fn navigation_for(species: Species) -> Navigation {
         Species::Bat | Species::Phantom => Navigation::flying(),
         Species::Bee => Navigation::flying(),
         Species::Drowned => Navigation::amphibious(),
+        Species::Axolotl => Navigation::amphibious(),
         _ => Navigation::new(species == Species::Spider),
     }
 }
@@ -2090,7 +2107,7 @@ pub fn walker(m: &Mob, w: &World, difficulty: u8, in_water: bool) -> path::Walke
         can_walk_over_fences: false,
         malus: if aquatic {
             path::WATER_MALUS
-        } else if m.species == Species::Drowned {
+        } else if matches!(m.species, Species::Drowned | Species::Axolotl) {
             path::AMPHIBIOUS_MALUS
         } else if animal {
             path::ANIMAL_MALUS
@@ -4632,6 +4649,23 @@ mod tests {
             m.nav.kind,
             path::NavKind::Water { breaching: false }
         ));
+    }
+
+    /// Аксолотль: данные вида, категория `axolotls` и амфибийная навигация.
+    #[test]
+    fn axolotl_species_data_and_amphibious_navigation() {
+        assert_eq!(
+            Species::from_name("minecraft:axolotl"),
+            Some(Species::Axolotl)
+        );
+        assert_eq!(Species::Axolotl.category(), Category::Axolotls);
+        assert!(Species::Axolotl.category().is_water());
+        assert_eq!(Species::Axolotl.max_health(), 14.0);
+        assert_eq!(Species::Axolotl.size(), (0.75, 0.42));
+        assert_eq!(Species::Axolotl.speed(), 1.0);
+        assert_eq!(Species::Axolotl.info().loot, "minecraft:entities/axolotl");
+        let m = Mob::new(Species::Axolotl, [0.5, 64.0, 0.5], 1);
+        assert!(matches!(m.nav.kind, path::NavKind::Amphibious));
     }
 
     /// `PotentialCalculator` и локальный лимит на игрока.

@@ -25,6 +25,7 @@ final class MobSpeciesTest {
         assertEquals("dolphin", MobImpl.species(EntityType.DOLPHIN));
         assertEquals("tropical_fish", MobImpl.species(EntityType.TROPICAL_FISH));
         assertEquals("pufferfish", MobImpl.species(EntityType.PUFFERFISH));
+        assertEquals("axolotl", MobImpl.species(EntityType.AXOLOTL));
         assertEquals("wolf", MobImpl.species(Wolf.class));
     }
 
