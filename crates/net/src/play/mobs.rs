@@ -877,6 +877,17 @@ impl PlayPlan {
                                     .find(|effect| effect.id == id)
                                     .map(|effect| effect.amplifier)
                             });
+                            if species == Species::Bee {
+                                if e.mob.anger_time == 0
+                                    && !e.mob.has_nectar
+                                    && e.mob.flower_target.is_none()
+                                {
+                                    e.mob.flower_target = self.bee_flower(w, &e.mob);
+                                }
+                                if e.mob.has_nectar && self.bee_grow_crop(w, &e.mob) {
+                                    e.mob.crops_grown = e.mob.crops_grown.saturating_add(1);
+                                }
+                            }
                             let mut senses = mb::Senses {
                                 players: &watchers,
                                 rand: &mut rand,
@@ -1908,6 +1919,87 @@ impl PlayPlan {
     }
 
     /// Вода ли в блоке (`state_fluid`).
+    /// Ближайший цветок (`#minecraft:flowers`) в радиусе 5 для `BeePollinateGoal`.
+    fn bee_flower(&self, w: &WorldView<'_>, m: &Mob) -> Option<[i32; 3]> {
+        let flowers = self.survival.block_tags.get("minecraft:flowers")?;
+        let b = [
+            m.pos[0].floor() as i32,
+            m.pos[1].floor() as i32,
+            m.pos[2].floor() as i32,
+        ];
+        let mut best = None;
+        let mut best_d = f64::MAX;
+        for dx in -5..=5 {
+            for dy in -3..=3 {
+                for dz in -5..=5 {
+                    let p = [b[0] + dx, b[1] + dy, b[2] + dz];
+                    let Some(s) = w.block(p) else { continue };
+                    if !flowers.contains(self.state_name(s)) {
+                        continue;
+                    }
+                    let d = f64::from(dx * dx + dy * dy + dz * dz);
+                    if d < best_d {
+                        best_d = d;
+                        best = Some(p);
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// `BeeGrowCropGoal`: с шансом 0.3 раз в 20 тиков поднимает на 1 возраст
+    /// культуры из `#minecraft:bee_growables`.
+    fn bee_grow_crop(&self, w: &WorldView<'_>, m: &Mob) -> bool {
+        if !m.has_nectar
+            || m.crops_grown >= 10
+            || !m.tick_count.is_multiple_of(20)
+            || rand::random::<f32>() >= 0.3
+        {
+            return false;
+        }
+        let Some(growables) = self.survival.block_tags.get("minecraft:bee_growables") else {
+            return false;
+        };
+        let b = [
+            m.pos[0].floor() as i32,
+            m.pos[1].floor() as i32,
+            m.pos[2].floor() as i32,
+        ];
+        for dy in 1..=2 {
+            let p = [b[0], b[1] - dy, b[2]];
+            let Some(s) = w.block(p) else { continue };
+            let name = self.state_name(s);
+            if !growables.contains(name) {
+                continue;
+            }
+            let Some(age) = self
+                .survival
+                .placement
+                .prop(s, "age")
+                .and_then(|v| v.parse::<u8>().ok())
+            else {
+                continue;
+            };
+            let Some(next_age) = bee_crop_next_age(name, age) else {
+                continue;
+            };
+            let next = self
+                .survival
+                .placement
+                .with_prop(s, "age", &next_age.to_string());
+            if let Some(next) = next {
+                self.hub.send(
+                    None,
+                    play::level_event(self.ids.level_event, 2011, p, 15, false),
+                );
+                self.set_block(p, next);
+                return true;
+            }
+        }
+        false
+    }
+
     fn water_at(&self, s: Option<u32>) -> bool {
         let Some(s) = s else { return false };
         match self.mob_cells().get(s as usize) {
@@ -2165,6 +2257,14 @@ impl PlayPlan {
                 .and_then(crate::play::commands::snbt::number)
         {
             m.anger_time = anger.max(0.0) as u32;
+        }
+        if m.species == Species::Bee {
+            if let Some(Tag::Byte(nectar)) = nbt.get("HasNectar") {
+                m.has_nectar = *nectar != 0;
+            }
+            if let Some(crops) = nbt.get("CropsGrownSincePollination").and_then(Tag::as_i64) {
+                m.crops_grown = crops.clamp(0, 10) as u8;
+            }
         }
         if m.species == Species::CopperGolem {
             // `getLongOr`: принимаем любое число (`1`, `1L`, ...).
@@ -4857,6 +4957,11 @@ pub(super) fn mob_to_nbt(
         }
         Species::Bee => {
             c.insert("AngerTime".into(), Tag::Int(m.anger_time as i32));
+            c.insert("HasNectar".into(), Tag::Byte(i8::from(m.has_nectar)));
+            c.insert(
+                "CropsGrownSincePollination".into(),
+                Tag::Int(i32::from(m.crops_grown)),
+            );
         }
         // `AbstractCubeMob.addAdditionalSaveData`.
         Species::Slime => {
@@ -6355,6 +6460,12 @@ impl PlayPlan {
     }
 }
 
+/// `CropBlock.getStateForAge(age + 1)` для тега `bee_growables`.
+fn bee_crop_next_age(name: &str, age: u8) -> Option<u8> {
+    let max = crate::plants::age_limit(name)?;
+    (age < max).then_some(age + 1)
+}
+
 /// `Direction.fromYRot`: 0 — юг, 90 — запад, 180 — север, 270 — восток.
 fn statue_facing(yaw: f32) -> &'static str {
     match ((yaw.rem_euclid(360.0) + 45.0) / 90.0) as i32 % 4 {
@@ -6664,6 +6775,15 @@ mod tests {
         assert_eq!(sheep_color(0.5), 0);
         assert_eq!(sheep_color(0.01), 15);
         assert_eq!(sheep_color(0.181), 6);
+    }
+
+    /// `BeeGrowCropGoal` поднимает возраст на 1 и не трогает максимум/не-культуру.
+    #[test]
+    fn bee_crop_grows_one_age() {
+        assert_eq!(bee_crop_next_age("minecraft:wheat", 0), Some(1));
+        assert_eq!(bee_crop_next_age("minecraft:wheat", 6), Some(7));
+        assert_eq!(bee_crop_next_age("minecraft:wheat", 7), None);
+        assert_eq!(bee_crop_next_age("minecraft:stone", 0), None);
     }
 
     /// Дельта считается от последней разосланной позиции: сумма дельт равна

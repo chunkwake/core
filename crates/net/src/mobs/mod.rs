@@ -1288,6 +1288,10 @@ pub struct Mob {
     pub dragon_cooldown: u8,
     /// `Bee`: оставшиеся тики злости (`AngerTime`).
     pub anger_time: u32,
+    /// `Bee`: есть нектар, счётчик выращенных культур и цель-цветок.
+    pub has_nectar: bool,
+    pub crops_grown: u8,
+    pub flower_target: Option<[i32; 3]>,
     /// `Pufferfish`: стадия раздувания 0..2 и счётчики `inflate/deflate`.
     pub puff_state: u8,
     pub inflate: u32,
@@ -1396,6 +1400,9 @@ impl Mob {
             statue: false,
             dragon_cooldown: 0,
             anger_time: 0,
+            has_nectar: false,
+            crops_grown: 0,
+            flower_target: None,
             puff_state: 0,
             inflate: 0,
             deflate: 0,
@@ -2433,6 +2440,21 @@ fn bee_ai_step(m: &mut Mob, s: &mut Senses) {
     }
     if m.anger_time == 0 && m.target.is_some() {
         m.target = None;
+    }
+    if m.anger_time == 0 && m.target.is_none() && !m.has_nectar {
+        if let Some(f) = m.flower_target {
+            let at = [f[0] as f64 + 0.5, f[1] as f64 + 0.5, f[2] as f64 + 0.5];
+            if dist2(at, m.pos) < 4.0 {
+                m.has_nectar = true;
+                m.crops_grown = 0;
+                m.flower_target = None;
+                m.yya = 0.0;
+                m.zza = 0.0;
+            } else {
+                m.move_ctl.set_wanted(at, 1.0);
+            }
+            return;
+        }
     }
     let Some(p) = m
         .target
@@ -4839,6 +4861,39 @@ mod tests {
                 poison: 120
             } if *damage == 3.0
         )));
+    }
+
+    /// Пчела собирает нектар у цветка и начинает цикл роста урожая.
+    #[test]
+    fn bee_collects_nectar_at_flower() {
+        let (shape, water) = flat_world(&floor);
+        let w = World {
+            shape: &*shape,
+            water: &*water,
+            cell: None,
+            info: None,
+            min_y: -64,
+        };
+        let mut m = Mob::new(Species::Bee, [0.5, 64.5, 0.5], 1);
+        m.flower_target = Some([0, 64, 0]);
+        let mut rnd = || 0.5;
+        let mut s = Senses {
+            players: &[],
+            rand: &mut rnd,
+            prey: &[],
+            tempters: &[],
+            kin: &[],
+            sight: &always_visible,
+            difficulty: 2,
+            entity_id: 1,
+            bright_outside: true,
+            mob_griefing: false,
+            jump_boost: None,
+        };
+        tick(&mut m, &w, &mut s);
+        assert!(m.has_nectar);
+        assert_eq!(m.crops_grown, 0);
+        assert!(m.flower_target.is_none());
     }
 
     /// Дельфин даёт `Dolphin's Grace` только плывущему игроку в 16 блоках.
