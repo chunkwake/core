@@ -1012,6 +1012,29 @@ impl Species {
     }
 
     /// `EntityTypeTags.UNDEAD`: лечение вредит, урон лечит.
+    /// `AgeableMob`: детёныш и возраст синхронизируются отдельным полем.
+    pub fn is_ageable(self) -> bool {
+        matches!(
+            self,
+            Species::Cow
+                | Species::Pig
+                | Species::Sheep
+                | Species::Chicken
+                | Species::Wolf
+                | Species::Cat
+                | Species::Parrot
+                | Species::Cod
+                | Species::Salmon
+                | Species::GlowSquid
+                | Species::Squid
+                | Species::Dolphin
+                | Species::TropicalFish
+                | Species::Pufferfish
+                | Species::Axolotl
+                | Species::Bee
+        )
+    }
+
     pub fn is_undead(self) -> bool {
         matches!(self, Species::Zombie | Species::Skeleton | Species::Drowned)
     }
@@ -4879,6 +4902,17 @@ mod tests {
                 .iter()
                 .any(|o| matches!(o, goals::Out::DolphinGrace { .. }))
         );
+    }
+
+    /// `AgeableMob`-поле (16) шлётся только видам с детёнышем; иначе Bat
+    /// получает Boolean в `DATA_ID_FLAGS` и клиент падает.
+    #[test]
+    fn ageable_metadata_only_for_ageable_mobs() {
+        assert!(!Species::Bat.is_ageable());
+        assert!(!Species::IronGolem.is_ageable());
+        assert!(Species::Bee.is_ageable());
+        assert!(Species::Dolphin.is_ageable());
+        assert!(Species::Squid.is_ageable());
     }
 
     /// `PotentialCalculator` и локальный лимит на игрока.

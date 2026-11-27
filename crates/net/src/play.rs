@@ -5471,6 +5471,7 @@ impl PlayPlan {
                 effects: Vec::new(),
                 xp: Default::default(),
                 sneaking: false,
+                sprinting: false,
                 dimension: Dimension::Overworld,
             },
         );
@@ -6456,6 +6457,16 @@ impl PlayPlan {
         }
     }
 
+    fn set_sprinting(&self, uuid: Uuid, sprinting: bool) {
+        if let Some(live) = self.live.lock().unwrap().get_mut(&uuid)
+            && live.sprinting != sprinting
+        {
+            live.sprinting = sprinting;
+            self.state_cache.lock().unwrap().remove(&uuid);
+            self.mark_work();
+        }
+    }
+
     fn publish_live(&self, uuid: Uuid, st: &PlayerState, game_mode: u8) {
         let (pos, yaw, pitch) = self.player_at(uuid).unwrap_or(([0.0; 3], 0.0, 0.0));
         let v = &st.vitals;
@@ -6473,6 +6484,7 @@ impl PlayPlan {
             effects: v.effects.clone(),
             xp: st.xp,
             sneaking: false,
+            sprinting: v.sprinting,
             dimension: self.player_dim(uuid),
         };
         {
@@ -16554,6 +16566,7 @@ impl PlayPlan {
                                 }
                                 if stop_sprint {
                                     state.vitals.sprinting = false;
+                                    self.set_sprinting(uuid, false);
                                     self.send_pose(
                                         conn,
                                         me,
@@ -17463,6 +17476,7 @@ impl PlayPlan {
                                         .is_some_and(|r| r.trim() == "c")
                                 {
                                     state.vitals.sprinting = on;
+                                    self.set_sprinting(uuid, on);
                                 }
                             }
                             play::START_FALL_FLYING => {
@@ -29366,6 +29380,7 @@ mod tests {
             effects: Vec::new(),
             xp: Default::default(),
             sneaking: false,
+            sprinting: false,
         };
         // Отпечаток меняется ровно тогда, когда меняется вывод.
         let text = |l: &Live| {

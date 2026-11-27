@@ -7,7 +7,7 @@ use crate::mobs::{self as mb, Mob, Species};
 /// Группа спавна: вид, вес, минимум и максимум.
 type SpawnEntry = (Option<Species>, u32, u32, u32);
 /// Игрок для тика мобов: ноги, имена предметов в руках (основная и вторая), UUID.
-type Hands<'a> = ([f64; 3], [Option<&'a str>; 2], u128);
+type Hands<'a> = ([f64; 3], [Option<&'a str>; 2], u128, bool);
 
 /// Предел детей одного деления. Плагин через `SlimeSplitEvent` не должен
 /// заставлять сервер крутить цикл на произвольное число сущностей.
@@ -301,7 +301,7 @@ impl PlayPlan {
             .map(|n| serde_json::json!({ "text": n }));
         // Флаг детёныша (индекс 16) — у `AgeableMob` и зомби; у крипера и
         // паука на 16 свои поля.
-        let ageable = m.species.is_animal() || m.species == Species::Zombie;
+        let ageable = m.species.is_ageable() || m.species == Species::Zombie;
         let mut out = vec![
             play::add_entity_moving(
                 self.ids.add_entity,
@@ -601,7 +601,7 @@ impl PlayPlan {
         // на тик, а не на каждого моба: раньше здесь на моба строился `Vec`
         // с `is_food` по строкам предметов.
         let dim = self.active_dim();
-        let swimming = |p: [f64; 3]| {
+        let in_water = |p: [f64; 3]| {
             self.block([
                 p[0].floor() as i32,
                 (p[1] + 0.1).floor() as i32,
@@ -619,11 +619,12 @@ impl PlayPlan {
                 .filter(|p| p.collects && p.dimension == dim)
                 .map(|p| {
                     let l = live.get(&p.entry.uuid);
+                    let swimming = in_water(p.pos) && l.is_some_and(|l| l.sprinting);
                     if l.is_none_or(|l| l.game_mode != 1) {
                         prey.push(mb::Prey {
                             uuid: p.entry.uuid.as_u128(),
                             pos: p.pos,
-                            swimming: swimming(p.pos),
+                            swimming,
                         });
                     }
                     let held = l.map_or([None, None], |l| {
@@ -632,7 +633,7 @@ impl PlayPlan {
                             l.slots[survival::OFFHAND].map(|s| self.item_name(s.item)),
                         ]
                     });
-                    (p.pos, held, p.entry.uuid.as_u128())
+                    (p.pos, held, p.entry.uuid.as_u128(), swimming)
                 })
                 .collect()
         };
@@ -640,7 +641,7 @@ impl PlayPlan {
         let mut food_by_species: Vec<Vec<[f64; 3]>> = vec![Vec::new(); mb::Species::ALL.len()];
         {
             let mut seen = [false; mb::Species::ALL.len()];
-            for (pos, held, _) in &hands {
+            for (pos, held, _, _) in &hands {
                 for species in mb::Species::ALL {
                     let slot = species as usize;
                     if !seen[slot] && held.iter().flatten().any(|n| species.is_food(n)) {
@@ -656,7 +657,7 @@ impl PlayPlan {
             .map(|h| mb::Prey {
                 uuid: h.2,
                 pos: h.0,
-                swimming: swimming(h.0),
+                swimming: h.3,
             })
             .collect();
         let peaceful = self.difficulty() == Difficulty::Peaceful;

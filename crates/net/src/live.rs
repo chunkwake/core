@@ -38,6 +38,8 @@ pub struct Live {
     pub xp: crate::xp::Experience,
     /// Приседает (`Player.isSneaking`): меняется от `player_input`, без тика.
     pub sneaking: bool,
+    /// Спринт (`Player.isSprinting`): для `Player.isSwimming()`.
+    pub sprinting: bool,
     /// Измерение игрока (`Player.getWorld`): меняется переходом и респавном.
     pub dimension: crate::play::Dimension,
 }
@@ -67,6 +69,7 @@ impl Live {
         self.xp.progress.to_bits().hash(&mut h);
         self.xp.total.hash(&mut h);
         self.sneaking.hash(&mut h);
+        self.sprinting.hash(&mut h);
         self.dimension.hash(&mut h);
         // Слоты: `Option<Stack>` — сравнивается всё, что печатается в строку.
         for s in &self.slots {
@@ -640,6 +643,7 @@ mod tests {
             effects: Vec::new(),
             xp: Default::default(),
             sneaking: false,
+            sprinting: false,
             dimension: crate::play::Dimension::Overworld,
         };
         let c = Control::parse_t("slot 0 minecraft:bread 3", ids).unwrap();
