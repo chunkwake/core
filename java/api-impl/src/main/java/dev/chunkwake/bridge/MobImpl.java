@@ -395,6 +395,134 @@ final class MobImpl {
         set("sitting " + (sitting ? "1" : "0"));
     }
     public double getMaxHealth() { return num(8); }
+
+    /** Слот `EquipmentSlot` → имя в запросах Rust; {@code null} — нет такого. */
+    private static String gearSlot(org.bukkit.inventory.EquipmentSlot slot) {
+        if (slot == null) {
+            return null;
+        }
+        return switch (slot) {
+            case HAND -> "mainhand";
+            case OFF_HAND -> "offhand";
+            case HEAD -> "head";
+            case CHEST -> "chest";
+            case LEGS -> "legs";
+            case FEET -> "feet";
+            default -> null;
+        };
+    }
+
+    private ItemStack gear(String slot) {
+        String line = world.request("mob " + id + " equip " + slot).trim();
+        return line.isEmpty() ? null : ItemBridge.parse(line);
+    }
+
+    private void setGear(String slot, ItemStack item) {
+        world.request("mob " + id + " setequip " + slot
+                + (item == null ? "" : " " + ItemBridge.line(item)));
+    }
+
+    private float dropChance(String slot) {
+        String value = world.request("mob " + id + " dropchance " + slot).trim();
+        try {
+            return Float.parseFloat(value);
+        } catch (NumberFormatException e) {
+            return 0.0f;
+        }
+    }
+
+    private void setDropChance(String slot, float chance) {
+        world.request("mob " + id + " setdropchance " + slot + " " + chance);
+    }
+
+    public org.bukkit.inventory.EntityEquipment getEquipment() {
+        return (org.bukkit.inventory.EntityEquipment) Stub.of(
+                org.bukkit.inventory.EntityEquipment.class, this);
+    }
+
+    public ItemStack getItem(org.bukkit.inventory.EquipmentSlot slot) {
+        String name = gearSlot(slot);
+        return name == null ? null : gear(name);
+    }
+
+    public void setItem(org.bukkit.inventory.EquipmentSlot slot, ItemStack item) {
+        String name = gearSlot(slot);
+        if (name != null) {
+            setGear(name, item);
+        }
+    }
+
+    public ItemStack getItemInMainHand() { return gear("mainhand"); }
+
+    public void setItemInMainHand(ItemStack item) { setGear("mainhand", item); }
+
+    public ItemStack getItemInOffHand() { return gear("offhand"); }
+
+    public void setItemInOffHand(ItemStack item) { setGear("offhand", item); }
+
+    public ItemStack getItemInHand() { return getItemInMainHand(); }
+
+    public void setItemInHand(ItemStack item) { setItemInMainHand(item); }
+
+    public ItemStack getHelmet() { return gear("head"); }
+
+    public void setHelmet(ItemStack item) { setGear("head", item); }
+
+    public ItemStack getChestplate() { return gear("chest"); }
+
+    public void setChestplate(ItemStack item) { setGear("chest", item); }
+
+    public ItemStack getLeggings() { return gear("legs"); }
+
+    public void setLeggings(ItemStack item) { setGear("legs", item); }
+
+    public ItemStack getBoots() { return gear("feet"); }
+
+    public void setBoots(ItemStack item) { setGear("feet", item); }
+
+    public ItemStack[] getArmorContents() {
+        return new ItemStack[] {getBoots(), getLeggings(), getChestplate(), getHelmet()};
+    }
+
+    public void setArmorContents(ItemStack[] items) {
+        if (items == null) {
+            setArmorContents(new ItemStack[4]);
+            return;
+        }
+        setBoots(items.length > 0 ? items[0] : null);
+        setLeggings(items.length > 1 ? items[1] : null);
+        setChestplate(items.length > 2 ? items[2] : null);
+        setHelmet(items.length > 3 ? items[3] : null);
+    }
+
+    public float getItemInMainHandDropChance() { return dropChance("mainhand"); }
+
+    public void setItemInMainHandDropChance(float chance) { setDropChance("mainhand", chance); }
+
+    public float getItemInOffHandDropChance() { return dropChance("offhand"); }
+
+    public void setItemInOffHandDropChance(float chance) { setDropChance("offhand", chance); }
+
+    public float getHelmetDropChance() { return dropChance("head"); }
+
+    public void setHelmetDropChance(float chance) { setDropChance("head", chance); }
+
+    public float getChestplateDropChance() { return dropChance("chest"); }
+
+    public void setChestplateDropChance(float chance) { setDropChance("chest", chance); }
+
+    public float getLeggingsDropChance() { return dropChance("legs"); }
+
+    public void setLeggingsDropChance(float chance) { setDropChance("legs", chance); }
+
+    public float getBootsDropChance() { return dropChance("feet"); }
+
+    public void setBootsDropChance(float chance) { setDropChance("feet", chance); }
+
+    public float getItemInHandDropChance() { return getItemInMainHandDropChance(); }
+
+    public void setItemInHandDropChance(float chance) { setItemInMainHandDropChance(chance); }
+
     public void damage(double amount) { set("damage " + amount); }
     public void damage(double amount, Entity source) { damage(amount); }
     public boolean isDead() {

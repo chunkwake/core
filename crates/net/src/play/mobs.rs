@@ -5811,6 +5811,99 @@ impl PlayPlan {
                 mobs.get(&id)
                     .map_or_else(String::new, |e| u8::from(e.mob.sitting).to_string())
             }
+            Some("equip") => {
+                let Some(id) = f.get(1).and_then(|v| v.parse::<i32>().ok()) else {
+                    return String::new();
+                };
+                let Some(slot) = f.get(2) else {
+                    return String::new();
+                };
+                let Some(index) = mb::EQUIPMENT_SLOTS
+                    .iter()
+                    .position(|(name, _)| name == slot)
+                else {
+                    return String::new();
+                };
+                let mobs = self.sim().mobs.lock().unwrap();
+                mobs.get(&id)
+                    .and_then(|e| e.mob.item(index))
+                    .map_or_else(String::new, |stack| {
+                        crate::stack_nbt::to_line(stack, self.item_name(stack.item))
+                    })
+            }
+            Some("dropchance") => {
+                let Some(id) = f.get(1).and_then(|v| v.parse::<i32>().ok()) else {
+                    return String::new();
+                };
+                let Some(slot) = f.get(2) else {
+                    return String::new();
+                };
+                let Some(index) = mb::EQUIPMENT_SLOTS
+                    .iter()
+                    .position(|(name, _)| name == slot)
+                else {
+                    return String::new();
+                };
+                let mobs = self.sim().mobs.lock().unwrap();
+                mobs.get(&id)
+                    .map_or_else(String::new, |e| e.mob.drop_chance(index).to_string())
+            }
+            Some("setequip") => {
+                let Some(id) = f.get(1).and_then(|v| v.parse::<i32>().ok()) else {
+                    return "0".into();
+                };
+                let Some(slot) = f.get(2) else {
+                    return "0".into();
+                };
+                let Some(index) = mb::EQUIPMENT_SLOTS
+                    .iter()
+                    .position(|(name, _)| name == slot)
+                else {
+                    return "0".into();
+                };
+                let line = f.get(3..).map_or_else(String::new, |rest| rest.join(" "));
+                let stack = if line.trim().is_empty() {
+                    None
+                } else {
+                    crate::stack_nbt::from_line(&line, |name| self.item_id(name))
+                };
+                {
+                    let mut mobs = self.sim().mobs.lock().unwrap();
+                    let Some(e) = mobs.get_mut(&id) else {
+                        return "0".into();
+                    };
+                    e.mob.set_item(index, stack);
+                }
+                let network = mb::EQUIPMENT_SLOTS[index].1;
+                self.hub.send_about(
+                    id,
+                    play::set_equipment(self.ids.set_equipment, id, &[(network, stack)]),
+                );
+                "1".into()
+            }
+            Some("setdropchance") => {
+                let Some(id) = f.get(1).and_then(|v| v.parse::<i32>().ok()) else {
+                    return "0".into();
+                };
+                let Some(slot) = f.get(2) else {
+                    return "0".into();
+                };
+                let Some(index) = mb::EQUIPMENT_SLOTS
+                    .iter()
+                    .position(|(name, _)| name == slot)
+                else {
+                    return "0".into();
+                };
+                let chance = num(3).unwrap_or(f64::from(mb::DEFAULT_DROP_CHANCE)) as f32;
+                let mut mobs = self.sim().mobs.lock().unwrap();
+                let Some(e) = mobs.get_mut(&id) else {
+                    return "0".into();
+                };
+                if let Some(slot) = e.mob.drop_chances.get_mut(index) {
+                    *slot = chance.max(0.0);
+                }
+                "1".into()
+            }
             Some("set") => {
                 let Some(id) = f.get(1).and_then(|v| v.parse::<i32>().ok()) else {
                     return "0".into();
