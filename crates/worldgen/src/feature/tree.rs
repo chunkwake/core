@@ -6,6 +6,7 @@
 use super::{DIRECTION_NAMES, Features, Level, Palette, Placed, Provider, add, block_set};
 use crate::carver::{IntP, cos};
 use crate::random::{Bits, Worldgen};
+use chunkwake_world::nbt::{Compound, Tag};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -1735,6 +1736,13 @@ impl Tags {
                     for _ in 0..bees {
                         c.r.next_int_bound(599);
                     }
+                    c.level.set_block_entity(
+                        p[0],
+                        p[1],
+                        p[2],
+                        "minecraft:bee_nest",
+                        bee_nest_nbt(bees as usize),
+                    );
                 }
             }
             Decorator::LeaveVine(p) => {
@@ -2255,5 +2263,46 @@ impl Fallen {
             logs.insert(p);
         }
         self.decorate(&mut c, logs, &self.log);
+    }
+}
+
+/// `BeehiveBlockEntity` для природного гнезда: до трёх жильцов в `bees`.
+fn bee_nest_nbt(bees: usize) -> Compound {
+    let mut list = Vec::new();
+    for _ in 0..bees.min(3) {
+        let mut entity = Compound::new();
+        entity.insert("id".into(), Tag::String("minecraft:bee".into()));
+        let mut occupant = Compound::new();
+        occupant.insert("entity_data".into(), Tag::Compound(entity));
+        occupant.insert("ticks_in_hive".into(), Tag::Int(0));
+        occupant.insert("min_ticks_in_hive".into(), Tag::Int(0));
+        list.push(Tag::Compound(occupant));
+    }
+    Compound::from([("bees".into(), Tag::List(list))])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn natural_bee_nest_has_two_or_three_occupants() {
+        let nbt = bee_nest_nbt(3);
+        let Some(Tag::List(list)) = nbt.get("bees") else {
+            panic!("no bees list");
+        };
+        assert_eq!(list.len(), 3);
+        let Some(Tag::Compound(first)) = list.first() else {
+            panic!("no occupant");
+        };
+        let Some(Tag::Compound(data)) = first.get("entity_data") else {
+            panic!("no entity_data");
+        };
+        assert_eq!(data.get("id").and_then(Tag::as_str), Some("minecraft:bee"));
+        let capped_nbt = bee_nest_nbt(9);
+        let Some(Tag::List(capped)) = capped_nbt.get("bees") else {
+            panic!("no capped bees list");
+        };
+        assert_eq!(capped.len(), 3);
     }
 }
