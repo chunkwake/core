@@ -115,6 +115,35 @@ pub(super) fn is_waxed(nbt: &Compound) -> bool {
     matches!(nbt.get("is_waxed"), Some(Tag::Byte(b)) if *b != 0)
 }
 
+/// `SignBlockEntity.allowOpFeatures`: `allow_op_features` в NBT (по умолчанию
+/// false). Включает исполнение `run_command` и прочих кликов с сервера.
+pub(super) fn allow_op_features(nbt: &Compound) -> bool {
+    matches!(nbt.get("allow_op_features"), Some(Tag::Byte(b)) if *b != 0)
+}
+
+/// `Style.getClickEvent` каждой строки (`Component.getStyle` самой строки, без
+/// `extra`): сервер исполняет только `run_command`, остальное — клиент.
+pub(super) fn run_commands(side: &Compound) -> Vec<String> {
+    messages(side)
+        .iter()
+        .filter_map(|line| {
+            let Tag::Compound(line) = line else {
+                return None;
+            };
+            let Tag::Compound(click) = line.get("click_event")? else {
+                return None;
+            };
+            if click.get("action").and_then(Tag::as_str) != Some("run_command") {
+                return None;
+            }
+            match click.get("command") {
+                Some(Tag::String(command)) => Some(command.clone()),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
 /// Строка игрока со стилем прежней (`updateMessages`: `literal(raw).setStyle(old.getStyle())`).
 fn styled_like(old: &Tag, text: &str) -> Tag {
     match old {
@@ -477,6 +506,39 @@ impl PlayPlan {
         if !main_hand {
             return SignUse::Pass;
         }
+        // `SignBlockEntity.executeClickCommandsIfPresent`: команды из стилей
+        // строк исполняет сервер; `allow_op_features` включает их как gamemaster.
+        let commands = run_commands(&side(&nbt, front));
+        let mut clicked = false;
+        if !commands.is_empty() {
+            clicked = true;
+            if allow_op_features(&nbt) {
+                let name = self
+                    .hub
+                    .players
+                    .lock()
+                    .unwrap()
+                    .get(&uuid)
+                    .map(|p| p.entry.name.clone());
+                if let Some(name) = name {
+                    let source = crate::play::commands::dispatch::Source::player(uuid, name, 2);
+                    for command in &commands {
+                        let line = command.strip_prefix('/').unwrap_or(command);
+                        let _ = self.run_command(&source, line);
+                    }
+                }
+            } else {
+                // `sign.click_actions_disabled` в action bar.
+                self.send_to(
+                    uuid,
+                    chunkwake_protocol::text::system_chat_json(
+                        self.ids.system_chat,
+                        "{\"translate\":\"sign.click_actions_disabled\"}",
+                        true,
+                    ),
+                );
+            }
+        }
         if is_waxed(&nbt) {
             let sound = if id == HANGING_SIGN {
                 "minecraft:block.hanging_sign.waxed_interact_fail"
@@ -484,6 +546,9 @@ impl PlayPlan {
                 "minecraft:block.sign.waxed_interact_fail"
             };
             self.block_sound(None, sound, pos, 1.0, 1.0);
+            return SignUse::Handled;
+        }
+        if clicked {
             return SignUse::Handled;
         }
         if !other_editing && may_build && has_editable_text(&side(&nbt, front)) {
@@ -777,5 +842,68 @@ mod tests {
         )]));
         text.insert("messages".into(), Tag::List(vec![tr]));
         assert!(!has_editable_text(&text));
+    }
+
+    #[test]
+    fn click_commands_only_from_line_styles() {
+        let mut text = empty_text();
+        let command_line = Tag::Compound(Compound::from([
+            ("text".into(), Tag::String("Go".into())),
+            (
+                "click_event".into(),
+                Tag::Compound(Compound::from([
+                    ("action".into(), Tag::String("run_command".into())),
+                    ("command".into(), Tag::String("/say hi".into())),
+                ])),
+            ),
+        ]));
+        let suggest = Tag::Compound(Compound::from([
+            ("text".into(), Tag::String("Tab".into())),
+            (
+                "click_event".into(),
+                Tag::Compound(Compound::from([
+                    ("action".into(), Tag::String("suggest_command".into())),
+                    ("command".into(), Tag::String("/say no".into())),
+                ])),
+            ),
+        ]));
+        // Команда во вложенном `extra` не исполняется: ваниль смотрит стиль
+        // самой строки.
+        let nested = Tag::Compound(Compound::from([
+            ("text".into(), Tag::String("Nested".into())),
+            (
+                "extra".into(),
+                Tag::List(vec![Tag::Compound(Compound::from([(
+                    "click_event".into(),
+                    Tag::Compound(Compound::from([
+                        ("action".into(), Tag::String("run_command".into())),
+                        ("command".into(), Tag::String("/say nested".into())),
+                    ])),
+                )]))]),
+            ),
+        ]));
+        text.insert(
+            "messages".into(),
+            Tag::List(vec![
+                command_line,
+                suggest,
+                nested,
+                Tag::String(String::new()),
+            ]),
+        );
+        assert_eq!(run_commands(&text), vec!["/say hi".to_owned()]);
+    }
+
+    #[test]
+    fn allow_op_features_defaults_false() {
+        assert!(!allow_op_features(&Compound::new()));
+        assert!(!allow_op_features(&Compound::from([(
+            "allow_op_features".into(),
+            Tag::Byte(0),
+        )])));
+        assert!(allow_op_features(&Compound::from([(
+            "allow_op_features".into(),
+            Tag::Byte(1),
+        )])));
     }
 }
