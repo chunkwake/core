@@ -3888,7 +3888,18 @@ impl PlayPlan {
     /// `true` - колонка доступна для чтения и тика.
     pub(crate) fn ensure_chunk(&self, x: i32, z: i32, generate: bool) -> bool {
         // Рельеф уже вставлен волной. Мобы — после него, не на плоском шаблоне.
-        self.ensure_region(x, z);
+        // Регион читаем только когда столбца нет: у частично выгруженного
+        // региона `evicted` иначе перечитывал бы файл на каждое обращение к
+        // оставшимся в памяти чанкам (циклическая выгрузка/загрузка).
+        if !self
+            .dim_state()
+            .edited
+            .read()
+            .unwrap()
+            .contains_key(&(x, z))
+        {
+            self.ensure_region(x, z);
+        }
         let missing = !self
             .dim_state()
             .edited
@@ -3918,7 +3929,16 @@ impl PlayPlan {
     /// индексы, свет (sky/block по 2048 на секцию) и heightmap.
     pub(crate) fn load_chunk(&self, x: i32, z: i32, generate: bool) -> bool {
         // Сначала диск: flat-чанк мог быть сохранён плагином/WorldEdit.
-        self.ensure_region(x, z);
+        // Читаем регион только для отсутствующего столбца (см. `ensure_chunk`).
+        if !self
+            .dim_state()
+            .edited
+            .read()
+            .unwrap()
+            .contains_key(&(x, z))
+        {
+            self.ensure_region(x, z);
+        }
         if !self.has_terrain() {
             let template = self.template().clone();
             let mut world = self.dim_state().edited.write().unwrap();
@@ -4358,11 +4378,15 @@ impl PlayPlan {
         }
         let key = (x >> 4, z >> 4);
         let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
-        self.wait_lent(self.dim_state(), key);
+        let lent = self.wait_lent(self.dim_state(), key);
         // Колонка могла быть выгружена (`unload_far`) и лежать на диске:
         // поднимаем регион, иначе правка ляжет в шаблон и сотрёт всё, что
         // было сохранено в этом чанке (баг «запись из плагина пропала»).
-        self.ensure_region(key.0, key.1);
+        // Но только для отсутствующего столбца: у частично выгруженного
+        // региона флаг `evicted` иначе перечитывал бы файл на каждую правку.
+        if !lent && !self.dim_state().edited.read().unwrap().contains_key(&key) {
+            self.ensure_region(key.0, key.1);
+        }
         // Чанк шума появится при отправке игроку, а не из тика.
         // В шумовом мире чанк появляется при первом обращении: `/setblock` и
         // портал должны работать до того, как чанк дойдёт до игрока.
@@ -5039,8 +5063,10 @@ impl PlayPlan {
         keys.dedup();
         let mut ready: FastSet<(i32, i32)> = FastSet::default();
         for key in keys {
-            self.wait_lent(self.dim_state(), key);
-            self.ensure_region(key.0, key.1);
+            let lent = self.wait_lent(self.dim_state(), key);
+            if !lent && !self.dim_state().edited.read().unwrap().contains_key(&key) {
+                self.ensure_region(key.0, key.1);
+            }
             if self.has_terrain() && !self.dim_state().edited.read().unwrap().contains_key(&key) {
                 self.generate_chunk(key.0, key.1);
                 if !self.dim_state().edited.read().unwrap().contains_key(&key) {
@@ -7013,7 +7039,11 @@ impl PlayPlan {
     /// Помечает чанк сущности к перезаписи в `entities/*.mca`.
     pub(super) fn mark_entity_changed(&self, pos: [f64; 3]) {
         let key = ((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
-        self.ensure_region(key.0, key.1);
+        // Сущность живёт в уже загруженном чанке; регион нужен только когда
+        // столбца нет (иначе частичная выгрузка вызывала бы перечитывание).
+        if !self.dim_state().edited.read().unwrap().contains_key(&key) {
+            self.ensure_region(key.0, key.1);
+        }
         self.sim().entity_new.lock().unwrap().insert(key);
     }
 
@@ -7225,6 +7255,17 @@ impl PlayPlan {
     /// Блоки чанка, если его ещё нет. `true` — столбец только что вставлен.
     /// Диск не затирается. Свет ставит [`Self::spread_commit`], не этот вызов.
     fn generate_chunk(&self, x: i32, z: i32) -> bool {
+        // Столбец уже в памяти: не перечитываем регион из-за `evicted`
+        // (частичная выгрузка оставляет флаг на весь регион).
+        if self
+            .dim_state()
+            .edited
+            .read()
+            .unwrap()
+            .contains_key(&(x, z))
+        {
+            return false;
+        }
         self.ensure_region(x, z);
         let Some(generate) = &self.terrain() else {
             return false;

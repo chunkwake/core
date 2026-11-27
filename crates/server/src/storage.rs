@@ -347,9 +347,10 @@ impl WorldStorage {
 
     /// Выгружает столбцы вдали от игроков, дописывая на диск те, которых
     /// там ещё нет. Под замком сейва: запись не перемешается с автосейвом.
-    pub fn unload(&self, plan: &PlayPlan) -> usize {
+    pub fn unload(&self, plan: &PlayPlan) -> (usize, String) {
         let _guard = self.save_lock.lock().unwrap();
         let mut total = 0;
+        let mut breakdown = Vec::new();
         for (dim, _, _) in plan.dimension_layouts() {
             let dims = self.dim(dim.key());
             let Some(store) = dims.get(dim.key()) else {
@@ -368,14 +369,18 @@ impl WorldStorage {
                 }
                 Ok(())
             };
-            total += plan.unload_far(dim, &write);
+            let n = plan.unload_far(dim, &write);
+            total += n;
+            if n != 0 {
+                breakdown.push(format!("{}={n}", dim.key()));
+            }
         }
         plan.trim_idle_generators();
         if total != 0 {
             // Сборка идёт в блокирующем выгрузчике, вне потока тика.
             unsafe { libmimalloc_sys::mi_collect(true) };
         }
-        total
+        (total, breakdown.join(" "))
     }
 
     /// Выгрузка раз в несколько секунд, в блокирующем пуле.
@@ -389,9 +394,9 @@ impl WorldStorage {
                 let (storage, plan) = (storage.clone(), plan.clone());
                 let started = std::time::Instant::now();
                 match tokio::task::spawn_blocking(move || storage.unload(&plan)).await {
-                    Ok(0) => {}
-                    Ok(n) => tracing::debug!(
-                        "unloaded {n} chunks ({} ms)",
+                    Ok((0, _)) => {}
+                    Ok((n, by)) => tracing::debug!(
+                        "unloaded {n} chunks ({} ms) [{by}]",
                         started.elapsed().as_millis()
                     ),
                     Err(e) => tracing::error!("unload task: {e}"),
