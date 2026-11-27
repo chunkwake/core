@@ -37,7 +37,7 @@ pub(super) struct MobEntry {
     /// Тип урона добивающего удара (`minecraft:arrow`, `minecraft:trident`, ...).
     killer_damage: Option<&'static str>,
     killer: Option<(Uuid, i32)>,
-    environment: crate::environment::State,
+    pub(super) environment: crate::environment::State,
     /// Транспорт моба (лодка): позицию и поворот задаёт он (`rideTick`).
     pub(super) vehicle: Option<i32>,
     fall: f64,

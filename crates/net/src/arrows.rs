@@ -42,6 +42,10 @@ pub enum ThrownKind {
     Lingering,
     /// `ThrownExperienceBottle` (`minecraft:experience_bottle`).
     Experience,
+    /// `SmallFireball` из раздатчика (огненный заряд): ускоряется вперёд.
+    SmallFireball,
+    /// `WindCharge`: без гравитации и трения, взрыв-порыв при попадании.
+    WindCharge,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -113,6 +117,8 @@ impl Arrow {
             Some(ThrownKind::Potion) => "minecraft:splash_potion",
             Some(ThrownKind::Lingering) => "minecraft:lingering_potion",
             Some(ThrownKind::Experience) => "minecraft:experience_bottle",
+            Some(ThrownKind::SmallFireball) => "minecraft:small_fireball",
+            Some(ThrownKind::WindCharge) => "minecraft:wind_charge",
             None => "minecraft:arrow",
         }
     }
@@ -454,7 +460,20 @@ pub fn step_frames(
         }
         return hits;
     }
-    let drag = if water(a.pos.map(|c| c.floor() as i32)) {
+    let liquid = water(a.pos.map(|c| c.floor() as i32));
+    if a.thrown_kind == Some(ThrownKind::SmallFireball) {
+        // `AbstractHurtingProjectile.applyInertia`: разгон к текущему
+        // направлению (0.1) и трение 0.95 (в воде 0.8).
+        let l = len(a.vel).max(1e-9);
+        let inertia = if liquid { 0.8 } else { 0.95 };
+        a.vel = a.vel.map(|v| (v + v / l * 0.1) * inertia);
+        return hits;
+    }
+    if a.thrown_kind == Some(ThrownKind::WindCharge) {
+        // `AbstractWindCharge`: `accelerationPower = 0`, инерция 1.0.
+        return hits;
+    }
+    let drag = if liquid {
         if a.thrown {
             THROWN_WATER_DRAG
         } else {
@@ -781,5 +800,52 @@ mod tests {
             matches!(hits.as_slice(), [Hit::Player(1, _, _)]),
             "стрела не попала в союзника: {hits:?}"
         );
+    }
+
+    fn fireball(kind: ThrownKind) -> Arrow {
+        let mut a = Arrow::flight([0.0, 64.0, 0.0], [1.0, 0.0, 0.0], true);
+        a.thrown_kind = Some(kind);
+        a
+    }
+
+    #[test]
+    fn small_fireball_accelerates_without_gravity() {
+        let mut a = fireball(ThrownKind::SmallFireball);
+        let hits = step(
+            &mut a,
+            &[],
+            &[],
+            |_, _| true,
+            |_| false,
+            |_| false,
+            |_, to| to,
+        );
+        assert!(hits.is_empty());
+        // `(v + normalize(v)·0.1) · 0.95`.
+        assert!((a.vel[0] - 1.045).abs() < 1e-6, "{:?}", a.vel);
+        assert_eq!(a.vel[1], 0.0);
+        assert_eq!(a.pos[1], 64.0);
+        assert!(a.pos[0] > 0.0);
+    }
+
+    #[test]
+    fn wind_charge_flies_straight() {
+        let mut a = fireball(ThrownKind::WindCharge);
+        let before = a.vel;
+        let hits = step(
+            &mut a,
+            &[],
+            &[],
+            |_, _| true,
+            |_| false,
+            |_| false,
+            |_, to| to,
+        );
+        assert!(hits.is_empty());
+        assert_eq!(
+            a.vel, before,
+            "у ветряного заряда нет ни трения, ни гравитации"
+        );
+        assert_eq!(a.pos[1], 64.0);
     }
 }

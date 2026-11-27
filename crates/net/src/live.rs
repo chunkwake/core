@@ -192,6 +192,8 @@ pub enum Control {
     },
     /// Внутреннее: урон извне сессии (стрела из раздатчика).
     Hurt(f32, crate::survival::Cause, Option<[f64; 3]>, f32),
+    /// Внутреннее: поджечь игрока на N тиков (`Entity.igniteForSeconds`).
+    Ignite(u32),
     /// Мгновенное лечение от взрывного зелья с силой по расстоянию.
     Heal(f32),
     /// Внутреннее (не от плагинов): содержимое сундука изменил другой игрок.
@@ -376,6 +378,7 @@ impl Control {
             Control::Selected(s) => live.selected = s,
             Control::Inventory => {}
             Control::Velocity(_) => {}
+            Control::Ignite(_) => {}
             Control::AllowFlight(_) => {}
             Control::Flying(_) => {}
             Control::Teleport(p, yaw, pitch) => {

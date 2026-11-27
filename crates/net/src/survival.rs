@@ -332,6 +332,10 @@ pub enum Cause {
     /// Взрыв фейерверка (`minecraft:fireworks`): имя другого игрока, если
     /// ракета была его; у своей ракеты `None` (`death.attack.fireworks`).
     Fireworks(Option<&'static str>),
+    /// Огненный шар раздатчика (`minecraft:unattributed_fireball`).
+    Fireball,
+    /// Ветряной заряд (`minecraft:wind_charge`): имя владельца, если был.
+    WindCharge(Option<&'static str>),
 }
 
 /// Имя игрока для `death.attack.player`: одна аллокация на имя.
@@ -400,6 +404,9 @@ impl Cause {
             Cause::SonicBoom(_) => "death.attack.sonic_boom",
             Cause::Fireworks(Some(_)) => "death.attack.fireworks.player",
             Cause::Fireworks(None) => "death.attack.fireworks",
+            Cause::Fireball => "death.attack.onFire",
+            Cause::WindCharge(Some(_)) => "death.attack.mob",
+            Cause::WindCharge(None) => "death.attack.generic",
         }
     }
 
@@ -429,6 +436,8 @@ impl Cause {
             Cause::Player(_) => "ENTITY_ATTACK",
             Cause::SonicBoom(_) => "MAGIC",
             Cause::Fireworks(_) => "ENTITY_EXPLOSION",
+            Cause::Fireball => "PROJECTILE",
+            Cause::WindCharge(_) => "MAGIC",
         }
     }
 
@@ -458,6 +467,8 @@ impl Cause {
             Cause::Player(_) => "minecraft:player_attack",
             Cause::SonicBoom(_) => "minecraft:sonic_boom",
             Cause::Fireworks(_) => "minecraft:fireworks",
+            Cause::Fireball => "minecraft:unattributed_fireball",
+            Cause::WindCharge(_) => "minecraft:wind_charge",
         }
     }
 
@@ -914,6 +925,8 @@ pub struct Vitals {
     /// `LivingEntity.invulnerableTime` и `lastHurt`.
     invulnerable: u8,
     last_damage: f32,
+    /// `Entity.remainingFireTicks`: тики горения от огненного шара.
+    pub fire_ticks: u32,
     /// `Player.getCooldowns` щита после удара топором.
     pub block_disabled_until: Option<std::time::Instant>,
 }
@@ -939,6 +952,7 @@ impl Default for Vitals {
             block_use: None,
             invulnerable: 0,
             last_damage: 0.0,
+            fire_ticks: 0,
             block_disabled_until: None,
         }
     }

@@ -9661,6 +9661,10 @@ impl PlayPlan {
         }
         let mut blasts: Vec<(BlastTarget, f32, [f64; 3], Option<Uuid>)> = Vec::new();
         let mut impacts = Vec::new();
+        // Огненный/ветряной заряд: прямое попадание и удар о блок.
+        type SpecialHit = (ar::ThrownKind, Option<Uuid>, [f64; 3], Option<u128>);
+        let mut special_hits: Vec<SpecialHit> = Vec::new();
+        let mut special_blocks: Vec<(ar::ThrownKind, [f64; 3], Option<Uuid>)> = Vec::new();
         let mut landed = Vec::new();
         // Попадания в мишень: `set_block` нельзя звать под `with_world`
         // (там уже держится чтение `edited`, а запись ждёт его же).
@@ -9831,6 +9835,17 @@ impl PlayPlan {
                                 gone.push(id);
                             }
                             ar::Hit::Block => {
+                                if matches!(
+                                    a.thrown_kind,
+                                    Some(
+                                        ar::ThrownKind::SmallFireball | ar::ThrownKind::WindCharge
+                                    )
+                                ) {
+                                    let kind = a.thrown_kind.unwrap_or(ar::ThrownKind::WindCharge);
+                                    special_blocks.push((kind, a.pos, a.owner));
+                                    gone.push(id);
+                                    continue;
+                                }
                                 landed.push(a.pos);
                                 target_hits.push(TargetHit {
                                     pos: a.pos,
@@ -9845,6 +9860,24 @@ impl PlayPlan {
                             }
                             ar::Hit::Player(k, d, vel) => {
                                 if a.thrown {
+                                    if matches!(
+                                        a.thrown_kind,
+                                        Some(
+                                            ar::ThrownKind::SmallFireball
+                                                | ar::ThrownKind::WindCharge
+                                        )
+                                    ) {
+                                        let kind =
+                                            a.thrown_kind.unwrap_or(ar::ThrownKind::WindCharge);
+                                        special_hits.push((
+                                            kind,
+                                            a.owner,
+                                            a.pos,
+                                            Some(alive_ids[k].0.as_u128()),
+                                        ));
+                                        gone.push(id);
+                                        continue;
+                                    }
                                     broken.push((id, false, a.pos));
                                     if let Some(kind) = a.thrown_kind {
                                         impacts.push((
@@ -9865,12 +9898,24 @@ impl PlayPlan {
                             }
                             ar::Hit::Mob(k, d, _) => {
                                 if a.thrown {
-                                    broken.push((id, false, a.pos));
-                                    if let Some(kind) = a.thrown_kind {
-                                        impacts.push((kind, a.owner, a.pos, a.potion_extra, None));
+                                    if matches!(
+                                        a.thrown_kind,
+                                        Some(
+                                            ar::ThrownKind::SmallFireball
+                                                | ar::ThrownKind::WindCharge
+                                        )
+                                    ) {
+                                        let kind =
+                                            a.thrown_kind.unwrap_or(ar::ThrownKind::WindCharge);
+                                        special_hits.push((
+                                            kind,
+                                            a.owner,
+                                            a.pos,
+                                            Some(mob_targets[k].0),
+                                        ));
+                                        gone.push(id);
+                                        continue;
                                     }
-                                    gone.push(id);
-                                } else {
                                     hurt_mobs.push((
                                         mob_targets[k].3,
                                         d,
@@ -10027,7 +10072,22 @@ impl PlayPlan {
                         (rand::random::<u8>() % 5) as i32 + (rand::random::<u8>() % 5) as i32;
                     self.spawn_orbs(pos, 3 + bonus);
                 }
+                // Разобраны отдельно: урон/поджог/порыв, а не «снаряд разбился».
+                ar::ThrownKind::SmallFireball | ar::ThrownKind::WindCharge => {}
             }
+        }
+        for (kind, pos, owner) in special_blocks {
+            match kind {
+                ar::ThrownKind::SmallFireball => {
+                    // `SmallFireball.onHitBlock`: огонь в соседней пустой клетке.
+                    self.ignite_at(pos.map(|c| c.floor() as i32), 0);
+                }
+                ar::ThrownKind::WindCharge => self.wind_burst(pos, owner),
+                _ => {}
+            }
+        }
+        for (kind, owner, pos, direct) in special_hits {
+            self.special_projectile_hit(kind, owner, pos, direct);
         }
         for hit in target_hits {
             self.target_hit(hit.pos, hit.vel, hit.owner, &hit.direct);
@@ -13403,6 +13463,265 @@ impl PlayPlan {
         }
     }
 
+    /// Огненный/ветряной заряд попал в сущность: урон, поджог или порыв.
+    fn special_projectile_hit(
+        &self,
+        kind: crate::arrows::ThrownKind,
+        owner: Option<Uuid>,
+        pos: [f64; 3],
+        direct: Option<u128>,
+    ) {
+        use crate::arrows::ThrownKind as K;
+        let owner_name = owner.and_then(|o| {
+            self.hub
+                .players
+                .lock()
+                .unwrap()
+                .values()
+                .find(|p| p.entry.uuid == o)
+                .map(|p| crate::survival::intern_name(&p.entry.name))
+        });
+        let Some(target) = direct else {
+            return;
+        };
+        let player = self
+            .hub
+            .players
+            .lock()
+            .unwrap()
+            .values()
+            .find(|p| p.entry.uuid.as_u128() == target)
+            .map(|p| p.entry.uuid);
+        match kind {
+            K::SmallFireball => {
+                if let Some(uuid) = player {
+                    self.push_control(uuid, Control::Hurt(5.0, Cause::Fireball, Some(pos), 0.0));
+                    self.push_control(uuid, Control::Ignite(100));
+                } else {
+                    let mut animation = None;
+                    {
+                        let mut mobs = self.sim().mobs.lock().unwrap();
+                        if let Some(e) = mobs.values_mut().find(|e| e.mob.uuid == target) {
+                            let id = e.mob.uuid;
+                            let hit = crate::mobs::hurt(
+                                &mut e.mob,
+                                5.0,
+                                crate::mobs::Source::at(pos, owner.map(|u| u.as_u128())),
+                                0.0,
+                            );
+                            // `igniteForSeconds(5)`.
+                            e.environment.burning = e.environment.burning.max(100);
+                            if hit.is_some() {
+                                animation = Some(id);
+                            }
+                        }
+                    }
+                    if let Some(uuid) = animation {
+                        let id = self
+                            .sim()
+                            .mobs
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .find(|(_, e)| e.mob.uuid == uuid)
+                            .map(|(&id, _)| id);
+                        if let Some(id) = id {
+                            self.hub
+                                .send(None, play::hurt_animation(self.ids.hurt_animation, id, 0.0));
+                        }
+                    }
+                }
+            }
+            K::WindCharge => {
+                if let Some(uuid) = player {
+                    self.push_control(
+                        uuid,
+                        Control::Hurt(1.0, Cause::WindCharge(owner_name), Some(pos), 0.0),
+                    );
+                } else {
+                    let mut animation = None;
+                    {
+                        let mut mobs = self.sim().mobs.lock().unwrap();
+                        if let Some(e) = mobs.values_mut().find(|e| e.mob.uuid == target) {
+                            let uuid = e.mob.uuid;
+                            if crate::mobs::hurt(
+                                &mut e.mob,
+                                1.0,
+                                crate::mobs::Source::at(pos, owner.map(|u| u.as_u128())),
+                                0.0,
+                            )
+                            .is_some()
+                            {
+                                animation = Some(uuid);
+                            }
+                        }
+                    }
+                    if let Some(uuid) = animation {
+                        let id = self
+                            .sim()
+                            .mobs
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .find(|(_, e)| e.mob.uuid == uuid)
+                            .map(|(&id, _)| id);
+                        if let Some(id) = id {
+                            self.hub
+                                .send(None, play::hurt_animation(self.ids.hurt_animation, id, 0.0));
+                        }
+                    }
+                }
+                self.wind_burst(pos, owner);
+            }
+            _ => {}
+        }
+    }
+
+    /// `WindCharge.explode`: порыв радиусом 1.2 — урон и отбрасывание без
+    /// разрушения блоков, частицы `gust_emitter_small` и звук взрыва.
+    fn wind_burst(&self, center: [f64; 3], owner: Option<Uuid>) {
+        let radius = 1.2f64;
+        let reach = radius * 2.0;
+        let owner_name = owner.and_then(|o| {
+            self.hub
+                .players
+                .lock()
+                .unwrap()
+                .values()
+                .find(|p| p.entry.uuid == o)
+                .map(|p| crate::survival::intern_name(&p.entry.name))
+        });
+        let cause = Cause::WindCharge(owner_name);
+        let dim = self.active_dim();
+        let players: Vec<(Uuid, [f64; 3])> = self
+            .hub
+            .players
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|p| p.dimension == dim && p.collects)
+            .map(|p| (p.entry.uuid, p.pos))
+            .collect();
+        for (uuid, feet) in players {
+            let eye = [feet[0], feet[1] + EYE_HEIGHT, feet[2]];
+            let d = [eye[0] - center[0], eye[1] - center[1], eye[2] - center[2]];
+            let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            if dist >= reach {
+                continue;
+            }
+            let exposure = self.explosion_exposure(center, eye);
+            let damage = crate::tnt::damage(dist, exposure, radius as f32);
+            if damage > 0.0 {
+                self.push_control(uuid, Control::Hurt(damage, cause, Some(center), 0.0));
+            }
+            let len = dist.max(1e-4);
+            let strength = (1.0 - dist / reach) * exposure;
+            self.push_control(
+                uuid,
+                Control::Velocity([
+                    d[0] / len * strength,
+                    d[1] / len * strength + 0.1 * strength,
+                    d[2] / len * strength,
+                ]),
+            );
+        }
+        let targets: Vec<(u128, [f64; 3])> = {
+            let mobs = self.sim().mobs.lock().unwrap();
+            mobs.values()
+                .filter(|e| e.mob.alive())
+                .map(|e| (e.mob.uuid, e.mob.pos))
+                .collect()
+        };
+        let mut hits = Vec::new();
+        for (uuid, pos) in targets {
+            let d = [pos[0] - center[0], pos[1] - center[1], pos[2] - center[2]];
+            let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            if dist >= reach {
+                continue;
+            }
+            let exposure = self.explosion_exposure(center, pos);
+            let damage = crate::tnt::damage(dist, exposure, radius as f32);
+            let len = dist.max(1e-4);
+            let strength = (1.0 - dist / reach) * exposure;
+            hits.push((
+                uuid,
+                damage,
+                [
+                    d[0] / len * strength,
+                    d[1] / len * strength + 0.1 * strength,
+                    d[2] / len * strength,
+                ],
+            ));
+        }
+        let mut animations = Vec::new();
+        {
+            let mut mobs = self.sim().mobs.lock().unwrap();
+            for (uuid, damage, vel) in hits {
+                let Some(e) = mobs.values_mut().find(|e| e.mob.uuid == uuid) else {
+                    continue;
+                };
+                if damage > 0.0
+                    && crate::mobs::hurt(
+                        &mut e.mob,
+                        damage,
+                        crate::mobs::Source::at(center, owner.map(|u| u.as_u128())),
+                        0.0,
+                    )
+                    .is_some()
+                {
+                    animations.push(e.mob.uuid);
+                }
+                e.mob.vel = [
+                    e.mob.vel[0] + vel[0],
+                    e.mob.vel[1] + vel[1],
+                    e.mob.vel[2] + vel[2],
+                ];
+            }
+        }
+        for uuid in animations {
+            if let Some(id) = self
+                .sim()
+                .mobs
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(_, e)| e.mob.uuid == uuid)
+                .map(|(&id, _)| id)
+            {
+                self.hub
+                    .send(None, play::hurt_animation(self.ids.hurt_animation, id, 0.0));
+            }
+        }
+        if let Some(&particle) = self
+            .particle_types
+            .lock()
+            .unwrap()
+            .get("minecraft:gust_emitter_small")
+        {
+            self.hub.send(
+                None,
+                play::level_particles(
+                    self.ids.level_particles,
+                    particle,
+                    false,
+                    center,
+                    [0.0; 3],
+                    0.0,
+                    1,
+                ),
+            );
+        }
+        self.play_sound(
+            None,
+            "minecraft:entity.wind_charge.burst",
+            crate::sounds::NEUTRAL,
+            center,
+            1.0,
+            1.0,
+        );
+        self.emit_vibration(center, "minecraft:explode");
+    }
+
     fn explode_tnt(&self, pos: [f64; 3]) {
         self.explode([pos[0], pos[1] + 0.0625, pos[2]], crate::tnt::POWER, false);
     }
@@ -15229,6 +15548,11 @@ impl PlayPlan {
                                 self.hurt_at(conn, me, &mut state.vitals, &mut state.inv, &mut state.xp, d, cause, origin, disable).await?;
                             }
                         }
+                        Control::Ignite(ticks) => {
+                            if !state.vitals.dead {
+                                state.vitals.fire_ticks = state.vitals.fire_ticks.max(ticks);
+                            }
+                        }
                         Control::Heal(amount) => {
                             if !state.vitals.dead {
                                 state.vitals.heal(amount);
@@ -15619,7 +15943,15 @@ impl PlayPlan {
                     let old_frozen = environment.frozen;
                     let pulse = if state.vitals.dead { environment = Default::default(); Default::default() }
                         else { environment.step(view, game_ticks, leather) };
-                    let burning_now = environment.burning > 0;
+                    // `Entity.tick` → `remainingFireTicks`: вода тушит, иначе тик тает.
+                    if state.vitals.fire_ticks > 0 {
+                        if view.submerged || environment.burning > 0 {
+                            state.vitals.fire_ticks = 0;
+                        } else {
+                            state.vitals.fire_ticks -= 1;
+                        }
+                    }
+                    let burning_now = environment.burning > 0 || state.vitals.fire_ticks > 0;
                     if burning_now != burning_visual {
                         burning_visual = burning_now;
                         self.mark_burning(uuid, burning_now);
@@ -15642,6 +15974,10 @@ impl PlayPlan {
                             (pulse.freeze && self.vars.flag("freeze_damage"), 1.0, Cause::Freeze),
                             (pulse.lava && fire_damage, 4.0, Cause::Lava),
                             (pulse.burn && fire_damage && !pulse.lava, 1.0, Cause::Fire),
+                            (state.vitals.fire_ticks > 0
+                                && environment.burning == 0
+                                && state.vitals.fire_ticks.is_multiple_of(20)
+                                && fire_damage, 1.0, Cause::Fire),
                             (pulse.cactus, 1.0, Cause::Cactus),
                             (pulse.berries && moved, 1.0, Cause::Berry),
                             (pulse.magma && fire_damage && !sneaking && !state.inv.slots[8].is_some_and(|s|
@@ -23871,6 +24207,45 @@ impl PlayPlan {
                 Some(true)
             }
             // Пустое ведро и ведро снега — в `dispense_extra`.
+            // Огненный и ветряной заряд (`ProjectileItem.DispenseConfig`):
+            // из центра блока на 1 блок вперёд, скорость 1.0, разброс
+            // `triangle(0, 0.11485)` по каждой оси.
+            "minecraft:fire_charge" | "minecraft:wind_charge" => {
+                let d = crate::placement::step(facing);
+                let center = [
+                    front[0] as f64 + 0.5 + d[0] as f64,
+                    front[1] as f64 + 0.5 + d[1] as f64,
+                    front[2] as f64 + 0.5 + d[2] as f64,
+                ];
+                let triangle = |step: i32| {
+                    (rand::random::<f64>() - rand::random::<f64>()) * 0.114_85 + f64::from(step)
+                };
+                let dir = [triangle(d[0]), triangle(d[1]), triangle(d[2])];
+                let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2])
+                    .sqrt()
+                    .max(1e-9);
+                let vel = [dir[0] / len, dir[1] / len, dir[2] / len];
+                let kind = if name == "minecraft:fire_charge" {
+                    crate::arrows::ThrownKind::SmallFireball
+                } else {
+                    crate::arrows::ThrownKind::WindCharge
+                };
+                let entity = if name == "minecraft:fire_charge" {
+                    "minecraft:small_fireball"
+                } else {
+                    "minecraft:wind_charge"
+                };
+                let ty = self
+                    .survival
+                    .entity_types
+                    .get(entity)
+                    .copied()
+                    .unwrap_or(self.survival.arrow_entity_type);
+                let mut shot = crate::arrows::Arrow::flight(center, vel, true);
+                shot.thrown_kind = Some(kind);
+                self.launch(ty, shot);
+                Some(true)
+            }
             // Стрела (`ProjectileDispenseBehavior`): из центра грани, сила 1.1, разброс 6.
             "minecraft:arrow"
             | "minecraft:snowball"
@@ -28388,6 +28763,8 @@ impl PlayPlan {
             Cause::MobArrow(_) => Some(self.survival.damage_arrow),
             Cause::MobExplosion(_) => Some(self.survival.damage_explosion),
             Cause::Fireworks(_) => Some(self.survival.damage_explosion),
+            Cause::Fireball => Some(self.survival.damage_fire),
+            Cause::WindCharge(_) => Some(self.survival.damage_explosion),
             Cause::Generic => None,
         };
         if let Some(t) = damage_type {
