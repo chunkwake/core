@@ -3526,17 +3526,24 @@ pub struct StructureSpawn {
 /// Первая структура в точке, у которой есть `spawn_overrides` этой категории
 /// (`ChunkGenerator.getMobsAt` перебирает структуры старта).
 pub fn structure_spawn_for<'a>(
-    names: &std::collections::HashSet<String>,
+    piece_names: &std::collections::HashSet<String>,
+    full_names: &std::collections::HashSet<String>,
     spawns: &'a std::collections::HashMap<
         String,
         std::collections::HashMap<String, StructureSpawn>,
     >,
     cat: Category,
 ) -> Option<&'a StructureSpawn> {
-    names.iter().find_map(|name| {
-        spawns
+    piece_names.iter().chain(full_names).find_map(|name| {
+        let spawn = spawns
             .get(name)
-            .and_then(|by_category| by_category.get(cat.key()))
+            .and_then(|by_category| by_category.get(cat.key()))?;
+        let inside = if spawn.full_box {
+            full_names.contains(name)
+        } else {
+            piece_names.contains(name)
+        };
+        inside.then_some(spawn)
     })
 }
 
@@ -6053,16 +6060,41 @@ mod tests {
             std::collections::HashMap::from([("monster".to_owned(), witch)]),
         );
         let names = std::collections::HashSet::from(["minecraft:swamp_hut".to_owned()]);
-        let found = structure_spawn_for(&names, &spawns, Category::Monster).unwrap();
+        let empty = std::collections::HashSet::new();
+        let found = structure_spawn_for(&names, &empty, &spawns, Category::Monster).unwrap();
         assert_eq!(found.entries[0].species, Some(Species::Witch));
-        assert!(structure_spawn_for(&names, &spawns, Category::Creature).is_none());
+        assert!(structure_spawn_for(&names, &empty, &spawns, Category::Creature).is_none());
         assert!(
             structure_spawn_for(
                 &std::collections::HashSet::from(["minecraft:plains".to_owned()]),
+                &empty,
                 &spawns,
                 Category::Monster
             )
             .is_none()
+        );
+        // `bounding_box: full` ищется по рамке старта, а не по кускам.
+        let pillager = StructureSpawn {
+            full_box: true,
+            entries: vec![SpawnEntry {
+                species: Some(Species::Pillager),
+                weight: 1,
+                min: 1,
+                max: 1,
+            }],
+        };
+        spawns.insert(
+            "minecraft:pillager_outpost".to_owned(),
+            std::collections::HashMap::from([("monster".to_owned(), pillager)]),
+        );
+        let outpost = std::collections::HashSet::from(["minecraft:pillager_outpost".to_owned()]);
+        assert!(
+            structure_spawn_for(&empty, &outpost, &spawns, Category::Monster).is_some(),
+            "точка между кусками внутри полной рамки"
+        );
+        assert!(
+            structure_spawn_for(&outpost, &empty, &spawns, Category::Monster).is_none(),
+            "кусок без полной рамки не подходит для full"
         );
     }
 

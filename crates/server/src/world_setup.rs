@@ -199,9 +199,12 @@ fn dynamic_world_factory(
             std::sync::Arc::new(move |name, origin, excluded| {
                 locate_struct_world.locate_structure(name, origin, excluded)
             });
+        let structures_full_world = world.clone();
         let structures_world = world;
         let structures_at: chunkwake_net::play::StructuresAtFn =
             std::sync::Arc::new(move |pos| structures_world.structures_at(pos));
+        let structures_full_at: chunkwake_net::play::StructuresAtFn =
+            std::sync::Arc::new(move |pos| structures_full_world.structures_full_at(pos));
         Ok(chunkwake_net::play::DynamicGen {
             seed,
             terrain: Some(terrain),
@@ -209,6 +212,7 @@ fn dynamic_world_factory(
             locate_biome: Some(locate_biome),
             locate_structure: Some(locate_structure),
             structures_at: Some(structures_at),
+            structures_full_at: Some(structures_full_at),
         })
     })
 }
@@ -385,7 +389,7 @@ pub fn build_play_plan(
                     // Ванильный `FlatLevelGeneratorSettings.seaLevel` — на 1
                     // выше нижней секции (для 1.18+ это -63, не 63).
                     let sea = dim.min_y + 1;
-                    (None, None, None, None, None, None, sea, true)
+                    (None, None, None, None, None, None, None, sea, true)
                 }
                 level::Kind::Noise(noise) => {
                     let state = |name: &str| blocks.default_state(name).ok().map(|s| s as u32);
@@ -450,9 +454,13 @@ pub fn build_play_plan(
                         std::sync::Arc::new(move |name, origin, excluded| {
                             locate_struct_world.locate_structure(name, origin, excluded)
                         });
+                    let structures_full_world = overworld.clone();
                     let structures_world = overworld.clone();
                     let structures_at: StructuresAtFn =
                         std::sync::Arc::new(move |pos| structures_world.structures_at(pos));
+                    let structures_full_at: StructuresAtFn = std::sync::Arc::new(move |pos| {
+                        structures_full_world.structures_full_at(pos)
+                    });
                     let trim_world = overworld;
                     let trim_idle: chunkwake_net::play::TerrainTrimFn =
                         std::sync::Arc::new(move || trim_world.trim_idle());
@@ -468,6 +476,7 @@ pub fn build_play_plan(
                         Some(locate),
                         Some(locate_structure),
                         Some(structures_at),
+                        Some(structures_full_at),
                         Some(stand),
                         sea,
                         false,
@@ -489,6 +498,7 @@ pub fn build_play_plan(
         locate_biome,
         locate_structure,
         structures_at,
+        structures_full_at,
         spawn_noise,
         sea_level,
         is_flat,
@@ -609,6 +619,7 @@ pub fn build_play_plan(
                 locate_biome,
                 locate_structure,
                 structures_at,
+                structures_full_at,
                 void_platform: void_blocks,
                 min_y: dim.min_y,
                 seed: level.seed,
@@ -1990,9 +2001,12 @@ fn build_dimension(
     let locate_world = built.clone();
     let locate_biome: Locate =
         std::sync::Arc::new(move |name, origin, _excluded| locate_world.locate_biome(name, origin));
+    let structures_full_world = built.clone();
     let structures_world = built.clone();
     let structures_at: StructuresAtFn =
         std::sync::Arc::new(move |pos| structures_world.structures_at(pos));
+    let structures_full_at: StructuresAtFn =
+        std::sync::Arc::new(move |pos| structures_full_world.structures_full_at(pos));
     let locate_struct_world = built;
     let locate_structure: Locate = std::sync::Arc::new(move |name, origin, excluded| {
         locate_struct_world.locate_structure(name, origin, excluded)
@@ -2008,6 +2022,7 @@ fn build_dimension(
         locate_biome: Some(locate_biome),
         locate_structure: Some(locate_structure),
         structures_at: Some(structures_at),
+        structures_full_at: Some(structures_full_at),
         void_platform: None,
         min_y,
         seed,

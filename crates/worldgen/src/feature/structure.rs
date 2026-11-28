@@ -469,6 +469,20 @@ type PieceBox = (String, [i32; 3], [i32; 3]);
 /// Кэш рамок кусков по чанку для `getStructureAt`.
 type AtCache = Mutex<HashMap<(i32, i32), Arc<Vec<PieceBox>>>>;
 
+/// `StructureStart.getBoundingBox`: объединение рамок всех кусков.
+fn union_bounds<'a>(
+    mut boxes: impl Iterator<Item = ([i32; 3], [i32; 3])> + 'a,
+) -> Option<([i32; 3], [i32; 3])> {
+    let (mut min, mut max) = boxes.next()?;
+    for (lo, hi) in boxes {
+        for i in 0..3 {
+            min[i] = min[i].min(lo[i]);
+            max[i] = max[i].max(hi[i]);
+        }
+    }
+    Some((min, max))
+}
+
 pub(crate) struct Structures {
     sets: Vec<Set>,
     pools: HashMap<String, Pool>,
@@ -484,6 +498,9 @@ pub(crate) struct Structures {
     cache: LayoutCache,
     /// Рамки кусков по чанку для `getStructureAt` (`location.structures`).
     at_cache: AtCache,
+    /// Рамка всего старта (`StructureStart.getBoundingBox`), для `spawn_overrides`
+    /// с `bounding_box: full`.
+    full_at_cache: AtCache,
     /// Кольца крепости на сид мира. Финальный чанк заполняется по мере надобности.
     ring_cache: Mutex<HashMap<i64, Vec<RingSlot>>>,
     /// Тег `minecraft:village` → id структур из `tags/worldgen/structure`.
@@ -573,6 +590,7 @@ impl Structures {
             empty: Arc::new(Elem::Empty),
             cache: Mutex::new(HashMap::new()),
             at_cache: Mutex::new(HashMap::new()),
+            full_at_cache: Mutex::new(HashMap::new()),
             ring_cache: Mutex::new(HashMap::new()),
             tags: load_structure_tags(data_dir)?,
             failures,
@@ -658,6 +676,43 @@ impl Structures {
             }
             let boxes = Arc::new(out);
             let mut cache = self.at_cache.lock().unwrap();
+            if cache.len() >= 4096 && !cache.contains_key(&(cx, cz)) {
+                cache.clear();
+            }
+            cache.insert((cx, cz), boxes.clone());
+            boxes
+        });
+        boxes
+            .iter()
+            .filter(|(_, min, max)| (0..3).all(|i| pos[i] >= min[i] && pos[i] <= max[i]))
+            .map(|(name, _, _)| name.clone())
+            .collect()
+    }
+
+    /// `getAllStructuresAt` с рамкой всего `StructureStart` (`bounding_box: full`).
+    pub(crate) fn at_full(
+        &self,
+        columns: &dyn Columns,
+        pos: [i32; 3],
+    ) -> std::collections::HashSet<String> {
+        let (cx, cz) = (pos[0] >> 4, pos[2] >> 4);
+        let boxes = {
+            let cache = self.full_at_cache.lock().unwrap();
+            cache.get(&(cx, cz)).cloned()
+        };
+        let boxes = boxes.unwrap_or_else(|| {
+            let mut out = Vec::new();
+            for (si, _, _, layout) in self.nearby(cx, cz, REACH, columns) {
+                let Some((min, max)) = union_bounds(layout.pieces.iter().map(|p| (p.min, p.max)))
+                else {
+                    continue;
+                };
+                for kind in &self.sets[si].kinds {
+                    out.push((kind.name.clone(), min, max));
+                }
+            }
+            let boxes = Arc::new(out);
+            let mut cache = self.full_at_cache.lock().unwrap();
             if cache.len() >= 4096 && !cache.contains_key(&(cx, cz)) {
                 cache.clear();
             }
@@ -4086,6 +4141,17 @@ pub(crate) fn frequency_ok(frequency: Option<f32>, seed: i64, cx: i32, cz: i32) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_bounds_cover_gap_between_pieces() {
+        let pieces = [([0, 0, 0], [1, 2, 2]), ([4, 0, 0], [5, 2, 2])];
+        let (min, max) = union_bounds(pieces.iter().copied()).unwrap();
+        assert_eq!((min, max), ([0, 0, 0], [5, 2, 2]));
+        let gap = [2, 1, 1];
+        let inside = |b: ([i32; 3], [i32; 3])| (0..3).all(|i| gap[i] >= b.0[i] && gap[i] <= b.1[i]);
+        assert!(inside((min, max)));
+        assert!(pieces.iter().all(|&b| !inside(b)), "точка между кусками");
+    }
 
     #[test]
     fn trial_prefix_detail() {

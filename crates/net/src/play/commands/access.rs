@@ -138,6 +138,11 @@ impl PlayPlan {
         self.dim_state().structures_at_fn()
     }
 
+    /// `getAllStructuresAt` по рамке всего старта (для `bounding_box: full`).
+    pub(crate) fn structures_full_at_fn(&self) -> Option<crate::play::StructuresAtFn> {
+        self.dim_state().structures_full_at_fn()
+    }
+
     /// Все цели мира для селекторов: игроки, мобы, выпавшие предметы, стрелы.
     pub(crate) fn command_targets(&self) -> Vec<Target> {
         // Точная ёмкость: иначе вектор растёт и копирует цели два-три раза.

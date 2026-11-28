@@ -503,6 +503,18 @@ impl Overworld {
         structures.at(&columns, pos)
     }
 
+    /// `StructureManager.getAllStructuresAt` с рамкой всего старта
+    /// (`spawn_overrides` с `bounding_box: full`).
+    pub fn structures_full_at(&self, pos: [i32; 3]) -> HashSet<String> {
+        let Some(structures) = self.features.as_ref().and_then(|f| f.structures.as_ref()) else {
+            return HashSet::new();
+        };
+        let Some(columns) = self.columns() else {
+            return HashSet::new();
+        };
+        structures.at_full(&columns, pos)
+    }
+
     fn columns(&self) -> Option<Cols<'_>> {
         let features = self.features.as_ref()?;
         Some(Cols {

@@ -520,6 +520,7 @@ pub struct DynamicGen {
     pub locate_biome: Option<LocateFn>,
     pub locate_structure: Option<LocateFn>,
     pub structures_at: Option<StructuresAtFn>,
+    pub structures_full_at: Option<StructuresAtFn>,
 }
 
 /// Собирает [`DynamicGen`] по сиду: тот же тип мира, что у базового уровня.
@@ -2290,6 +2291,8 @@ pub(crate) struct DimState {
     locate_structure: Option<LocateFn>,
     /// Структуры, в которые попадает точка (для `location.structures`).
     structures_at: Option<StructuresAtFn>,
+    /// То же по рамке всего старта (`spawn_overrides` `bounding_box: full`).
+    structures_full_at: Option<StructuresAtFn>,
     /// Плоский `the_void`: камень и булыжник платформы.
     void_platform: Option<(u32, u32)>,
     min_y: i32,
@@ -2353,6 +2356,7 @@ impl DimState {
             locate_biome: spec.locate_biome,
             locate_structure: spec.locate_structure,
             structures_at: spec.structures_at,
+            structures_full_at: spec.structures_full_at,
             void_platform: spec.void_platform,
             min_y: spec.min_y,
             seed: std::sync::atomic::AtomicI64::new(spec.seed),
@@ -2458,6 +2462,17 @@ impl DimState {
         self.structures_at.clone()
     }
 
+    /// `StructureManager.getAllStructuresAt` по рамке старта — для
+    /// `spawn_overrides` с `bounding_box: full`.
+    fn structures_full_at_fn(&self) -> Option<StructuresAtFn> {
+        if self.gen_override.load(std::sync::atomic::Ordering::Acquire)
+            && let Some(generator) = self.custom_gen.read().unwrap().as_ref()
+        {
+            return generator.structures_full_at.clone();
+        }
+        self.structures_full_at.clone()
+    }
+
     /// Есть ли у измерения генерация (для `block_in`): без замка в hot path.
     fn has_terrain(&self) -> bool {
         self.gen_override.load(std::sync::atomic::Ordering::Acquire) || self.terrain.is_some()
@@ -2506,6 +2521,7 @@ pub struct DimSpec {
     pub locate_biome: Option<LocateFn>,
     pub locate_structure: Option<LocateFn>,
     pub structures_at: Option<StructuresAtFn>,
+    pub structures_full_at: Option<StructuresAtFn>,
     pub void_platform: Option<(u32, u32)>,
     pub min_y: i32,
     /// Сид этого измерения (`World.getSeed`); у динамического мира — свой.
@@ -3817,6 +3833,7 @@ impl PlayPlan {
                                 locate_biome: spec.locate_biome.clone(),
                                 locate_structure: spec.locate_structure.clone(),
                                 structures_at: spec.structures_at.clone(),
+                                structures_full_at: spec.structures_full_at.clone(),
                                 void_platform: spec.void_platform,
                                 min_y: spec.min_y,
                                 seed: spec.seed,
@@ -30543,6 +30560,7 @@ mod tests {
             locate_biome: None,
             locate_structure: None,
             structures_at: None,
+            structures_full_at: None,
             void_platform: None,
             min_y: 0,
             seed: 42,
@@ -30571,6 +30589,7 @@ mod tests {
                 locate_biome: None,
                 locate_structure: None,
                 structures_at: None,
+                structures_full_at: None,
             })
         });
         let block = |dim: Dimension| {

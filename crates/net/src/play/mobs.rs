@@ -6826,9 +6826,17 @@ impl PlayPlan {
         cat: mb::Category,
     ) -> Option<Vec<mb::SpawnEntry>> {
         let at = self.structures_at_fn()?;
-        let names = at(pos);
-        mb::structure_spawn_for(&names, &self.survival.structure_spawns, cat)
-            .map(|spawn| spawn.entries.clone())
+        let piece_names = at(pos);
+        let full_names = self
+            .structures_full_at_fn()
+            .map_or_else(std::collections::HashSet::new, |full| full(pos));
+        mb::structure_spawn_for(
+            &piece_names,
+            &full_names,
+            &self.survival.structure_spawns,
+            cat,
+        )
+        .map(|spawn| spawn.entries.clone())
     }
 
     /// Одна попытка категории в чанке (`spawnCategoryForChunk`): случайная
