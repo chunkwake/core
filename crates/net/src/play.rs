@@ -1459,6 +1459,30 @@ fn chunk_square(center: (i32, i32), r: i32, out: &mut FastSet<(i32, i32)>) {
     }
 }
 
+/// `BrushItem`: непрерывное использование щётки по блоку.
+struct BrushUse {
+    slot: usize,
+    pos: [i32; 3],
+    ticks: u32,
+    hits: u8,
+}
+
+/// Один мазок: новое число попаданий, `dusted` 0–3 и завершён ли блок.
+fn brush_progress(hits: u8) -> (u8, u8, bool) {
+    let hits = hits.saturating_add(1);
+    (hits, (hits / 3).min(3), hits >= 10)
+}
+
+/// Результат одного «мазка» (`BrushableBlockEntity.brush`).
+enum BrushHit {
+    /// Блок не brushable.
+    Miss,
+    /// Промежуточное состояние: новый state, число попаданий и звук.
+    Progress(u32, u8, &'static str),
+    /// Десятое попадание: новый блок, дроп и звук.
+    Done(u32, Vec<Stack>, &'static str),
+}
+
 /// Удержание копья (`KineticWeapon`) игроком.
 struct SpearUse {
     slot: usize,
@@ -15579,6 +15603,8 @@ impl PlayPlan {
         let mut drawing: Option<(usize, u64)> = None;
         // `SpyglassItem`: подзорная труба используется (для `using_item`).
         let mut spyglass: Option<usize> = None;
+        // `BrushItem`: щётка и текущий brushable-блок.
+        let mut brush_use: Option<BrushUse> = None;
         // Питьё зелья: слот, предмет, компоненты и момент окончания.
         let mut drinking: Option<(usize, i32, u32, Instant)> = None;
         // Копьё в режиме удержания (`KineticWeapon`).
@@ -16054,6 +16080,86 @@ impl PlayPlan {
                             // остальные машины состояний чистят себя сами.
                             None if spyglass == Some(slot) => spyglass = None,
                             None => {}
+                        }
+                    }
+                    if let Some(mut b) = brush_use.take() {
+                        b.ticks += 1;
+                        let reach = if login.spawn.game_mode == 1 { 5.0 } else { 4.5 };
+                        let held = state.inv.slots.get(b.slot).copied().flatten();
+                        let still = !state.vitals.dead
+                            && held.is_some_and(|s| self.item_name(s.item) == "minecraft:brush")
+                            && self.player_at(uuid).is_some_and(|(p, _, _)| {
+                                block_reach(eye_of(p), b.pos, reach + 1.0)
+                            })
+                            && self.block(b.pos).is_some_and(|s| {
+                                matches!(
+                                    self.state_name(s),
+                                    "minecraft:suspicious_sand" | "minecraft:suspicious_gravel"
+                                )
+                            });
+                        if still {
+                            if b.ticks % 10 == 5 {
+                                let at = [
+                                    b.pos[0] as f64 + 0.5,
+                                    b.pos[1] as f64 + 0.5,
+                                    b.pos[2] as f64 + 0.5,
+                                ];
+                                match self.brush_hit(b.pos, b.hits) {
+                                    BrushHit::Miss => {}
+                                    BrushHit::Progress(state_id, hits, sound) => {
+                                        self.set_block(b.pos, state_id);
+                                        conn.send(&play::block_update(
+                                            ids.block_update,
+                                            b.pos,
+                                            state_id as i32,
+                                        ))
+                                        .await?;
+                                        self.play_sound(
+                                            None,
+                                            sound,
+                                            crate::sounds::BLOCKS,
+                                            at,
+                                            1.0,
+                                            1.0,
+                                        );
+                                        b.hits = hits;
+                                        brush_use = Some(b);
+                                    }
+                                    BrushHit::Done(state_id, drops, sound) => {
+                                        conn.send(&play::block_update(
+                                            ids.block_update,
+                                            b.pos,
+                                            state_id as i32,
+                                        ))
+                                        .await?;
+                                        self.play_sound(
+                                            None,
+                                            sound,
+                                            crate::sounds::BLOCKS,
+                                            at,
+                                            1.0,
+                                            1.0,
+                                        );
+                                        for stack in drops {
+                                            let vel = items::pop_velocity(
+                                                rand::random(),
+                                                rand::random(),
+                                            );
+                                            self.drop_item(at, vel, stack, items::BLOCK_DELAY);
+                                        }
+                                        if login.spawn.game_mode != 1
+                                            && let Some(mut s) = state.inv.slots[b.slot]
+                                        {
+                                            state.inv.slots[b.slot] =
+                                                (!self.wear_one(&mut s)).then_some(s);
+                                            self.send_slots(conn, &mut state.inv, &[b.slot])
+                                                .await?;
+                                        }
+                                    }
+                                }
+                            } else {
+                                brush_use = Some(b);
+                            }
                         }
                     }
                     self.award_stat(uuid, "minecraft:custom", "minecraft:play_time", 1);
@@ -18362,6 +18468,7 @@ impl PlayPlan {
                             }
                             play::RELEASE_USE_ITEM => {
                                 spyglass = None;
+                                brush_use = None;
                                 if let Some((slot, start)) = drawing.take() {
                                     self.release_draw(
                                         conn,
@@ -18457,6 +18564,36 @@ impl PlayPlan {
                         {
                             let name = self.item_name(held.item).to_owned();
                             self.award_stat(uuid, "minecraft:used", &name, 1);
+                        }
+                        // `BrushItem.useOn`: щётка запускает 200-тиковое
+                        // использование, если смотрит на brushable-блок.
+                        if !state.vitals.dead
+                            && login.spawn.game_mode != 3
+                            && let Some(slot) = Self::hand_index(&state.inv, u.hand)
+                            && let Some(held) = state.inv.slots[slot]
+                            && self.item_name(held.item) == "minecraft:brush"
+                            && let Some(block) = self.block(u.pos)
+                        {
+                            let name = self.state_name(block);
+                            if matches!(
+                                name,
+                                "minecraft:suspicious_sand" | "minecraft:suspicious_gravel"
+                            ) {
+                                let hits = self
+                                    .block_entity(u.pos)
+                                    .and_then(|be| be.nbt.get("chunkwake:brush_hits").and_then(Tag::as_i64))
+                                    .unwrap_or(0)
+                                    .clamp(0, 10) as u8;
+                                brush_use = Some(BrushUse {
+                                    slot,
+                                    pos: u.pos,
+                                    ticks: 0,
+                                    hits,
+                                });
+                                conn.send(&play::block_changed_ack(ids.block_changed_ack, u.sequence))
+                                    .await?;
+                                continue;
+                            }
                         }
                         // Еда на костёр — до обхода окна: присед с едой тоже кладёт её.
                         if !state.vitals.dead && login.spawn.game_mode != 3
@@ -25566,6 +25703,95 @@ impl PlayPlan {
         self.block_sound(None, "minecraft:block.chest.locked", pos, 1.0, 1.0);
     }
 
+    /// `BrushableBlockEntity.brush`: 10 «мазков», состояние `dusted` 0–3,
+    /// на десятом блок превращается в песок/гравий и выдаёт `item`/`LootTable`.
+    fn brush_hit(&self, pos: [i32; 3], hits: u8) -> BrushHit {
+        let Some(state) = self.block(pos) else {
+            return BrushHit::Miss;
+        };
+        let name = self.state_name(state);
+        let (next, sound) = match name {
+            "minecraft:suspicious_sand" => ("minecraft:sand", "minecraft:item.brush.brushing.sand"),
+            "minecraft:suspicious_gravel" => {
+                ("minecraft:gravel", "minecraft:item.brush.brushing.gravel")
+            }
+            _ => return BrushHit::Miss,
+        };
+        let (hits, dusted, done) = brush_progress(hits);
+        if done {
+            let mut drops = Vec::new();
+            if let Some(be) = self.block_entity(pos) {
+                if let Some(Tag::Compound(item)) = be.nbt.get("item") {
+                    if let Some(stack) = crate::stack_nbt::from_nbt(item, |n| self.item_id(n)) {
+                        drops.push(stack);
+                    }
+                } else if let Some(table) = be.nbt.get("LootTable").and_then(Tag::as_str) {
+                    let table = table.to_owned();
+                    if self.survival.loot.table(&table).is_some() {
+                        let seed = be
+                            .nbt
+                            .get("LootTableSeed")
+                            .and_then(Tag::as_i64)
+                            .unwrap_or(0);
+                        let ctx = crate::loot::Ctx {
+                            prop: &|_| None,
+                            table: &table,
+                            block: name,
+                            tool: Some("minecraft:brush"),
+                            level: &|_| 0,
+                            entity: None,
+                            killed_by_player: true,
+                            smelt: &|_| None,
+                        };
+                        let rolled = if seed != 0 {
+                            use rand::SeedableRng;
+                            let mut rng = rand::rngs::StdRng::seed_from_u64(seed as u64);
+                            crate::loot::roll(&self.survival.loot, &ctx, &mut rng)
+                        } else {
+                            crate::loot::roll(&self.survival.loot, &ctx, &mut rand::thread_rng())
+                        };
+                        for drop in rolled {
+                            let Some(item) = self.item_id(&drop.name) else {
+                                continue;
+                            };
+                            let Some(extra) = self.loot_extra(&drop, Some(pos)) else {
+                                continue;
+                            };
+                            let mut stack =
+                                Stack::new(item, drop.count.min(self.max_stack(item).max(1)));
+                            stack.extra = extra;
+                            drops.push(stack);
+                        }
+                    }
+                }
+            }
+            let next_state = self.survival.placement.default_state(next).unwrap_or(state);
+            self.set_block(pos, next_state);
+            self.set_block_entity(pos, None);
+            return BrushHit::Done(
+                next_state,
+                drops,
+                if next == "minecraft:sand" {
+                    "minecraft:item.brush.brushing.sand.complete"
+                } else {
+                    "minecraft:item.brush.brushing.gravel.complete"
+                },
+            );
+        }
+        let dusted = dusted.to_string();
+        let state = self
+            .survival
+            .placement
+            .with_prop(state, "dusted", &dusted)
+            .unwrap_or(state);
+        if let Some(mut be) = self.block_entity(pos) {
+            be.nbt
+                .insert("chunkwake:brush_hits".into(), Tag::Int(i32::from(hits)));
+            self.set_block_entity(pos, Some(be));
+        }
+        BrushHit::Progress(state, hits, sound)
+    }
+
     /// `RandomizableContainerBlockEntity.unpackLootTable`: первое открытие
     /// контейнера с `LootTable` в NBT генерирует добычу и закрывает триггер.
     fn unpack_container_loot(&self, uuid: Uuid, pos: [i32; 3]) {
@@ -29669,14 +29895,23 @@ mod tests {
         CHEST_SINGLE, CUSTOM_FIRST, ChestState, ClientLoading, DimSpec, Dimension,
         DynamicFactoryFn, DynamicGen, FastMap, GameModeChange, LOAD_GATED_PACKETS,
         acknowledge_player_save, add_banner_pattern, apply_inventory_open_reply,
-        block_entity_data_nbt, chunks_around, container_entity, create_dynamic_world, derived_seed,
-        dominant_axis, dragon_fight_nbt, dynamic_world_args, end_crystal_positions,
-        game_mode_change, in_view, lectern_page_request, parse_dragon_fight,
+        block_entity_data_nbt, brush_progress, chunks_around, container_entity,
+        create_dynamic_world, derived_seed, dominant_axis, dragon_fight_nbt, dynamic_world_args,
+        end_crystal_positions, game_mode_change, in_view, lectern_page_request, parse_dragon_fight,
         update_container_viewers, within_pick_range,
     };
     use crate::survival::PlayerState;
     use chunkwake_world::nbt::{Compound, Tag};
     use uuid::Uuid;
+
+    #[test]
+    fn brush_progress_reaches_dusted_three_and_completes_tenth_hit() {
+        assert_eq!(brush_progress(0), (1, 0, false));
+        assert_eq!(brush_progress(2), (3, 1, false));
+        assert_eq!(brush_progress(5), (6, 2, false));
+        assert_eq!(brush_progress(8), (9, 3, false));
+        assert_eq!(brush_progress(9), (10, 3, true));
+    }
 
     /// `EnderDragonFight` в `level.dat`: `started`/`killed`/`hasPreviouslyKilled`.
     #[test]
