@@ -2297,7 +2297,7 @@ impl PlayPlan {
         false
     }
 
-    fn water_at(&self, s: Option<u32>) -> bool {
+    pub(super) fn water_at(&self, s: Option<u32>) -> bool {
         let Some(s) = s else { return false };
         match self.mob_cells().get(s as usize) {
             Some(c) => c.water,

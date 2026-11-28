@@ -135,6 +135,105 @@ fn panic_threat(
         .copied()
 }
 
+/// Предел раскрытых узлов A* (`WalkNodeEvaluator` не ищет бесконечно).
+const NAV_MAX_NODES: usize = 4096;
+/// Цена шага по прямой и по диагонали (в десятых долях блока).
+const NAV_STEP: i32 = 10;
+const NAV_DIAG: i32 = 14;
+/// Максимальная разница по горизонтали, для которой строим путь.
+const NAV_MAX_DIST: i32 = 64;
+
+/// A* по клеткам ног (`WalkNodeEvaluator`/`PathFinder`): 8 направлений,
+/// подъём/спуск на один блок, диагонали без срезания углов.
+fn find_path(
+    start: [i32; 3],
+    goal: [i32; 3],
+    passable: impl Fn([i32; 3]) -> bool,
+) -> Option<Vec<[i32; 3]>> {
+    if start == goal {
+        return Some(Vec::new());
+    }
+    if (goal[0] - start[0]).abs() > NAV_MAX_DIST || (goal[2] - start[2]).abs() > NAV_MAX_DIST {
+        return None;
+    }
+    let heuristic = |p: [i32; 3]| {
+        let dx = (p[0] - goal[0]).abs();
+        let dz = (p[2] - goal[2]).abs();
+        let diagonal = dx.min(dz);
+        let straight = dx.max(dz) - diagonal;
+        NAV_DIAG * diagonal + NAV_STEP * straight + NAV_STEP * (p[1] - goal[1]).abs()
+    };
+    let mut open = std::collections::BinaryHeap::new();
+    let mut cost: std::collections::HashMap<[i32; 3], i32> = std::collections::HashMap::new();
+    let mut came: std::collections::HashMap<[i32; 3], [i32; 3]> = std::collections::HashMap::new();
+    cost.insert(start, 0);
+    open.push((std::cmp::Reverse(heuristic(start)), 0, start));
+    let dirs = [
+        [1, 0],
+        [-1, 0],
+        [0, 1],
+        [0, -1],
+        [1, 1],
+        [1, -1],
+        [-1, 1],
+        [-1, -1],
+    ];
+    let mut expanded = 0;
+    while let Some((std::cmp::Reverse(_), g, at)) = open.pop() {
+        if g > *cost.get(&at).unwrap_or(&i32::MAX) {
+            continue;
+        }
+        if at == goal {
+            let mut node = goal;
+            let mut path = Vec::new();
+            while node != start {
+                path.push(node);
+                node = *came.get(&node)?;
+            }
+            path.reverse();
+            return Some(path);
+        }
+        expanded += 1;
+        if expanded > NAV_MAX_NODES {
+            break;
+        }
+        for [dx, dz] in dirs {
+            for dy in [0, 1, -1] {
+                let next = [at[0] + dx, at[1] + dy, at[2] + dz];
+                if !passable(next) {
+                    continue;
+                }
+                // Диагональ не проходит сквозь угол: обе соседние клетки
+                // должны быть проходимы на текущей высоте.
+                if dx != 0
+                    && dz != 0
+                    && (!passable([at[0] + dx, at[1], at[2]])
+                        || !passable([at[0], at[1], at[2] + dz]))
+                {
+                    continue;
+                }
+                let step = if dx != 0 && dz != 0 {
+                    NAV_DIAG
+                } else {
+                    NAV_STEP
+                } + NAV_STEP * (next[1] - at[1]).abs();
+                let next_cost = g + step;
+                if next_cost >= *cost.get(&next).unwrap_or(&i32::MAX) {
+                    continue;
+                }
+                cost.insert(next, next_cost);
+                came.insert(next, at);
+                open.push((
+                    std::cmp::Reverse(next_cost + heuristic(next)),
+                    next_cost,
+                    next,
+                ));
+            }
+        }
+    }
+    None
+}
+
 /// `Mth.atan2`-подобный yaw взгляда из `from` в `to`.
 /// Точка остановки в `close` блоках от цели (`WalkTarget.closeEnoughDist`).
 fn stop_point(from: [f64; 3], target: [f64; 3], close: f64) -> Option<[f64; 3]> {
@@ -803,6 +902,12 @@ pub struct Villager {
     /// Узлы текущего шага (`Path.getPreviousNode`/`getNextNode`).
     pub path_from: Option<[i32; 3]>,
     pub path_to: Option<[i32; 3]>,
+    /// `Path`: очередь узлов A* от текущей клетки до цели.
+    pub nav_path: Vec<[i32; 3]>,
+    /// Клетка, для которой построен `nav_path`.
+    pub nav_goal: Option<[i32; 3]>,
+    /// Когда перестроить путь (`PathNavigation.recomputePath`).
+    pub nav_repath: i64,
 }
 
 /// Состояние окна торговли: к какому жителю и какая сделка выбрана.
@@ -3543,8 +3648,138 @@ impl PlayPlan {
         Some(f64::from(feet[1] + 1))
     }
 
-    /// Шаг к точке с проверкой коллизий и открыванием дверей.
+    /// `InteractWithDoor`: закрытую дверь/калитку можно открыть на пути.
+    fn nav_blocked(&self, p: [i32; 3]) -> bool {
+        if !self.walk_blocked(p) {
+            return false;
+        }
+        self.block(p).is_some_and(|s| {
+            let name = self.state_name(s);
+            !(name.ends_with("_door") && !name.contains("iron"))
+        })
+    }
+
+    /// `WalkNodeEvaluator.getBlockPathType`: клетка ног проходима, есть
+    /// место над головой, нет опасного блока и есть опора (блок или вода).
+    fn nav_passable(&self, p: [i32; 3]) -> bool {
+        if self.nav_blocked(p) || self.nav_blocked([p[0], p[1] + 1, p[2]]) {
+            return false;
+        }
+        if self.dangerous_block(p) || self.dangerous_block([p[0], p[1] - 1, p[2]]) {
+            return false;
+        }
+        let below = [p[0], p[1] - 1, p[2]];
+        self.walk_blocked(below)
+            || self.block(below).is_some_and(|s| self.water_at(Some(s)))
+            || self.block(p).is_some_and(|s| self.water_at(Some(s)))
+    }
+
+    /// Ближайшая проходимая клетка к цели: цель может указывать внутрь
+    /// рабочего блока или кровати.
+    fn nav_goal_near(&self, want: [i32; 3]) -> Option<[i32; 3]> {
+        if self.nav_passable(want) {
+            return Some(want);
+        }
+        for dy in [0, 1, -1, 2, -2] {
+            for radius in 1_i32..=2 {
+                for dx in -radius..=radius {
+                    for dz in -radius..=radius {
+                        if dx.abs().max(dz.abs()) != radius {
+                            continue;
+                        }
+                        let p = [want[0] + dx, want[1] + dy, want[2] + dz];
+                        if self.nav_passable(p) {
+                            return Some(p);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// `PathNavigation`: строит A*-путь к цели и ведёт жителя по узлам.
+    /// Прямой шаг остаётся запасным, если путь не найден.
     fn walk_step(&self, v: &mut Villager, target: [f64; 3], speed: f64) -> Option<([f64; 3], f32)> {
+        let dx = target[0] - v.pos[0];
+        let dz = target[2] - v.pos[2];
+        let dist = (dx * dx + dz * dz).sqrt();
+        if dist < 0.8 {
+            v.move_target = None;
+            v.path_from = None;
+            v.path_to = None;
+            v.nav_path.clear();
+            v.nav_goal = None;
+            return None;
+        }
+        let goal = [
+            target[0].floor() as i32,
+            target[1].floor() as i32,
+            target[2].floor() as i32,
+        ];
+        let now = self.game_time();
+        let from = [
+            v.pos[0].floor() as i32,
+            v.pos[1].floor() as i32,
+            v.pos[2].floor() as i32,
+        ];
+        // Телепорт/сон могли унести жителя далеко от первого узла.
+        let path_near = v.nav_path.first().is_none_or(|n| {
+            (n[0] - from[0]).abs() <= 2
+                && (n[1] - from[1]).abs() <= 2
+                && (n[2] - from[2]).abs() <= 2
+        });
+        if v.nav_goal != Some(goal) || !path_near || (v.nav_path.is_empty() && now >= v.nav_repath)
+        {
+            v.nav_goal = Some(goal);
+            v.nav_repath = now + 200;
+            v.nav_path = self
+                .nav_goal_near(goal)
+                .and_then(|to| find_path(from, to, |p| self.nav_passable(p)))
+                .unwrap_or_default();
+        }
+        // Узел считается достигнутым чуть раньше прямого шага (0.8), иначе
+        // `walk_step_direct` сбросил бы `move_target` на промежуточной точке.
+        while let Some(&node) = v.nav_path.first() {
+            let ox = f64::from(node[0]) + 0.5 - v.pos[0];
+            let oz = f64::from(node[2]) + 0.5 - v.pos[2];
+            if ox * ox + oz * oz < 0.9 * 0.9 && (v.pos[1] - f64::from(node[1])).abs() < 1.2 {
+                v.nav_path.remove(0);
+            } else {
+                break;
+            }
+        }
+        if let Some(&node) = v.nav_path.first() {
+            let step = [
+                f64::from(node[0]) + 0.5,
+                f64::from(node[1]),
+                f64::from(node[2]) + 0.5,
+            ];
+            let out = self.walk_step_direct(v, step, speed);
+            if out.is_none() {
+                // Путь устарел (дверь/блок/динамическая преграда) —
+                // перестроим чуть позже, не каждый тик.
+                v.nav_path.clear();
+                v.nav_goal = Some(goal);
+                v.nav_repath = now + 20;
+            }
+            return out;
+        }
+        let out = self.walk_step_direct(v, target, speed);
+        if out.is_none() {
+            v.nav_goal = Some(goal);
+            v.nav_repath = now + 200;
+        }
+        out
+    }
+
+    /// Шаг к точке по прямой с проверкой коллизий и открыванием дверей.
+    fn walk_step_direct(
+        &self,
+        v: &mut Villager,
+        target: [f64; 3],
+        speed: f64,
+    ) -> Option<([f64; 3], f32)> {
         let dx = target[0] - v.pos[0];
         let dz = target[2] - v.pos[2];
         let dist = (dx * dx + dz * dz).sqrt();
@@ -3847,6 +4082,9 @@ impl PlayPlan {
             golem_seen: 0,
             path_from: None,
             path_to: None,
+            nav_path: Vec::new(),
+            nav_goal: None,
+            nav_repath: 0,
             job_site: None,
             last_job_check: 0,
             custom_name: None,
@@ -5001,6 +5239,9 @@ impl PlayPlan {
             golem_seen: 0,
             path_from: None,
             path_to: None,
+            nav_path: Vec::new(),
+            nav_goal: None,
+            nav_repath: 0,
         };
         apply_villager_nbt(&mut v, c, |n| self.item_id(n));
         if v.profession == "minecraft:none" {
@@ -5343,6 +5584,9 @@ mod tests {
             golem_seen: 0,
             path_from: None,
             path_to: None,
+            nav_path: Vec::new(),
+            nav_goal: None,
+            nav_repath: 0,
         };
         let player = Uuid::from_u128(7);
         let target = player.as_u128();
@@ -5383,6 +5627,24 @@ mod tests {
             PlayPlan::step_up_y(feet, |p| p == feet || p == [2, 65, 0]),
             None
         );
+    }
+
+    #[test]
+    fn astar_walks_around_a_wall() {
+        // Стена по x=2, z=-1..=1; проход только через z=±2.
+        let passable = |p: [i32; 3]| p[1] == 64 && !(p[0] == 2 && p[2].abs() <= 1);
+        let path = find_path([0, 64, 0], [4, 64, 0], passable).expect("path");
+        assert_eq!(path.last(), Some(&[4, 64, 0]));
+        assert!(path.iter().all(|&p| passable(p)));
+        assert!(!path.iter().any(|p| p[0] == 2 && p[2].abs() <= 1));
+        assert!(path.iter().any(|p| p[2].abs() >= 2), "{path:?}");
+        assert!(path.len() >= 6, "{path:?}");
+    }
+
+    #[test]
+    fn astar_gives_up_on_a_closed_wall() {
+        let passable = |p: [i32; 3]| p[1] == 64 && p[0] != 2;
+        assert_eq!(find_path([0, 64, 0], [4, 64, 0], passable), None);
     }
 
     #[test]
