@@ -29,6 +29,8 @@ const COMMAND_ACTIVATION_DELAY: i64 = 4;
 const TNT_FUSE: i32 = 80;
 /// `MinecartTNT.handleEntityEvent`: клиент поджигает фитиль.
 const EVENT_PRIME: u8 = 70;
+/// `MinecartSpawner$1.broadcastEvent`: `BaseSpawner` шлёт событие 1.
+const SPAWNER_EVENT: u8 = 1;
 /// `MinecartTNT.explode`: сила `4 + 1·rnd·1.5·min(√v², 5)`.
 const TNT_POWER: f32 = 4.0;
 const TNT_SPEED_FACTOR: f32 = 1.0;
@@ -985,7 +987,7 @@ impl PlayPlan {
     /// `MinecartSpawner.tick` → `BaseSpawner.serverTick`: задержка, игрок в
     /// `RequiredPlayerRange`, до `SpawnCount` попыток в окне `SpawnRange`,
     /// лимит `MaxNearbyEntities`, затем новая случайная задержка.
-    fn tick_spawner(&self, e: &mut MinecartEntry, players: &[(Uuid, [f64; 3], f32)]) {
+    fn tick_spawner(&self, id: i32, e: &mut MinecartEntry, players: &[(Uuid, [f64; 3], f32)]) {
         let pos = e.cart.pos;
         let s = &mut e.spawner;
         if s.spawn_count <= 0 || s.max_nearby <= 0 {
@@ -1030,14 +1032,11 @@ impl PlayPlan {
             }
         }
         if spawned {
-            let at = [
-                pos[0].floor() as i32,
-                pos[1].floor() as i32,
-                pos[2].floor() as i32,
-            ];
-            self.hub.send(
-                None,
-                play::level_event(self.ids.level_event, 2004, at, 0, false),
+            // `MinecartSpawner$1.broadcastEvent` → `broadcastEntityEvent`: у
+            // вагонетки событие 1, не блочное 2004.
+            self.hub.send_about(
+                id,
+                inv::entity_event(self.ids.entity_event, id, SPAWNER_EVENT),
             );
         }
         let span = s.max_delay.saturating_sub(s.min_delay).max(0) + 1;
@@ -1258,7 +1257,7 @@ impl PlayPlan {
                         }
                     }
                     Variant::Hopper if e.enabled => hoppers.push((id, e.cart.pos)),
-                    Variant::Spawner => self.tick_spawner(e, &players),
+                    Variant::Spawner => self.tick_spawner(id, e, &players),
                     _ => {}
                 }
                 // Под мир — исчезнуть (`checkBelowWorld`).
@@ -1669,6 +1668,8 @@ mod tests {
             Some(Variant::Spawner)
         );
         assert_eq!(Variant::Spawner.drop_name(), "minecraft:minecart");
+        assert_eq!(Variant::Spawner.name(), "minecraft:spawner_minecart");
+        assert_eq!(SPAWNER_EVENT, 1);
     }
 
     #[test]
