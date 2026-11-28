@@ -6714,29 +6714,20 @@ impl PlayPlan {
             mb::Category::WaterAmbient => &self.survival.water_ambient_spawns,
         };
         let spawns = self.biome_in(w, start).and_then(|b| table.get(b as usize));
-        let entries: Vec<mb::SpawnEntry> =
-            if let Some(overridden) = self.structure_spawn_entries(start, cat) {
-                // `ChunkGenerator.getMobsAt`: список структуры заменяет биомный.
-                overridden
-            } else {
-                spawns
-                    .map(|b| {
-                        b.entries
-                            .iter()
-                            .map(|(name, weight, min, max)| mb::SpawnEntry {
-                                species: Species::from_name(name),
-                                weight: *weight,
-                                min: *min,
-                                max: *max,
-                            })
-                            .collect()
+        let entries: Vec<mb::SpawnEntry> = spawns
+            .map(|b| {
+                b.entries
+                    .iter()
+                    .map(|(name, weight, min, max)| mb::SpawnEntry {
+                        species: Species::from_name(name),
+                        weight: *weight,
+                        min: *min,
+                        max: *max,
                     })
-                    .unwrap_or_default()
-            };
+                    .collect()
+            })
+            .unwrap_or_default();
         let costs = spawns.map_or(&[][..], |b| b.costs.as_slice());
-        if entries.iter().all(|e| e.species.is_none()) {
-            return Vec::new();
-        }
         let mut nearest = |p: [i32; 3]| {
             let c = [
                 f64::from(p[0]) + 0.5,
@@ -6767,7 +6758,15 @@ impl PlayPlan {
             true
         };
         let mut roll = || rng.r#gen::<f64>();
-        mb::spawn_packs(start, &entries, &mut nearest, &mut fits, &mut roll)
+        let mut override_at = |p: [i32; 3]| self.structure_spawn_entries(p, cat);
+        mb::spawn_packs(
+            start,
+            &entries,
+            &mut override_at,
+            &mut nearest,
+            &mut fits,
+            &mut roll,
+        )
     }
 
     /// Место для моба (`SpawnPlacementTypes.ON_GROUND`, `noCollision` рамки

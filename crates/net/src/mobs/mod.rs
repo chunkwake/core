@@ -3391,6 +3391,7 @@ pub fn local_cap_allows(counts: &[u32], max: u32) -> bool {
 pub fn spawn_packs(
     start: [i32; 3],
     entries: &[SpawnEntry],
+    override_at: &mut dyn FnMut([i32; 3]) -> Option<Vec<SpawnEntry>>,
     nearest: &mut dyn FnMut([i32; 3]) -> Option<f64>,
     fits: &mut dyn FnMut(Species, [i32; 3], f64) -> bool,
     rand: &mut dyn FnMut() -> f64,
@@ -3421,7 +3422,11 @@ pub fn spawn_packs(
             let entry = match chosen {
                 Some(e) => e,
                 None => {
-                    let Some(e) = pick_entry(entries, rand()) else {
+                    // `ChunkGenerator.getMobsAt` считается в этой точке:
+                    // структура может начаться уже внутри пакета.
+                    let overridden = override_at(pos);
+                    let list = overridden.as_deref().unwrap_or(entries);
+                    let Some(e) = pick_entry(list, rand()) else {
                         break;
                     };
                     chosen = Some(e);
@@ -5048,6 +5053,7 @@ mod tests {
         let got = spawn_packs(
             [8, 64, 8],
             &zombie,
+            &mut |_| None,
             &mut |_| Some(1000.0),
             &mut |_, _, _| true,
             &mut rnd,
@@ -5061,6 +5067,7 @@ mod tests {
         let got = spawn_packs(
             [8, 64, 8],
             &zombie,
+            &mut |_| None,
             &mut |_| Some(100.0),
             &mut |_, _, _| true,
             &mut rnd,
@@ -5076,11 +5083,35 @@ mod tests {
         let got = spawn_packs(
             [8, 64, 8],
             &other,
+            &mut |_| None,
             &mut |_| Some(1000.0),
             &mut |_, _, _| panic!("unknown species checked"),
             &mut rnd,
         );
         assert!(got.is_empty());
+        // `spawn_overrides` структуры заменяют биомный список в точке.
+        let cow = [SpawnEntry {
+            species: Some(Species::Cow),
+            weight: 1,
+            min: 1,
+            max: 1,
+        }];
+        let witch = Some(vec![SpawnEntry {
+            species: Some(Species::Witch),
+            weight: 1,
+            min: 1,
+            max: 1,
+        }]);
+        let got = spawn_packs(
+            [8, 64, 8],
+            &cow,
+            &mut |_| witch.clone(),
+            &mut |_| Some(1000.0),
+            &mut |_, _, _| true,
+            &mut rnd,
+        );
+        assert!(!got.is_empty());
+        assert!(got.iter().all(|(s, _, _)| *s == Species::Witch));
         assert_eq!(mob_cap(Category::Monster, 289), 70);
         assert_eq!(mob_cap(Category::Creature, 578), 20);
         assert_eq!(spawn_cap_chunks(&[(3, -2)]), 289);
