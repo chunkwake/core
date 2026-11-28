@@ -43,6 +43,17 @@ impl Shape {
         )
     }
 
+    /// `NewMinecartBehavior.isDecending`: скорость направлена вниз по склону.
+    pub fn descending(self, vel: [f64; 3]) -> bool {
+        match self {
+            Self::AscendingEast => vel[0] < 0.0,
+            Self::AscendingWest => vel[0] > 0.0,
+            Self::AscendingNorth => vel[2] > 0.0,
+            Self::AscendingSouth => vel[2] < 0.0,
+            _ => false,
+        }
+    }
+
     /// `AbstractMinecart.EXITS`: два выхода рельса относительно его клетки.
     pub fn exits(self) -> ([i32; 3], [i32; 3]) {
         match self {
@@ -510,6 +521,18 @@ impl Cart {
         }
         // Переехали в соседнюю клетку: скорость вдоль шага.
         let (nx, nz) = (floor(self.pos[0]), floor(self.pos[2]));
+        // `NewMinecartBehavior.restAtVShape`: на стыке двух склонов вниз
+        // и вверх при почти нулевой скорости вагонетка останавливается.
+        if self.improved
+            && self.vel[0] * self.vel[0] + self.vel[2] * self.vel[2] < 0.005
+            && rail.shape.is_slope()
+            && rail.shape.descending(self.vel)
+            && let Some(next) = t.rail([nx, pos[1], nz])
+            && !next.shape.is_slope()
+            && !next.shape.descending(self.vel)
+        {
+            self.vel = [0.0; 3];
+        }
         if nx != pos[0] || nz != pos[2] {
             let h = self.vel[0].hypot(self.vel[2]);
             self.vel[0] = h * (nx - pos[0]) as f64;
@@ -692,6 +715,16 @@ mod tests {
             );
         }
         w
+    }
+
+    #[test]
+    fn slope_descending_matches_velocity() {
+        assert!(Shape::AscendingEast.descending([-1.0, 0.0, 0.0]));
+        assert!(!Shape::AscendingEast.descending([1.0, 0.0, 0.0]));
+        assert!(Shape::AscendingWest.descending([1.0, 0.0, 0.0]));
+        assert!(Shape::AscendingNorth.descending([0.0, 0.0, 1.0]));
+        assert!(Shape::AscendingSouth.descending([0.0, 0.0, -1.0]));
+        assert!(!Shape::EastWest.descending([1.0, 0.0, 0.0]));
     }
 
     #[test]
