@@ -87,6 +87,7 @@ final class MobImpl {
         "parrot", "warden", "cat", "bat", "salmon", "glow_squid",
         "bee", "squid", "dolphin", "tropical_fish", "pufferfish",
         "axolotl",
+        "donkey",
     };
 
     /** Вид для {@link EntityType}; {@code null} — такого моба сервер не умеет. */

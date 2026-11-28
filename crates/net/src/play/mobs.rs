@@ -72,6 +72,8 @@ struct MobMeta {
     dragon_phase: u8,
     /// `Axolotl.DATA_PLAYING_DEAD` (индекс 19).
     axolotl_dead: bool,
+    /// `AbstractChestedHorse.DATA_ID_CHEST` (индекс 19).
+    donkey_chested: bool,
 }
 
 impl Default for MobMeta {
@@ -90,6 +92,7 @@ impl Default for MobMeta {
             tropical: 0,
             dragon_phase: crate::mobs::DRAGON_HOVERING,
             axolotl_dead: false,
+            donkey_chested: false,
         }
     }
 }
@@ -109,6 +112,7 @@ impl MobMeta {
             tropical: m.tropical_variant,
             dragon_phase: m.dragon_phase,
             axolotl_dead: m.axolotl_play_dead > 0,
+            donkey_chested: m.chested,
         }
     }
 
@@ -168,6 +172,10 @@ impl MobMeta {
             // `DATA_VARIANT` (18).
             Species::Axolotl if old.is_none_or(|m| m.axolotl_dead != self.axolotl_dead) => {
                 out.push((19, Meta::Bool(self.axolotl_dead)));
+            }
+            // `AbstractChestedHorse.DATA_ID_CHEST`: 19 после флагов лошади (18).
+            Species::Donkey if old.is_none_or(|m| m.donkey_chested != self.donkey_chested) => {
+                out.push((19, Meta::Bool(self.donkey_chested)));
             }
             _ => {}
         }
@@ -2396,6 +2404,13 @@ impl PlayPlan {
             }
             drops.push(stack);
         }
+        // `AbstractChestedHorse.dropEquipment`: сундук выпадает вместе с ослом.
+        if m.species == Species::Donkey
+            && m.chested
+            && let Some(chest) = self.item_id("minecraft:chest")
+        {
+            drops.push(Stack::new(chest, 1));
+        }
         // `EntityDeathEvent`: плагин меняет дроп и опыт.
         if let Some(reply) = self.sync_event(Event::MobDeath, || {
             let mut arg = format!(
@@ -2518,6 +2533,11 @@ impl PlayPlan {
         }
         if let Some(Tag::Byte(sitting)) = nbt.get("Sitting") {
             m.sitting = *sitting != 0;
+        }
+        if m.species == Species::Donkey
+            && let Some(Tag::Byte(chest)) = nbt.get("ChestedHorse")
+        {
+            m.chested = *chest != 0;
         }
         if matches!(m.species, Species::Zombie | Species::Drowned)
             && let Some(Tag::Byte(breaks)) = nbt.get("CanBreakDoors")
@@ -4169,6 +4189,7 @@ impl PlayPlan {
             RepairBody([f64; 3]),
             Wax([f64; 3]),
             Scrape([f64; 3]),
+            Chest([f64; 3]),
         }
         let act = {
             let mut mobs = self.sim().mobs.lock().unwrap();
@@ -4176,7 +4197,13 @@ impl PlayPlan {
             if !m.alive() {
                 return None;
             }
-            if m.species.is_food(&name) {
+            if m.species == Species::Donkey
+                && name == "minecraft:chest"
+                && crate::mobs::accepts_donkey_chest(m)
+            {
+                m.chested = true;
+                Act::Chest(m.pos)
+            } else if m.species.is_food(&name) {
                 if m.is_baby() {
                     m.age = feed_baby(m.age);
                     Act::Grow
@@ -4358,6 +4385,20 @@ impl PlayPlan {
                 remove = Some(target);
             }
             Act::EquipBody => {
+                if !creative {
+                    inv.consume_at(slot);
+                }
+                self.refresh_mob(target);
+            }
+            Act::Chest(pos) => {
+                self.play_sound(
+                    None,
+                    "minecraft:entity.donkey.chest",
+                    crate::sounds::NEUTRAL,
+                    pos,
+                    0.8,
+                    1.0,
+                );
                 if !creative {
                     inv.consume_at(slot);
                 }
@@ -5181,6 +5222,11 @@ pub(super) fn mob_to_nbt(
         Species::TropicalFish => {
             c.insert("Variant".into(), Tag::Int(m.tropical_variant));
         }
+        Species::Donkey => {
+            if m.chested {
+                c.insert("ChestedHorse".into(), Tag::Byte(1));
+            }
+        }
         Species::Bee => {
             c.insert("AngerTime".into(), Tag::Int(m.anger_time as i32));
             c.insert("HasNectar".into(), Tag::Byte(i8::from(m.has_nectar)));
@@ -5345,6 +5391,9 @@ pub(super) fn mob_from_nbt(
         {
             m.hive_pos = Some([a[0], a[1], a[2]]);
         }
+    }
+    if species == Species::Donkey {
+        m.chested = byte("ChestedHorse").is_some_and(|b| b != 0);
     }
     if species == Species::Creeper {
         m.powered = byte("powered").is_some_and(|b| b != 0);
@@ -6845,6 +6894,21 @@ mod tests {
                 .is_empty()
         );
         m.axolotl_play_dead = 200;
+        assert_eq!(
+            MobMeta::of(&m).fields(m.species, Some(MobMeta::default())),
+            vec![(19, play::Meta::Bool(true))]
+        );
+    }
+
+    #[test]
+    fn donkey_chest_is_synced() {
+        let mut m = crate::mobs::Mob::new(crate::mobs::Species::Donkey, [0.5, 64.0, 0.5], 1);
+        assert!(
+            MobMeta::of(&m)
+                .fields(m.species, Some(MobMeta::default()))
+                .is_empty()
+        );
+        m.chested = true;
         assert_eq!(
             MobMeta::of(&m).fields(m.species, Some(MobMeta::default())),
             vec![(19, play::Meta::Bool(true))]

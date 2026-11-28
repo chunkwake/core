@@ -24326,6 +24326,58 @@ impl PlayPlan {
             return done;
         }
         match name.as_str() {
+            // `DispenseItemBehavior$2`: сундук надевается приручённому
+            // взрослому ослу в клетке перед раздатчиком; иначе предмет
+            // выбрасывается (default `OptionalDispenseItemBehavior`).
+            "minecraft:chest" => {
+                let mut found = false;
+                {
+                    let mut mobs = self.sim().mobs.lock().unwrap();
+                    for e in mobs.values_mut() {
+                        let m = &mut e.mob;
+                        if !crate::mobs::accepts_donkey_chest(m) {
+                            continue;
+                        }
+                        let (w, h) = m.size();
+                        let lo = [m.pos[0] - w / 2.0, m.pos[1], m.pos[2] - w / 2.0];
+                        let hi = [m.pos[0] + w / 2.0, m.pos[1] + h, m.pos[2] + w / 2.0];
+                        let b = [
+                            f64::from(front[0]),
+                            f64::from(front[1]),
+                            f64::from(front[2]),
+                        ];
+                        if lo[0] < b[0] + 1.0
+                            && hi[0] > b[0]
+                            && lo[1] < b[1] + 1.0
+                            && hi[1] > b[1]
+                            && lo[2] < b[2] + 1.0
+                            && hi[2] > b[2]
+                        {
+                            m.chested = true;
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if found {
+                    self.play_sound(
+                        None,
+                        "minecraft:entity.donkey.chest",
+                        crate::sounds::NEUTRAL,
+                        [
+                            f64::from(front[0]) + 0.5,
+                            f64::from(front[1]) + 0.5,
+                            f64::from(front[2]) + 0.5,
+                        ],
+                        0.8,
+                        1.0,
+                    );
+                    crate::hoppers::take_one(&mut me.slots, i);
+                    Some(true)
+                } else {
+                    None
+                }
+            }
             "minecraft:bone_meal" => {
                 if !self.bonemeal_at(front) {
                     return Some(false);

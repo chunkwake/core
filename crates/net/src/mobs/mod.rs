@@ -307,6 +307,7 @@ pub enum Species {
     TropicalFish,
     Pufferfish,
     Axolotl,
+    Donkey,
 }
 
 /// Всё о виде в одном месте. Встроенные значения — запасные: при старте
@@ -379,7 +380,7 @@ const fn base(name: &'static str, sound: &'static str, loot: &'static str) -> Sp
 
 /// Встроенная таблица в порядке [`Species::ALL`]: числа из `createAttributes`
 /// и `EntityType` 26.3.
-const BUILTIN: [SpeciesInfo; 38] = [
+const BUILTIN: [SpeciesInfo; 39] = [
     SpeciesInfo {
         size: (0.9, 1.4),
         eye_height: 1.3,
@@ -897,6 +898,21 @@ const BUILTIN: [SpeciesInfo; 38] = [
             "minecraft:entities/axolotl",
         )
     },
+    SpeciesInfo {
+        size: (1.396_484_4, 1.5),
+        eye_height: 1.425,
+        max_health: 53.0,
+        speed: 0.175,
+        panic_speed: 1.2,
+        tempt_speed: 1.25,
+        follow_parent_speed: 1.25,
+        volume: 0.8,
+        ..base(
+            "minecraft:donkey",
+            "minecraft:entity.donkey",
+            "minecraft:entities/donkey",
+        )
+    },
 ];
 
 static INSTALLED: std::sync::OnceLock<Vec<SpeciesInfo>> = std::sync::OnceLock::new();
@@ -936,7 +952,7 @@ fn merge(b: &SpeciesInfo, types: &[chunkwake_data::world::EntityTypeInfo]) -> Sp
 }
 
 impl Species {
-    pub const ALL: [Species; 38] = [
+    pub const ALL: [Species; 39] = [
         Species::Cow,
         Species::Pig,
         Species::Sheep,
@@ -975,6 +991,7 @@ impl Species {
         Species::TropicalFish,
         Species::Pufferfish,
         Species::Axolotl,
+        Species::Donkey,
     ];
 
     /// Данные вида: выгрузка, если она установлена, иначе встроенные.
@@ -1275,6 +1292,8 @@ pub struct Mob {
     pub body_armor: Option<Stack>,
     /// `Wolf.isInSittingPose` (`DATA_FLAGS_ID`, бит 0x01).
     pub sitting: bool,
+    /// `AbstractChestedHorse.hasChest` (`DATA_ID_CHEST`): осёл с сундуком.
+    pub chested: bool,
     /// `Entity.isNoGravity` (`NoGravity`): кристаллы/визер/дракон не падают.
     pub no_gravity: bool,
     /// `CopperGolem.getWeatherState` (`weather_state`): стадия окисления.
@@ -1477,6 +1496,7 @@ impl Mob {
             equipment: [None; 6],
             body_armor: None,
             sitting: false,
+            chested: false,
             drop_chances: [DEFAULT_DROP_CHANCE; 6],
             effect_speed: 1.0,
             effect_weakness: 0.0,
@@ -2823,6 +2843,12 @@ fn axolotl_tick(m: &mut Mob, w: &World) {
         }
     }
     m.axolotl_play_dead = m.axolotl_play_dead.saturating_sub(1);
+}
+
+/// `AbstractChestedHorse`: сундук надевается приручённому взрослому ослу,
+/// у которого его ещё нет.
+pub fn accepts_donkey_chest(m: &Mob) -> bool {
+    m.species == Species::Donkey && m.tamed && !m.is_baby() && !m.chested && m.alive()
 }
 
 /// Цели охоты аксолотля (`#minecraft:axolotl_hunt_targets`).
@@ -5156,6 +5182,24 @@ mod tests {
         assert_eq!(Species::Axolotl.info().loot, "minecraft:entities/axolotl");
         let m = Mob::new(Species::Axolotl, [0.5, 64.0, 0.5], 1);
         assert!(matches!(m.nav.kind, path::NavKind::Amphibious));
+    }
+
+    #[test]
+    fn donkey_accepts_chest_only_when_tamed_and_bare() {
+        let mut m = Mob::new(Species::Donkey, [0.5, 64.0, 0.5], 1);
+        assert_eq!(
+            Species::from_name("minecraft:donkey"),
+            Some(Species::Donkey)
+        );
+        assert_eq!(Species::Donkey.size(), (1.396_484_4, 1.5));
+        assert!(!accepts_donkey_chest(&m), "дикий осёл не берёт сундук");
+        m.tamed = true;
+        assert!(accepts_donkey_chest(&m));
+        m.chested = true;
+        assert!(!accepts_donkey_chest(&m), "второй сундук не надевается");
+        m.chested = false;
+        m.age = -24000;
+        assert!(!accepts_donkey_chest(&m), "детёныш не берёт сундук");
     }
 
     #[test]
