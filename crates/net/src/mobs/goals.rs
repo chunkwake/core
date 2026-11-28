@@ -52,6 +52,8 @@ pub enum Out {
     Explode(f32),
     /// `AbstractSkeleton.performRangedAttack`: стрела в игрока с силой лука.
     Shoot { target: u128, power: f32 },
+    /// `BlazeAttackGoal`: малый огненный шар в цель.
+    BlazeFireball { target: u128 },
     /// WitherBoss.performRangedAttack: черёп визера в цель.
     ShootSkull { target: u128 },
     /// EnderDragon breath: облако dragon_breath у цели.

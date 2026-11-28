@@ -1403,6 +1403,11 @@ pub struct Mob {
     pub statue: bool,
     /// `EnderDragon`: кулдаун контактного урона (тиков).
     pub dragon_cooldown: u8,
+    /// `BlazeAttackGoal`: шаг залпа, задержка, потеря цели и флаг заряда.
+    pub blaze_step: u8,
+    pub blaze_time: i32,
+    pub blaze_last_seen: i32,
+    pub blaze_charged: bool,
     /// `Bee`: оставшиеся тики злости (`AngerTime`).
     pub anger_time: u32,
     /// `Axolotl`: оставшиеся тики притворной смерти (`PLAY_DEAD_TICKS`).
@@ -1539,6 +1544,10 @@ impl Mob {
             ticks: 0,
             statue: false,
             dragon_cooldown: 0,
+            blaze_step: 0,
+            blaze_time: 0,
+            blaze_last_seen: 0,
+            blaze_charged: false,
             anger_time: 0,
             axolotl_play_dead: 0,
             axolotl_air: 6000,
@@ -2624,6 +2633,56 @@ fn pufferfish_tick(m: &mut Mob, s: &mut Senses) {
 }
 
 /// `Dolphin`: плыть к предмету в воде, пока `ItemGoal` его не подберёт.
+/// `Blaze.BlazeAttackGoal`: заряд 60 тиков, затем три залпа по одному
+/// `SmallFireball` с шагом 6, после — 100 тиков покоя.
+fn blaze_attack_tick(m: &mut Mob, seen: bool, d2: f64) -> bool {
+    m.blaze_time -= 1;
+    // Ближний бой ведёт `MeleeAttackGoal`; здесь только дальняя атака.
+    if d2 < 4.0 {
+        return false;
+    }
+    let follow = m.species.follow_range();
+    if d2 < follow * follow && seen && m.blaze_time <= 0 {
+        m.blaze_step = m.blaze_step.saturating_add(1);
+        if m.blaze_step == 1 {
+            m.blaze_time = 60;
+            m.blaze_charged = true;
+        } else if m.blaze_step <= 4 {
+            m.blaze_time = 6;
+        } else {
+            m.blaze_time = 100;
+            m.blaze_step = 0;
+            m.blaze_charged = false;
+        }
+        return (2..=4).contains(&m.blaze_step);
+    }
+    false
+}
+
+fn blaze_ai_step(m: &mut Mob, s: &Senses) {
+    if !m.alive() {
+        return;
+    }
+    let Some(target) = m.target else {
+        m.blaze_time -= 1;
+        m.blaze_charged = false;
+        m.blaze_last_seen = 0;
+        return;
+    };
+    let Some(p) = s.prey.iter().find(|p| p.uuid == target).copied() else {
+        return;
+    };
+    let seen = (s.sight)(m.eye(), p.eye());
+    if seen {
+        m.blaze_last_seen = 0;
+    } else {
+        m.blaze_last_seen += 1;
+    }
+    if blaze_attack_tick(m, seen, dist2(m.pos, p.pos)) {
+        m.out.push(goals::Out::BlazeFireball { target });
+    }
+}
+
 fn dolphin_ai_step(m: &mut Mob) {
     m.no_gravity = true;
     let Some(p) = m.item_target else {
@@ -2877,6 +2936,9 @@ fn server_ai_step(m: &mut Mob, w: &World, s: &mut Senses) {
     }
     m.goals = goals;
     m.targets = targets;
+    if m.species == Species::Blaze {
+        blaze_ai_step(m, s);
+    }
     let water = in_water(m, w);
     let walk = walker(m, w, s.difficulty, water);
     if let Some((to, speed)) = m.nav.tick(w, &walk, m.species.follow_range()) {
@@ -5241,6 +5303,31 @@ mod tests {
     }
 
     /// Спрут: данные вида, лут и водная навигация.
+    #[test]
+    fn blaze_charge_and_volley_follow_vanilla_steps() {
+        let mut m = Mob::new(Species::Blaze, [0.5, 64.0, 0.5], 1);
+        let far = 100.0;
+        assert!(!blaze_attack_tick(&mut m, true, far));
+        assert_eq!((m.blaze_step, m.blaze_time), (1, 60));
+        assert!(m.blaze_charged);
+        for step in 2..=4 {
+            m.blaze_time = 1;
+            assert!(blaze_attack_tick(&mut m, true, far));
+            assert_eq!(m.blaze_step, step);
+            assert_eq!(m.blaze_time, 6);
+        }
+        m.blaze_time = 1;
+        assert!(!blaze_attack_tick(&mut m, true, far));
+        assert_eq!((m.blaze_step, m.blaze_time), (0, 100));
+        assert!(!m.blaze_charged);
+        // Без линии видимости и в ближнем бою залп не идёт.
+        m.blaze_step = 1;
+        m.blaze_time = 1;
+        assert!(!blaze_attack_tick(&mut m, false, far));
+        m.blaze_time = 1;
+        assert!(!blaze_attack_tick(&mut m, true, 2.0));
+    }
+
     #[test]
     fn structure_mobs_data_matches_vanilla() {
         let cases = [

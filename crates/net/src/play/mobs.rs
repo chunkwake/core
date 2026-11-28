@@ -74,6 +74,8 @@ struct MobMeta {
     axolotl_dead: bool,
     /// `AbstractChestedHorse.DATA_ID_CHEST` (индекс 19).
     donkey_chested: bool,
+    /// `Blaze.DATA_FLAGS_ID` (индекс 16, бит 1 — заряд).
+    blaze_charged: bool,
 }
 
 impl Default for MobMeta {
@@ -93,6 +95,7 @@ impl Default for MobMeta {
             dragon_phase: crate::mobs::DRAGON_HOVERING,
             axolotl_dead: false,
             donkey_chested: false,
+            blaze_charged: false,
         }
     }
 }
@@ -113,6 +116,7 @@ impl MobMeta {
             dragon_phase: m.dragon_phase,
             axolotl_dead: m.axolotl_play_dead > 0,
             donkey_chested: m.chested,
+            blaze_charged: m.blaze_charged,
         }
     }
 
@@ -174,6 +178,10 @@ impl MobMeta {
             // `DATA_VARIANT` (18).
             Species::Axolotl if old.is_none_or(|m| m.axolotl_dead != self.axolotl_dead) => {
                 out.push((19, Meta::Bool(self.axolotl_dead)));
+            }
+            // `Blaze.DATA_FLAGS_ID`: 16, байт 1 — `isCharged`.
+            Species::Blaze if old.is_none_or(|m| m.blaze_charged != self.blaze_charged) => {
+                out.push((16, Meta::Byte(u8::from(self.blaze_charged))));
             }
             // `AbstractChestedHorse.DATA_ID_CHEST`: 19 после флагов лошади (18).
             Species::Donkey if old.is_none_or(|m| m.donkey_chested != self.donkey_chested) => {
@@ -4950,6 +4958,9 @@ impl PlayPlan {
                     self.play_sound(None, &name, crate::sounds::HOSTILE, pos, volume, pitch);
                 }
                 Out::Shoot { target, power } => self.mob_shoot(id, Uuid::from_u128(target), power),
+                Out::BlazeFireball { target } => {
+                    self.mob_blaze_fireball(id, Uuid::from_u128(target))
+                }
                 Out::ShootSkull { target } => self.mob_shoot_skull(id, Uuid::from_u128(target)),
                 Out::DragonBreath { target } => self.spawn_dragon_breath(Uuid::from_u128(target)),
                 Out::DragonBreathAt(pos) => self.spawn_dragon_breath_cloud(pos),
@@ -6435,6 +6446,56 @@ impl PlayPlan {
         );
     }
 
+    /// `Blaze.BlazeAttackGoal`: `SmallFireball` в цель со случайным
+    /// отклонением `triangle(2.297 · sqrt(distance) / 2)`, стартовая скорость
+    /// `0.1`, событие `1018`; урон 5 и поджог 5 с обрабатывает снаряд.
+    fn mob_blaze_fireball(&self, id: i32, target: Uuid) {
+        let Some((from, uuid)) = self.sim().mobs.lock().unwrap().get(&id).map(|e| {
+            let m = &e.mob;
+            (
+                [m.pos[0], m.pos[1] + m.size().1 / 2.0 + 0.5, m.pos[2]],
+                m.uuid,
+            )
+        }) else {
+            return;
+        };
+        let Some(feet) = self.hub.players.lock().unwrap().get(&target).map(|p| p.pos) else {
+            return;
+        };
+        let dx = feet[0] - from[0];
+        let dy = feet[1] + mb::PLAYER_SIZE.1 / 2.0 - from[1];
+        let dz = feet[2] - from[2];
+        let d2 = dx * dx + dy * dy + dz * dz;
+        let spread = 2.297 * d2.sqrt().sqrt() * 0.5;
+        let noise = || (rand::random::<f64>() - rand::random::<f64>()) * spread;
+        let dir = [dx + noise(), dy, dz + noise()];
+        let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2])
+            .max(1e-9)
+            .sqrt();
+        let vel = [dir[0] / len * 0.1, dir[1] / len * 0.1, dir[2] / len * 0.1];
+        let mut arrow = crate::arrows::Arrow::flight(from, vel, false);
+        arrow.thrown_kind = Some(crate::arrows::ThrownKind::SmallFireball);
+        arrow.owner = Some(Uuid::from_u128(uuid));
+        arrow.creative_only = true;
+        arrow.base_damage = 5.0;
+        let ty = self
+            .survival
+            .entity_types
+            .get("minecraft:small_fireball")
+            .copied()
+            .unwrap_or(self.survival.arrow_entity_type);
+        self.launch(ty, arrow);
+        let at = [
+            from[0].floor() as i32,
+            from[1].floor() as i32,
+            from[2].floor() as i32,
+        ];
+        self.hub.send(
+            None,
+            play::level_event(self.ids.level_event, 1018, at, 0, false),
+        );
+    }
+
     /// `Slime.remove` у умершего больше 1: 2–4 детей вдвое меньше
     /// (`convertTo SPLIT_ON_DEATH`: имя и постоянство переходят к ним).
     fn slime_split(&self, m: &Mob, count: i32) {
@@ -7130,6 +7191,21 @@ mod tests {
         assert_eq!(
             MobMeta::of(&m).fields(m.species, Some(MobMeta::default())),
             vec![(19, play::Meta::Bool(true))]
+        );
+    }
+
+    #[test]
+    fn blaze_charge_is_synced() {
+        let mut m = crate::mobs::Mob::new(crate::mobs::Species::Blaze, [0.5, 64.0, 0.5], 1);
+        assert!(
+            MobMeta::of(&m)
+                .fields(m.species, Some(MobMeta::default()))
+                .is_empty()
+        );
+        m.blaze_charged = true;
+        assert_eq!(
+            MobMeta::of(&m).fields(m.species, Some(MobMeta::default())),
+            vec![(16, play::Meta::Byte(1))]
         );
     }
 
