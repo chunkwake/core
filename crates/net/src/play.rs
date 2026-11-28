@@ -147,6 +147,7 @@ struct Ids {
     block_changed_ack: i32,
     sb_player_action: i32,
     sb_use_item_on: i32,
+    sb_set_command_minecart: i32,
     sb_set_creative_mode_slot: i32,
     sb_pick_item_from_block: i32,
     sb_pick_item_from_entity: i32,
@@ -3749,6 +3750,7 @@ impl PlayPlan {
                 block_changed_ack: cb("block_changed_ack")?,
                 sb_player_action: sb("player_action")?,
                 sb_use_item_on: sb("use_item_on")?,
+                sb_set_command_minecart: sb("set_command_minecart")?,
                 sb_set_creative_mode_slot: sb("set_creative_mode_slot")?,
                 sb_pick_item_from_block: sb("pick_item_from_block")?,
                 sb_pick_item_from_entity: sb("pick_item_from_entity")?,
@@ -17485,6 +17487,40 @@ impl PlayPlan {
                                         self.reset_after_use(me.entity_id, uuid, it.hand, state, &mut swing);
                                     }
                                 }
+                                // `MinecartCommandBlock.interact`: gamemaster
+                                // открывает редактор, остальные садятся.
+                                minecarts::CartUse::CommandBlock => {
+                                    if self.op_level(uuid) >= 2 || login.spawn.game_mode == 1 {
+                                        if let Some(packets) =
+                                            self.minecart_command_packets(it.entity)
+                                        {
+                                            for packet in packets {
+                                                conn.send(&packet).await?;
+                                            }
+                                        }
+                                        self.reset_after_use(
+                                            me.entity_id,
+                                            uuid,
+                                            it.hand,
+                                            state,
+                                            &mut swing,
+                                        );
+                                    } else if !it.sneaking
+                                        && !in_boat
+                                        && !in_cart
+                                        && self.mount_minecart(uuid, me.entity_id, it.entity)
+                                    {
+                                        in_cart = true;
+                                        state.vitals.clear_fall();
+                                        self.reset_after_use(
+                                            me.entity_id,
+                                            uuid,
+                                            it.hand,
+                                            state,
+                                            &mut swing,
+                                        );
+                                    }
+                                }
                                 minecarts::CartUse::Pass => {}
                             }
                             continue;
@@ -17801,6 +17837,21 @@ impl PlayPlan {
                         self.close_with_event(&mut state.inv, &mut state.ender, &mut window, uuid).await;
                         self.send_inventory(conn, &mut state.inv).await?;
                         self.refresh_glide(conn, me, state, sneaking, flying, &mut gliding).await?;
+                        continue;
+                    }
+                    if id == ids.sb_set_command_minecart {
+                        let entity = r.var_int()?;
+                        let command = r.string(32767)?.trim_start_matches('/').to_owned();
+                        let track = r.bool()?;
+                        if (self.op_level(uuid) >= 2 || login.spawn.game_mode == 1)
+                            && !state.vitals.dead
+                            && let Some(packets) =
+                                self.set_command_minecart(entity, command, track)
+                        {
+                            for packet in packets {
+                                conn.send(&packet).await?;
+                            }
+                        }
                         continue;
                     }
                     if id == ids.sb_use_item {

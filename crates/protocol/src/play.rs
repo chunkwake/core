@@ -1950,6 +1950,10 @@ pub enum Meta {
     Int(i32),
     Float(f32),
     Bool(bool),
+    /// `EntityDataSerializers.STRING` (id 4).
+    String(String),
+    /// `EntityDataSerializers.COMPONENT` (id 5).
+    Component(serde_json::Value),
     /// `EntityDataSerializers.ITEM_STACK` (id 7): `ItemStack.OPTIONAL_STREAM_CODEC`.
     Slot(crate::inventory::Slot),
     /// `EntityDataSerializers.ROTATIONS` (id 9): три угла `FLOAT`.
@@ -1993,6 +1997,13 @@ pub fn entity_meta(id: i32, entity_id: i32, fields: &[(u8, Meta)]) -> Vec<u8> {
             }
             Meta::Bool(b) => {
                 w.u8(*i).var_int(8).bool(*b);
+            }
+            Meta::String(s) => {
+                w.u8(*i).var_int(4).string(s);
+            }
+            Meta::Component(c) => {
+                w.u8(*i).var_int(5);
+                crate::text::write_component(&mut w, c);
             }
             Meta::Slot(s) => {
                 w.u8(*i).var_int(7);
@@ -2145,6 +2156,31 @@ mod lp_tests {
         assert_eq!(r.u8().unwrap(), 8);
         assert_eq!(r.var_int().unwrap(), 3);
         assert_eq!(r.f32().unwrap(), 2.5);
+        assert_eq!(r.u8().unwrap(), 0xff);
+    }
+
+    #[test]
+    fn command_minecart_meta_uses_string_and_component_serializers() {
+        let p = entity_meta(
+            1,
+            2,
+            &[
+                (13, Meta::String("/say hi".into())),
+                (14, Meta::Component(serde_json::json!({"text": "ok"}))),
+            ],
+        );
+        let mut r = Reader::new(&p);
+        assert_eq!(r.var_int().unwrap(), 1);
+        assert_eq!(r.var_int().unwrap(), 2);
+        assert_eq!(r.u8().unwrap(), 13);
+        assert_eq!(r.var_int().unwrap(), 4);
+        assert_eq!(r.string(32767).unwrap(), "/say hi");
+        assert_eq!(r.u8().unwrap(), 14);
+        assert_eq!(r.var_int().unwrap(), 5);
+        assert_eq!(
+            crate::text::read_component(&mut r).unwrap(),
+            serde_json::json!({"text": "ok"})
+        );
         assert_eq!(r.u8().unwrap(), 0xff);
     }
 }

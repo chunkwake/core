@@ -115,6 +115,8 @@ pub(super) enum CartUse {
     Open(usize, serde_json::Value),
     /// `MinecartFurnace.interact`: подбросить топливо.
     Fuel,
+    /// `MinecartCommandBlock.interact`: редактор для gamemaster.
+    CommandBlock,
     Pass,
 }
 
@@ -435,6 +437,9 @@ impl PlayPlan {
         if e.fuse >= 0 {
             out.push(inv::entity_event(self.ids.entity_event, id, EVENT_PRIME));
         }
+        if e.variant == Variant::CommandBlock {
+            out.extend(self.minecart_command_meta(id, e));
+        }
         if let Some((_, rider)) = e.rider {
             out.push(play::set_passengers(self.ids.set_passengers, id, &[rider]));
         }
@@ -472,6 +477,51 @@ impl PlayPlan {
         let now = self.game_time.load(Ordering::Relaxed);
         let carts = self.sim().minecarts.lock().unwrap();
         Some(self.minecart_packets(id, carts.get(&id)?, now))
+    }
+
+    /// `MinecartCommandBlock.DATA_ID_COMMAND_NAME` (10) и
+    /// `DATA_ID_LAST_OUTPUT` (11): клиент открывает редактор по этим данным.
+    pub(super) fn minecart_command_meta(&self, id: i32, e: &MinecartEntry) -> Vec<Vec<u8>> {
+        let output = e
+            .last_output
+            .as_ref()
+            .map(|t| serde_json::json!({ "text": t }))
+            .unwrap_or_else(|| serde_json::json!({ "text": "" }));
+        vec![play::entity_meta(
+            self.ids.set_entity_data,
+            id,
+            &[
+                (13, play::Meta::String(e.command.clone())),
+                (14, play::Meta::Component(output)),
+            ],
+        )]
+    }
+
+    pub(super) fn minecart_command_packets(&self, id: i32) -> Option<Vec<Vec<u8>>> {
+        let carts = self.sim().minecarts.lock().unwrap();
+        let e = carts.get(&id)?;
+        Some(self.minecart_command_meta(id, e))
+    }
+
+    /// `ServerboundSetCommandMinecartPacket`: сохранить команду в NBT и
+    /// вернуть метаданные 10/11 для клиента.
+    pub(super) fn set_command_minecart(
+        &self,
+        id: i32,
+        command: String,
+        track_output: bool,
+    ) -> Option<Vec<Vec<u8>>> {
+        let mut carts = self.sim().minecarts.lock().unwrap();
+        let e = carts.get_mut(&id)?;
+        if e.variant != Variant::CommandBlock {
+            return None;
+        }
+        e.command = command;
+        e.track_output = track_output;
+        if !track_output {
+            e.last_output = None;
+        }
+        Some(self.minecart_command_meta(id, e))
     }
 
     pub(super) fn is_minecart(&self, id: i32) -> bool {
@@ -616,7 +666,8 @@ impl PlayPlan {
                 CartUse::Open(e.slots.len(), title)
             }
             Variant::Furnace => CartUse::Fuel,
-            Variant::Tnt | Variant::CommandBlock | Variant::Spawner => CartUse::Pass,
+            Variant::CommandBlock => CartUse::CommandBlock,
+            Variant::Tnt | Variant::Spawner => CartUse::Pass,
         }
     }
 

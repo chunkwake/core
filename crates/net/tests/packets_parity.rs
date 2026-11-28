@@ -25,7 +25,6 @@ const UNHANDLED: &[&str] = &[
     "jigsaw_generate",
     "pong",
     "set_command_block",
-    "set_command_minecart",
     "set_jigsaw_block",
     "set_structure_block",
     "set_test_block",
