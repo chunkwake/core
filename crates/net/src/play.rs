@@ -2257,6 +2257,8 @@ pub(crate) struct DimSim {
     villagers_loaded: Mutex<Vec<villagers::Villager>>,
     /// Вагонетки по ID сущности.
     minecarts: Mutex<FastMap<i32, minecarts::MinecartEntry>>,
+    /// Пассажиры вагонеток из NBT: (id вагонетки, UUID), пока сущность не загружена.
+    pending_minecart_riders: Mutex<Vec<(i32, Uuid)>>,
     /// Рамки для предметов по ID сущности.
     item_frames: Mutex<FastMap<i32, item_frames::ItemFrame>>,
     /// Картины (`Painting`).

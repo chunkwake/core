@@ -50,6 +50,44 @@ fn command_ready(last_activated: i64, now: i64) -> bool {
     now.wrapping_sub(last_activated) >= COMMAND_ACTIVATION_DELAY
 }
 
+fn uuid_tag(u: Uuid) -> Tag {
+    let u = u.as_u128();
+    Tag::IntArray(
+        (0..4)
+            .rev()
+            .map(|i| (u >> (32 * i)) as u32 as i32)
+            .collect(),
+    )
+}
+
+fn uuid_from_tag(t: &Tag) -> Option<Uuid> {
+    let Tag::IntArray(a) = t else {
+        return None;
+    };
+    (a.len() == 4)
+        .then(|| Uuid::from_u128(a.iter().fold(0u128, |acc, &w| acc << 32 | w as u32 as u128)))
+}
+
+/// `Passengers` в NBT: список компаундов с `UUID`.
+fn passengers_tag(uuid: Uuid) -> Tag {
+    Tag::List(vec![Tag::Compound(Compound::from([(
+        "UUID".into(),
+        uuid_tag(uuid),
+    )]))])
+}
+
+fn first_passenger(c: &Compound) -> Option<Uuid> {
+    c.get("Passengers")
+        .and_then(Tag::as_list)?
+        .iter()
+        .find_map(|p| {
+            let Tag::Compound(p) = p else {
+                return None;
+            };
+            uuid_from_tag(p.get("UUID")?)
+        })
+}
+
 /// `EntitySelector.pushableBy` для вагонетки: игроки, железные големы,
 /// другие вагонетки и боссы не подбираются.
 fn mob_pickable(species: crate::mobs::Species) -> bool {
@@ -285,6 +323,9 @@ pub(crate) struct MinecartEntry {
     rider: Option<(Uuid, i32)>,
     /// Моб-пассажир (`Entity.startRiding` из `pushAndPickupEntities`).
     mob_rider: Option<i32>,
+    mob_rider_uuid: Option<Uuid>,
+    /// Пассажиры из NBT, которых ещё нет в мире (ждут загрузки моба/игрока).
+    pending_riders: Vec<Uuid>,
     /// Последние клавиши водителя.
     input: u8,
     damage: f32,
@@ -337,6 +378,8 @@ impl MinecartEntry {
             uuid: Uuid::from_u128(rand::random()),
             rider: None,
             mob_rider: None,
+            mob_rider_uuid: None,
+            pending_riders: Vec::new(),
             input: 0,
             damage: 0.0,
             hit_at: 0,
@@ -604,11 +647,16 @@ impl PlayPlan {
         Some(self.add_minecart(e))
     }
 
-    fn add_minecart(&self, e: MinecartEntry) -> i32 {
+    fn add_minecart(&self, mut e: MinecartEntry) -> i32 {
         let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
+        let pending = std::mem::take(&mut e.pending_riders);
         let packets = self.minecart_packets(id, &e, self.game_time.load(Ordering::Relaxed));
         let tracked = self.minecart_tracked(id, &e);
         self.sim().minecarts.lock().unwrap().insert(id, e);
+        if !pending.is_empty() {
+            let mut wait = self.sim().pending_minecart_riders.lock().unwrap();
+            wait.extend(pending.into_iter().map(|uuid| (id, uuid)));
+        }
         self.mark_work();
         self.hub.spawn_tracked(tracked, packets);
         id
@@ -1143,7 +1191,70 @@ impl PlayPlan {
         s.delay = delay.max(1);
     }
 
+    /// Восстановление `Passengers` из NBT: моб уже загружен в `mobs` или
+    /// игрок вошёл на сервер.
+    fn resolve_minecart_riders(&self) {
+        let mut wait = self.sim().pending_minecart_riders.lock().unwrap();
+        if wait.is_empty() {
+            return;
+        }
+        let players: Vec<(Uuid, i32)> = self
+            .hub
+            .players
+            .lock()
+            .unwrap()
+            .values()
+            .map(|p| (p.entry.uuid, p.entity_id))
+            .collect();
+        let mut attached = Vec::new();
+        let mut linked = Vec::new();
+        {
+            let mut carts = self.sim().minecarts.lock().unwrap();
+            let mut mobs = self.sim().mobs.lock().unwrap();
+            wait.retain(|(cart_id, uuid)| {
+                let Some(cart) = carts.get_mut(cart_id) else {
+                    return false;
+                };
+                if cart.rider.is_some_and(|(u, _)| u == *uuid) || cart.mob_rider_uuid == Some(*uuid)
+                {
+                    return false;
+                }
+                if let Some((mob_id, e)) = mobs
+                    .iter_mut()
+                    .find(|(_, e)| e.mob.alive() && e.mob.uuid == uuid.as_u128())
+                {
+                    if e.vehicle.is_some() {
+                        return false;
+                    }
+                    e.vehicle = Some(*cart_id);
+                    cart.mob_rider = Some(*mob_id);
+                    cart.mob_rider_uuid = Some(*uuid);
+                    attached.push((*cart_id, *mob_id));
+                    return false;
+                }
+                if let Some((uuid, entity_id)) = players.iter().find(|(u, _)| u == uuid) {
+                    cart.rider = Some((*uuid, *entity_id));
+                    cart.input = 0;
+                    linked.push((*uuid, cart.uuid));
+                    attached.push((*cart_id, *entity_id));
+                    return false;
+                }
+                true
+            });
+        }
+        for (uuid, vehicle) in linked {
+            self.link_rider(uuid, vehicle);
+        }
+        for (cart, passenger) in attached {
+            self.hub.send_about(
+                cart,
+                play::set_passengers(self.ids.set_passengers, cart, &[passenger]),
+            );
+        }
+    }
+
     pub(super) fn tick_minecarts(&self) {
+        self.resolve_minecart_riders();
         if self.sim().minecarts.lock().unwrap().is_empty() {
             return;
         }
@@ -1163,7 +1274,7 @@ impl PlayPlan {
             .collect();
         // `EntitySelector.pushableBy`: кого может подобрать движущаяся
         // вагонетка. Игроки, железные големы и другие вагонетки — нельзя.
-        let mob_candidates: Vec<(i32, [f64; 3], f64, f64)> = {
+        let mob_candidates: Vec<(i32, [f64; 3], f64, f64, Uuid)> = {
             let mobs = self.sim().mobs.lock().unwrap();
             mobs.iter()
                 .filter(|(_, e)| {
@@ -1171,7 +1282,7 @@ impl PlayPlan {
                 })
                 .map(|(&id, e)| {
                     let (w, h) = e.mob.size();
-                    (id, e.mob.pos, w, h)
+                    (id, e.mob.pos, w, h, Uuid::from_u128(e.mob.uuid))
                 })
                 .collect()
         };
@@ -1232,6 +1343,7 @@ impl PlayPlan {
                     && !live_mobs.contains(&mob)
                 {
                     e.mob_rider = None;
+                    e.mob_rider_uuid = None;
                     stale_riders.push(id);
                 }
                 e.cart.ridden = e.rider.is_some() || e.mob_rider.is_some();
@@ -1282,6 +1394,7 @@ impl PlayPlan {
                                     ejected.push((id, rider));
                                 }
                                 if let Some(mob) = e.mob_rider.take() {
+                                    e.mob_rider_uuid = None;
                                     mob_ejected.push((id, mob, e.cart.pos));
                                 }
                             }
@@ -1388,15 +1501,18 @@ impl PlayPlan {
                 {
                     let pick = mob_candidates
                         .iter()
-                        .filter(|(mob, _, _, _)| !picked.iter().any(|(_, m)| m == mob))
-                        .filter(|(_, pos, w, h)| mob_in_cart_pickup_box(e.cart.pos, *pos, *w, *h))
+                        .filter(|(mob, _, _, _, _)| !picked.iter().any(|(_, m)| m == mob))
+                        .filter(|(_, pos, w, h, _)| {
+                            mob_in_cart_pickup_box(e.cart.pos, *pos, *w, *h)
+                        })
                         .min_by(|a, b| {
                             crate::mobs::dist2(a.1, e.cart.pos)
                                 .total_cmp(&crate::mobs::dist2(b.1, e.cart.pos))
                         })
-                        .map(|(mob, _, _, _)| *mob);
-                    if let Some(mob) = pick {
+                        .map(|(mob, _, _, _, uuid)| (*mob, *uuid));
+                    if let Some((mob, uuid)) = pick {
                         e.mob_rider = Some(mob);
+                        e.mob_rider_uuid = Some(uuid);
                         picked.push((id, mob));
                     }
                 }
@@ -1677,6 +1793,11 @@ impl PlayPlan {
         if let Some(Tag::String(n)) = c.get("CustomName") {
             e.custom_name = Some(n.clone());
         }
+        // `Passengers`: сохраняем UUID, посадку восстановим после загрузки
+        // мобов/входа игрока.
+        if let Some(uuid) = first_passenger(c) {
+            e.pending_riders.push(uuid);
+        }
         // `ContainerHelper.loadAllItems`.
         for t in c.get("Items").and_then(Tag::as_list).unwrap_or(&[]) {
             let Some(item) = t.as_compound() else {
@@ -1791,6 +1912,11 @@ impl PlayPlan {
                             .collect(),
                     ),
                 );
+                // `Passengers` хранится UUID-ом: моб/игрок может загрузиться
+                // позже самой вагонетки.
+                if let Some(passenger) = e.rider.map(|(u, _)| u).or(e.mob_rider_uuid) {
+                    c.insert("Passengers".into(), passengers_tag(passenger));
+                }
                 if let Some(n) = &e.custom_name {
                     c.insert("CustomName".into(), Tag::String(n.clone()));
                 }
@@ -1928,6 +2054,21 @@ mod tests {
         assert!(command_ready(100, 105));
         // Стартовое значение не мешает первому срабатыванию.
         assert!(command_ready(i64::MIN / 2, 0));
+    }
+
+    #[test]
+    fn passengers_nbt_round_trip() {
+        let uuid = Uuid::from_u128(0x1234_5678_9abc_def0_1122_3344_5566_7788);
+        let tag = passengers_tag(uuid);
+        let c = Compound::from([("Passengers".into(), tag)]);
+        assert_eq!(first_passenger(&c), Some(uuid));
+        // Пустой/чужой список не ломает загрузку.
+        assert_eq!(first_passenger(&Compound::new()), None);
+        let bad = Compound::from([(
+            "Passengers".into(),
+            Tag::List(vec![Tag::Compound(Compound::new())]),
+        )]);
+        assert_eq!(first_passenger(&bad), None);
     }
 
     #[test]
