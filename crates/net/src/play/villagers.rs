@@ -234,6 +234,12 @@ fn find_path(
     None
 }
 
+/// `CANT_REACH_WALK_TARGET_SINCE` держится 1000 тиков, затем память
+/// освобождается (`SetWalkTargetFromBlockMemory`).
+fn cant_reach_expired(since: i64, now: i64) -> bool {
+    since > 0 && now.saturating_sub(since) >= 1000
+}
+
 /// `Mth.atan2`-подобный yaw взгляда из `from` в `to`.
 /// Точка остановки в `close` блоках от цели (`WalkTarget.closeEnoughDist`).
 fn stop_point(from: [f64; 3], target: [f64; 3], close: f64) -> Option<[f64; 3]> {
@@ -908,6 +914,9 @@ pub struct Villager {
     pub nav_goal: Option<[i32; 3]>,
     /// Когда перестроить путь (`PathNavigation.recomputePath`).
     pub nav_repath: i64,
+    /// `CANT_REACH_WALK_TARGET_SINCE`: клетка цели и когда путь застрял.
+    pub cant_reach_target: Option<[i32; 3]>,
+    pub cant_reach_since: i64,
 }
 
 /// Состояние окна торговли: к какому жителю и какая сделка выбрана.
@@ -1302,6 +1311,31 @@ impl PlayPlan {
     /// `PoiManager.release`: освободить рабочую точку.
     pub(crate) fn release_poi(&self, pos: [i32; 3]) {
         self.dim_state().poi_claims.lock().unwrap().remove(&pos);
+    }
+
+    /// `SetWalkTargetFromBlockMemory`: после 1000 тиков недостижимой цели
+    /// освобождаются рабочая точка, дом и колокол, чтобы `AcquirePoi`
+    /// выбрал другую.
+    fn forget_unreachable(&self, v: &mut Villager, cell: [i32; 3]) {
+        let near = |p: [i32; 3]| {
+            (p[0] - cell[0]).abs() <= 3
+                && (p[1] - cell[1]).abs() <= 2
+                && (p[2] - cell[2]).abs() <= 3
+        };
+        if let Some(site) = v.job_site.filter(|p| near(*p)) {
+            self.release_poi(site);
+            v.job_site = None;
+        }
+        if let Some(home) = v.home.filter(|p| near(*p)) {
+            self.release_poi(home);
+            v.home = None;
+        }
+        if v.meeting_point.is_some_and(near) {
+            v.meeting_point = None;
+        }
+        v.move_target = None;
+        v.nav_path.clear();
+        v.nav_goal = None;
     }
 
     /// `PoiManager.getInRange`: ближайшая свободная точка нужных типов.
@@ -1832,10 +1866,30 @@ impl PlayPlan {
         // `MoveToTargetSink` (приоритет 1): пока есть `WALK_TARGET`, житель
         // только идёт к нему — рабочие поведения не запускаются.
         if let Some(target) = v.move_target {
+            let cell = [
+                target[0].floor() as i32,
+                target[1].floor() as i32,
+                target[2].floor() as i32,
+            ];
+            if v.cant_reach_target != Some(cell) {
+                v.cant_reach_target = Some(cell);
+                v.cant_reach_since = 0;
+            }
             if let Some(step) = self.walk_step(v, target, 0.14) {
                 return Some(step);
             }
-            // Цель достигнута или путь застрял (`MoveToTargetSink.stop`).
+            // `MoveToTargetSink.stop`: цель достигнута или путь застрял.
+            let dx = target[0] - v.pos[0];
+            let dz = target[2] - v.pos[2];
+            if dx * dx + dz * dz >= 0.8 * 0.8 {
+                if v.cant_reach_since == 0 {
+                    v.cant_reach_since = now;
+                } else if cant_reach_expired(v.cant_reach_since, now) {
+                    self.forget_unreachable(v, cell);
+                }
+            } else {
+                v.cant_reach_since = 0;
+            }
             v.move_target = None;
         }
         // `RunOne` work-пакета: действия выбираются по весам, а ветка
@@ -4085,6 +4139,8 @@ impl PlayPlan {
             nav_path: Vec::new(),
             nav_goal: None,
             nav_repath: 0,
+            cant_reach_target: None,
+            cant_reach_since: 0,
             job_site: None,
             last_job_check: 0,
             custom_name: None,
@@ -5242,6 +5298,8 @@ impl PlayPlan {
             nav_path: Vec::new(),
             nav_goal: None,
             nav_repath: 0,
+            cant_reach_target: None,
+            cant_reach_since: 0,
         };
         apply_villager_nbt(&mut v, c, |n| self.item_id(n));
         if v.profession == "minecraft:none" {
@@ -5592,6 +5650,8 @@ mod tests {
             nav_path: Vec::new(),
             nav_goal: None,
             nav_repath: 0,
+            cant_reach_target: None,
+            cant_reach_since: 0,
         };
         let player = Uuid::from_u128(7);
         let target = player.as_u128();
@@ -5614,6 +5674,14 @@ mod tests {
         v.maybe_decay_gossip(48_002);
         assert_eq!(v.gossips[&target][GossipType::Trading.id()], 21);
         assert_eq!(v.gossips[&target][GossipType::MinorNegative.id()], 0);
+    }
+
+    #[test]
+    fn unreachable_walk_target_expires_after_1000_ticks() {
+        assert!(!cant_reach_expired(0, 5000));
+        assert!(!cant_reach_expired(100, 1099));
+        assert!(cant_reach_expired(100, 1100));
+        assert!(cant_reach_expired(100, 1101));
     }
 
     #[test]
