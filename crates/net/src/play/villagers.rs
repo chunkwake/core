@@ -3529,6 +3529,20 @@ impl PlayPlan {
         }
     }
 
+    /// `WalkNodeEvaluator`: клетка ног занята — можно подняться на один блок,
+    /// если свободны клетка на уровне ног и над головой. Возвращает высоту
+    /// ног после шага или `None`, если проход закрыт.
+    fn step_up_y(feet: [i32; 3], blocked: impl Fn([i32; 3]) -> bool) -> Option<f64> {
+        if !blocked(feet) {
+            return Some(f64::from(feet[1]));
+        }
+        let up = [feet[0], feet[1] + 1, feet[2]];
+        if blocked(up) || blocked([up[0], up[1] + 1, up[2]]) {
+            return None;
+        }
+        Some(f64::from(feet[1] + 1))
+    }
+
     /// Шаг к точке с проверкой коллизий и открыванием дверей.
     fn walk_step(&self, v: &mut Villager, target: [f64; 3], speed: f64) -> Option<([f64; 3], f32)> {
         let dx = target[0] - v.pos[0];
@@ -3552,21 +3566,22 @@ impl PlayPlan {
         if feet != here {
             self.open_door_on_path(v, feet);
         }
-        if self.walk_blocked(feet) {
-            let up = [feet[0], feet[1] + 1, feet[2]];
-            if self.walk_blocked(up) || self.walk_blocked([up[0], up[1] + 1, up[2]]) {
-                return None;
-            }
-        }
+        let stepped_y = Self::step_up_y(feet, |p| self.walk_blocked(p))?;
+        let stand = [feet[0], stepped_y.floor() as i32, feet[2]];
         // `WalkNodeEvaluator`: опасные блоки (огонь/лава/магма/кактус…) не
         // проходятся, иначе житель сгорит при прогулке.
-        if self.dangerous_block(feet) || self.dangerous_block([feet[0], feet[1] - 1, feet[2]]) {
+        if self.dangerous_block(stand) || self.dangerous_block([stand[0], stand[1] - 1, stand[2]]) {
             return None;
         }
         let yaw = look_yaw(v.pos, target);
         v.pos[0] = nx;
         v.pos[2] = nz;
-        v.pos[1] += (target[1] - v.pos[1]).clamp(-0.2, 0.2);
+        if stepped_y > v.pos[1] {
+            // Подъём на блок: ноги сразу на его верхней грани.
+            v.pos[1] = stepped_y;
+        } else {
+            v.pos[1] += (target[1] - v.pos[1]).clamp(-0.2, 0.2);
+        }
         v.yaw = yaw;
         v.airborne = false;
         Some((v.pos, yaw))
@@ -5350,6 +5365,24 @@ mod tests {
         v.maybe_decay_gossip(48_002);
         assert_eq!(v.gossips[&target][GossipType::Trading.id()], 21);
         assert_eq!(v.gossips[&target][GossipType::MinorNegative.id()], 0);
+    }
+
+    #[test]
+    fn walk_step_raises_to_a_free_block() {
+        let feet = [2, 64, 0];
+        assert_eq!(PlayPlan::step_up_y(feet, |_| false), Some(64.0));
+        // Блок в клетке ног, над ним и над головой свободно — шаг наверх.
+        assert_eq!(PlayPlan::step_up_y(feet, |p| p == feet), Some(65.0));
+        // Нет места над головой — прохода нет.
+        assert_eq!(
+            PlayPlan::step_up_y(feet, |p| p == feet || p == [2, 66, 0]),
+            None
+        );
+        // Занята клетка на уровне ног — прохода нет.
+        assert_eq!(
+            PlayPlan::step_up_y(feet, |p| p == feet || p == [2, 65, 0]),
+            None
+        );
     }
 
     #[test]
