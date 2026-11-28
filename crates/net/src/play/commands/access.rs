@@ -1654,7 +1654,9 @@ impl PlayPlan {
                         );
                     }
                 }
-                crate::mobs::Species::Zombie | crate::mobs::Species::Drowned => {
+                crate::mobs::Species::Zombie
+                | crate::mobs::Species::ZombieVillager
+                | crate::mobs::Species::Drowned => {
                     root.insert("IsBaby".into(), Tag::Byte(i8::from(entry.mob.is_baby())));
                     root.insert(
                         "CanBreakDoors".into(),

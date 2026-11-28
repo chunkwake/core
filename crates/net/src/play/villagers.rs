@@ -5304,6 +5304,11 @@ fn uuid_ints(uuid: Uuid) -> Vec<i32> {
 }
 
 fn apply_villager_nbt(v: &mut Villager, c: &Compound, item: impl Fn(&str) -> Option<i32>) {
+    if let Some(Tag::IntArray(u)) = c.get("UUID")
+        && u.len() == 4
+    {
+        v.uuid = Uuid::from_u128(u.iter().fold(0u128, |acc, &w| acc << 32 | w as u32 as u128));
+    }
     if let Some(Tag::Compound(data)) = c.get("VillagerData") {
         if let Some(Tag::String(kind)) = data.get("type") {
             v.kind.clone_from(kind);

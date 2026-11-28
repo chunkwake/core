@@ -13,6 +13,11 @@ type Hands<'a> = ([f64; 3], [Option<&'a str>; 2], u128, bool);
 /// заставлять сервер крутить цикл на произвольное число сущностей.
 const MAX_SLIME_SPLIT: i32 = 128;
 
+/// `ZombieVillager.startConverting`: 3600 + nextInt(2401) тиков.
+fn zombie_villager_conversion_time(roll: i32) -> i32 {
+    3600 + roll.rem_euclid(2401)
+}
+
 /// Обход быстрого пути эффектов: `CHUNKWAKE_NO_FX_FASTPATH=1` — A/B.
 ///
 /// Спрашивается один раз: условие стоит в теле цикла по мобам, а `env::var`
@@ -637,7 +642,12 @@ impl PlayPlan {
             );
         }
         // `Zombie.finalizeSpawn`: шанс ломать двери `specialMultiplier × 0.1`.
-        if finalize && matches!(m.species, Species::Zombie | Species::Drowned) {
+        if finalize
+            && matches!(
+                m.species,
+                Species::Zombie | Species::ZombieVillager | Species::Drowned
+            )
+        {
             let special = mb::cube::special_multiplier(
                 self.difficulty().id(),
                 self.day_time.load(Ordering::Relaxed),
@@ -1974,7 +1984,93 @@ impl PlayPlan {
                 }
             }
         }
+        self.tick_zombie_villager_cures();
         self.tick_witch_heals();
+    }
+
+    /// `ZombieVillager.tick` → `finishConversion`: обращённый зомби-житель
+    /// становится жителем с сохранённой профессией и скидкой у лечившего.
+    fn tick_zombie_villager_cures(&self) {
+        let mut cured = Vec::new();
+        {
+            let mut mobs = self.sim().mobs.lock().unwrap();
+            let ids: Vec<i32> = mobs
+                .iter()
+                .filter(|(_, e)| {
+                    e.mob.species == Species::ZombieVillager
+                        && e.mob.alive()
+                        && e.mob.conversion_time > 0
+                })
+                .map(|(&id, _)| id)
+                .collect();
+            for id in ids {
+                let Some(e) = mobs.get_mut(&id) else {
+                    continue;
+                };
+                e.mob.conversion_time -= 1;
+                if e.mob.conversion_time <= 0
+                    && let Some(e) = mobs.remove(&id)
+                {
+                    cured.push((id, e.mob));
+                }
+            }
+        }
+        for (id, m) in cured {
+            self.finish_zombie_villager_conversion(id, &m);
+        }
+    }
+
+    fn finish_zombie_villager_conversion(&self, id: i32, m: &Mob) {
+        let pos = [
+            m.pos[0].floor() as i32,
+            m.pos[1].floor() as i32,
+            m.pos[2].floor() as i32,
+        ];
+        self.hub.remove_tracked(&[id]);
+        let data = Compound::from([
+            ("type".into(), Tag::String(m.villager_kind.clone())),
+            (
+                "profession".into(),
+                Tag::String(m.villager_profession.clone()),
+            ),
+            ("level".into(), Tag::Int(m.villager_level)),
+        ]);
+        let nbt = Compound::from([
+            ("VillagerData".into(), Tag::Compound(data)),
+            ("Xp".into(), Tag::Int(m.villager_xp)),
+            (
+                "UUID".into(),
+                Tag::IntArray(
+                    (0..4)
+                        .rev()
+                        .map(|i| (m.uuid >> (32 * i)) as u32 as i32)
+                        .collect(),
+                ),
+            ),
+        ]);
+        if let Some(villager) = self.summon_villager(m.pos, Some(&nbt)) {
+            if let Some(starter) = m.conversion_starter
+                && let Some(v) = self.sim().villagers.lock().unwrap().get_mut(&villager)
+            {
+                v.add_gossip(
+                    starter,
+                    crate::play::villagers::GossipType::MajorPositive,
+                    25,
+                );
+            }
+            self.play_sound(
+                None,
+                "minecraft:entity.zombie_villager.converted",
+                crate::sounds::HOSTILE,
+                m.pos,
+                1.0,
+                1.0,
+            );
+            self.hub.send(
+                None,
+                play::level_event(self.ids.level_event, 1027, pos, 0, false),
+            );
+        }
     }
 
     /// `Witch.performRangedAttack` по союзному разбойнику: бросок зелья
@@ -2595,6 +2691,31 @@ impl PlayPlan {
                 m.crops_grown = crops.clamp(0, 10) as u8;
             }
         }
+        if m.species == Species::ZombieVillager {
+            if let Some(Tag::Compound(data)) = nbt.get("VillagerData") {
+                if let Some(Tag::String(kind)) = data.get("type") {
+                    m.villager_kind.clone_from(kind);
+                }
+                if let Some(Tag::String(profession)) = data.get("profession") {
+                    m.villager_profession.clone_from(profession);
+                }
+                if let Some(level) = data.get("level").and_then(Tag::as_i64) {
+                    m.villager_level = (level as i32).clamp(1, 5);
+                }
+            }
+            if let Some(xp) = nbt.get("Xp").and_then(Tag::as_i64) {
+                m.villager_xp = xp.max(0) as i32;
+            }
+            if let Some(t) = nbt.get("ConversionTime").and_then(Tag::as_i64) {
+                m.conversion_time = t.max(0) as i32;
+            }
+            if let Some(Tag::IntArray(a)) = nbt.get("ConversionPlayer")
+                && a.len() == 4
+            {
+                m.conversion_starter =
+                    Some(a.iter().fold(0u128, |acc, &v| acc << 32 | v as u32 as u128));
+            }
+        }
         if m.species == Species::TropicalFish
             && let Some(variant) = nbt.get("Variant").and_then(Tag::as_i64)
         {
@@ -2652,8 +2773,10 @@ impl PlayPlan {
                 }
             }
         }
-        if matches!(m.species, Species::Zombie | Species::Drowned)
-            && let Some(Tag::Byte(breaks)) = nbt.get("CanBreakDoors")
+        if matches!(
+            m.species,
+            Species::Zombie | Species::ZombieVillager | Species::Drowned
+        ) && let Some(Tag::Byte(breaks)) = nbt.get("CanBreakDoors")
         {
             m.can_break_doors = *breaks != 0;
         }
@@ -4317,6 +4440,7 @@ impl PlayPlan {
             Wax([f64; 3]),
             Scrape([f64; 3]),
             Chest([f64; 3]),
+            Cure([f64; 3]),
         }
         let act = {
             let mut mobs = self.sim().mobs.lock().unwrap();
@@ -4447,6 +4571,28 @@ impl PlayPlan {
                 // Топор снимает воск (`#minecraft:axes`).
                 m.next_weather_age = -1;
                 Act::Scrape(m.pos)
+            } else if m.species == Species::ZombieVillager
+                && name == "minecraft:golden_apple"
+                && self
+                    .survival
+                    .effects
+                    .get("minecraft:weakness")
+                    .is_some_and(|weakness| m.effects.iter().any(|e| e.id == *weakness))
+            {
+                // `ZombieVillager.mobInteract`: золотое яблоко при слабости
+                // запускает обращение; время 3600..6000 тиков.
+                let time = zombie_villager_conversion_time(rand::random());
+                m.conversion_time = time;
+                m.conversion_starter = Some(uuid.as_u128());
+                if let Some(weakness) = self.survival.effects.get("minecraft:weakness") {
+                    m.effects.retain(|e| e.id != *weakness);
+                }
+                if let Some(strength) = self.survival.effects.get("minecraft:strength") {
+                    let amp = self.difficulty().id().saturating_sub(1);
+                    m.effects
+                        .push(crate::survival::Effect::plain(*strength, amp, time));
+                }
+                Act::Cure(m.pos)
             } else if m.species == Species::Piglin && !m.is_baby() && name == "minecraft:gold_ingot"
             {
                 // `PiglinAi.mobInteract` → `canAdmire`: взрослый пиглин
@@ -4535,6 +4681,22 @@ impl PlayPlan {
                 if !creative {
                     inv.consume_at(slot);
                 }
+                self.refresh_mob(target);
+            }
+            Act::Cure(pos) => {
+                if !creative {
+                    inv.consume_at(slot);
+                }
+                self.hub
+                    .send_about(target, inv::entity_event(self.ids.entity_event, target, 16));
+                self.play_sound(
+                    None,
+                    "minecraft:entity.zombie_villager.cure",
+                    crate::sounds::HOSTILE,
+                    pos,
+                    1.0,
+                    1.0,
+                );
                 self.refresh_mob(target);
             }
             Act::Wax(pos) => {
@@ -5345,6 +5507,37 @@ pub(super) fn mob_to_nbt(
         c.insert("leash".into(), crate::leash::to_nbt(leash));
     }
     match m.species {
+        Species::ZombieVillager => {
+            c.insert("IsBaby".into(), Tag::Byte(i8::from(m.is_baby())));
+            c.insert(
+                "CanBreakDoors".into(),
+                Tag::Byte(i8::from(m.can_break_doors)),
+            );
+            c.insert(
+                "VillagerData".into(),
+                Tag::Compound(Compound::from([
+                    ("type".into(), Tag::String(m.villager_kind.clone())),
+                    (
+                        "profession".into(),
+                        Tag::String(m.villager_profession.clone()),
+                    ),
+                    ("level".into(), Tag::Int(m.villager_level)),
+                ])),
+            );
+            c.insert("Xp".into(), Tag::Int(m.villager_xp));
+            c.insert("ConversionTime".into(), Tag::Int(m.conversion_time));
+            if let Some(starter) = m.conversion_starter {
+                c.insert(
+                    "ConversionPlayer".into(),
+                    Tag::IntArray(
+                        (0..4)
+                            .rev()
+                            .map(|i| (starter >> (32 * i)) as u32 as i32)
+                            .collect(),
+                    ),
+                );
+            }
+        }
         Species::Zombie => {
             c.insert("IsBaby".into(), Tag::Byte(i8::from(m.is_baby())));
             c.insert(
@@ -5513,7 +5706,10 @@ pub(super) fn mob_from_nbt(
     m.persistent = byte("PersistenceRequired").is_some_and(|b| b != 0);
     m.no_ai = byte("NoAI").is_some_and(|b| b != 0);
     // Зомби: детёныш навсегда (`IsBaby`), возраста у него нет.
-    if matches!(species, Species::Zombie | Species::Drowned) {
+    if matches!(
+        species,
+        Species::Zombie | Species::ZombieVillager | Species::Drowned
+    ) {
         m.age = if byte("IsBaby").is_some_and(|b| b != 0) {
             mb::BABY_AGE
         } else {
@@ -5521,6 +5717,27 @@ pub(super) fn mob_from_nbt(
         };
         m.love = 0;
         m.can_break_doors = byte("CanBreakDoors").is_some_and(|b| b != 0);
+    }
+    if species == Species::ZombieVillager {
+        if let Some(Tag::Compound(data)) = c.get("VillagerData") {
+            if let Some(Tag::String(kind)) = data.get("type") {
+                m.villager_kind.clone_from(kind);
+            }
+            if let Some(Tag::String(profession)) = data.get("profession") {
+                m.villager_profession.clone_from(profession);
+            }
+            if let Some(level) = data.get("level").and_then(Tag::as_i64) {
+                m.villager_level = (level as i32).clamp(1, 5);
+            }
+        }
+        m.villager_xp = int("Xp").unwrap_or(0).max(0);
+        m.conversion_time = int("ConversionTime").unwrap_or(0).max(0);
+        if let Some(Tag::IntArray(a)) = c.get("ConversionPlayer")
+            && a.len() == 4
+        {
+            m.conversion_starter =
+                Some(a.iter().fold(0u128, |acc, &v| acc << 32 | v as u32 as u128));
+        }
     }
     if species == Species::CopperGolem {
         m.next_weather_age = match c.get("next_weather_age") {
@@ -6800,7 +7017,10 @@ impl PlayPlan {
         // у животных 5 % только у членов группы после первого.
         let mut zombie_baby = false;
         for (species, at, first) in plan {
-            let zombie = matches!(species, Species::Zombie | Species::Drowned);
+            let zombie = matches!(
+                species,
+                Species::Zombie | Species::ZombieVillager | Species::Drowned
+            );
             if first {
                 zombie_baby = zombie && rng.r#gen::<f64>() < 0.05;
             }
@@ -7388,6 +7608,43 @@ mod tests {
         assert_eq!((back.yaw, back.health, back.age), (90.0, 5.0, -100));
         assert!(back.sheared);
         assert_eq!(back.color, 14);
+    }
+
+    #[test]
+    fn zombie_villager_nbt_roundtrip() {
+        assert_eq!(
+            Species::from_name("minecraft:zombie_villager"),
+            Some(Species::ZombieVillager)
+        );
+        let mut m = Mob::new(Species::ZombieVillager, [0.5, 64.0, 0.5], 77);
+        m.villager_kind = "minecraft:desert".into();
+        m.villager_profession = "minecraft:librarian".into();
+        m.villager_level = 3;
+        m.villager_xp = 120;
+        m.conversion_time = 4321;
+        m.conversion_starter = Some(0x1234_5678_9abc_def0_1122_3344_5566_7788);
+        let nbt = mob_to_nbt(&m, &std::collections::HashMap::new(), &[]);
+        let back = mob_from_nbt(
+            &nbt,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(back.species, Species::ZombieVillager);
+        assert_eq!(back.villager_kind, "minecraft:desert");
+        assert_eq!(back.villager_profession, "minecraft:librarian");
+        assert_eq!(back.villager_level, 3);
+        assert_eq!(back.villager_xp, 120);
+        assert_eq!(back.conversion_time, 4321);
+        assert_eq!(back.conversion_starter, m.conversion_starter);
+    }
+
+    #[test]
+    fn zombie_villager_conversion_time_is_vanilla_range() {
+        assert!((3600..=6000).contains(&zombie_villager_conversion_time(i32::MIN)));
+        assert_eq!(zombie_villager_conversion_time(0), 3600);
+        assert_eq!(zombie_villager_conversion_time(1200), 4800);
+        assert_eq!(zombie_villager_conversion_time(2400), 6000);
     }
 
     #[test]

@@ -95,7 +95,7 @@ pub fn random_equipment(
         }
     }
     match species {
-        Species::Zombie | Species::Drowned => {
+        Species::Zombie | Species::ZombieVillager | Species::Drowned => {
             let chance = if difficulty == 3 { 0.05 } else { 0.01 };
             if rng() < chance {
                 let name = match (rng() * 6.0) as u32 % 6 {
@@ -275,6 +275,7 @@ pub enum Species {
     Sheep,
     Chicken,
     Zombie,
+    ZombieVillager,
     Creeper,
     Skeleton,
     Spider,
@@ -386,7 +387,7 @@ const fn base(name: &'static str, sound: &'static str, loot: &'static str) -> Sp
 
 /// Встроенная таблица в порядке [`Species::ALL`]: числа из `createAttributes`
 /// и `EntityType` 26.3.
-const BUILTIN: [SpeciesInfo; 44] = [
+const BUILTIN: [SpeciesInfo; 45] = [
     SpeciesInfo {
         size: (0.9, 1.4),
         eye_height: 1.3,
@@ -451,6 +452,21 @@ const BUILTIN: [SpeciesInfo; 44] = [
             "minecraft:zombie",
             "minecraft:entity.zombie",
             "minecraft:entities/zombie",
+        )
+    },
+    SpeciesInfo {
+        category: Category::Monster,
+        size: (0.6, 1.95),
+        eye_height: 1.74,
+        speed: 0.23,
+        follow_range: 35.0,
+        attack_damage: 3.0,
+        armor: 2.0,
+        burns_in_sun: true,
+        ..base(
+            "minecraft:zombie_villager",
+            "minecraft:entity.zombie_villager",
+            "minecraft:entities/zombie_villager",
         )
     },
     SpeciesInfo {
@@ -1036,12 +1052,13 @@ fn merge(b: &SpeciesInfo, types: &[chunkwake_data::world::EntityTypeInfo]) -> Sp
 }
 
 impl Species {
-    pub const ALL: [Species; 44] = [
+    pub const ALL: [Species; 45] = [
         Species::Cow,
         Species::Pig,
         Species::Sheep,
         Species::Chicken,
         Species::Zombie,
+        Species::ZombieVillager,
         Species::Creeper,
         Species::Skeleton,
         Species::Spider,
@@ -1149,7 +1166,10 @@ impl Species {
     }
 
     pub fn is_undead(self) -> bool {
-        matches!(self, Species::Zombie | Species::Skeleton | Species::Drowned)
+        matches!(
+            self,
+            Species::Zombie | Species::ZombieVillager | Species::Skeleton | Species::Drowned
+        )
     }
 
     pub fn attack_damage(self) -> f32 {
@@ -1380,6 +1400,14 @@ pub struct Mob {
     pub on_fire: bool,
     /// `active_effects`: зелья и эффекты на мобе.
     pub effects: Vec<crate::survival::Effect>,
+    /// `ZombieVillager`: данные жителя и обращение золотым яблоком.
+    pub villager_kind: String,
+    pub villager_profession: String,
+    pub villager_level: i32,
+    pub villager_xp: i32,
+    /// `villagerConversionTime`, `conversionStarter`.
+    pub conversion_time: i32,
+    pub conversion_starter: Option<u128>,
     /// `EntityEquipment`: mainhand, offhand, feet, legs, chest, head.
     pub equipment: [Option<Stack>; 6],
     /// `EquipmentSlot.BODY` (`DataComponents.BODY_ARMOR`): волчья броня.
@@ -1607,6 +1635,12 @@ impl Mob {
             climbing: false,
             on_fire: false,
             effects: Vec::new(),
+            villager_kind: "minecraft:plains".into(),
+            villager_profession: "minecraft:none".into(),
+            villager_level: 1,
+            villager_xp: 0,
+            conversion_time: 0,
+            conversion_starter: None,
             equipment: [None; 6],
             body_armor: None,
             sitting: false,
@@ -1632,7 +1666,11 @@ impl Mob {
     pub fn speed(&self) -> f64 {
         let base = if self.species.is_cube() {
             cube::speed(self.cube_size)
-        } else if matches!(self.species, Species::Zombie | Species::Drowned) && self.is_baby() {
+        } else if matches!(
+            self.species,
+            Species::Zombie | Species::ZombieVillager | Species::Drowned
+        ) && self.is_baby()
+        {
             self.species.speed() * 1.5
         } else {
             self.species.speed()
@@ -2321,7 +2359,12 @@ pub fn walker(m: &Mob, w: &World, difficulty: u8, in_water: bool) -> path::Walke
         // летучей мыши и фантома.
         can_float: !matches!(
             m.species,
-            Species::Zombie | Species::Skeleton | Species::Bat | Species::Phantom | Species::Bee
+            Species::Zombie
+                | Species::ZombieVillager
+                | Species::Skeleton
+                | Species::Bat
+                | Species::Phantom
+                | Species::Bee
         ),
         can_open_doors: m.can_break_doors,
         can_pass_doors: true,

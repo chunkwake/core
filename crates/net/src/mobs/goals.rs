@@ -1610,7 +1610,7 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
                 Selector::new(vec![hurt_by(1, true), nearest(2, false)]),
             );
         }
-        Species::Zombie | Species::Drowned => {
+        Species::Zombie | Species::ZombieVillager | Species::Drowned => {
             let float = if species == Species::Drowned {
                 vec![(0, Goal::Float)]
             } else {
