@@ -240,6 +240,48 @@ fn cant_reach_expired(since: i64, now: i64) -> bool {
     since > 0 && now.saturating_sub(since) >= 1000
 }
 
+/// `DefaultRandomPos.getPosTowards`: до 1000 случайных точек в конусе
+/// (±15 по XZ, ±7 по Y) в направлении цели; берётся ближайшая к цели
+/// проходимая точка, которая ближе текущей.
+fn fallback_towards(
+    pos: [i32; 3],
+    target: [i32; 3],
+    passable: impl Fn([i32; 3]) -> bool,
+    mut rng: impl FnMut() -> f64,
+) -> Option<[f64; 3]> {
+    let (tx, tz) = (target[0] - pos[0], target[2] - pos[2]);
+    let current = i64::from(tx) * i64::from(tx) + i64::from(tz) * i64::from(tz);
+    let mut best: Option<([i32; 3], i64)> = None;
+    for _ in 0..1000 {
+        let ox = (rng() * 31.0) as i32 - 15;
+        let oy = (rng() * 15.0) as i32 - 7;
+        let oz = (rng() * 31.0) as i32 - 15;
+        // Впереди цели, а не позади неё.
+        if ox * tx + oz * tz < 0 {
+            continue;
+        }
+        let p = [pos[0] + ox, pos[1] + oy, pos[2] + oz];
+        if !passable(p) {
+            continue;
+        }
+        let (dx, dz) = (target[0] - p[0], target[2] - p[2]);
+        let d = i64::from(dx) * i64::from(dx) + i64::from(dz) * i64::from(dz);
+        if d >= current {
+            continue;
+        }
+        if best.is_none_or(|(_, bd)| d < bd) {
+            best = Some((p, d));
+        }
+    }
+    best.map(|(p, _)| {
+        [
+            f64::from(p[0]) + 0.5,
+            f64::from(p[1]),
+            f64::from(p[2]) + 0.5,
+        ]
+    })
+}
+
 /// `Mth.atan2`-подобный yaw взгляда из `from` в `to`.
 /// Точка остановки в `close` блоках от цели (`WalkTarget.closeEnoughDist`).
 fn stop_point(from: [f64; 3], target: [f64; 3], close: f64) -> Option<[f64; 3]> {
@@ -1313,6 +1355,11 @@ impl PlayPlan {
         self.dim_state().poi_claims.lock().unwrap().remove(&pos);
     }
 
+    /// Случайная точка в направлении цели для `SetWalkTargetFromBlockMemory`.
+    fn fallback_walk_target(&self, pos: [i32; 3], target: [i32; 3]) -> Option<[f64; 3]> {
+        fallback_towards(pos, target, |p| self.nav_passable(p), rand::random)
+    }
+
     /// `SetWalkTargetFromBlockMemory`: после 1000 тиков недостижимой цели
     /// освобождаются рабочая точка, дом и колокол, чтобы `AcquirePoi`
     /// выбрал другую.
@@ -1881,16 +1928,39 @@ impl PlayPlan {
             // `MoveToTargetSink.stop`: цель достигнута или путь застрял.
             let dx = target[0] - v.pos[0];
             let dz = target[2] - v.pos[2];
-            if dx * dx + dz * dz >= 0.8 * 0.8 {
+            let d2 = dx * dx + dz * dz;
+            if d2 >= 0.8 * 0.8 {
                 if v.cant_reach_since == 0 {
                     v.cant_reach_since = now;
-                } else if cant_reach_expired(v.cant_reach_since, now) {
-                    self.forget_unreachable(v, cell);
+                }
+                // Как `SetWalkTargetFromBlockMemory`: далёкую или зависшую
+                // цель пробуем обойти случайной точкой в её сторону, и только
+                // если все 1000 точек не ближе — освобождаем POI.
+                let far = d2 > 9.0 * 9.0;
+                if far || cant_reach_expired(v.cant_reach_since, now) {
+                    if let Some(step) = self.fallback_walk_target(
+                        [
+                            v.pos[0].floor() as i32,
+                            v.pos[1].floor() as i32,
+                            v.pos[2].floor() as i32,
+                        ],
+                        cell,
+                    ) {
+                        v.move_target = Some(step);
+                        v.cant_reach_since = 0;
+                        v.cant_reach_target = None;
+                    } else {
+                        self.forget_unreachable(v, cell);
+                    }
+                }
+                // Старая цель не достигнута; фолбэк мог поставить новую.
+                if v.move_target == Some(target) {
+                    v.move_target = None;
                 }
             } else {
                 v.cant_reach_since = 0;
+                v.move_target = None;
             }
-            v.move_target = None;
         }
         // `RunOne` work-пакета: действия выбираются по весам, а ветка
         // завершается по факту (дошёл/собрал), затем перевыбор.
@@ -5674,6 +5744,27 @@ mod tests {
         v.maybe_decay_gossip(48_002);
         assert_eq!(v.gossips[&target][GossipType::Trading.id()], 21);
         assert_eq!(v.gossips[&target][GossipType::MinorNegative.id()], 0);
+    }
+
+    #[test]
+    fn fallback_towards_picks_a_closer_point_in_front() {
+        let target = [10, 0, 0];
+        let passable = |p: [i32; 3]| p[1] == 0 && p[0] > 0 && p[0] < 10;
+        let vals = [20.0 / 31.0, 7.0 / 15.0, 15.0 / 31.0];
+        let mut i = 0;
+        let mut rng = || {
+            let v = vals[i % vals.len()];
+            i += 1;
+            v
+        };
+        let p = fallback_towards([0, 0, 0], target, passable, &mut rng).unwrap();
+        assert_eq!(p, [5.5, 0.0, 0.5]);
+        // Точки позади цели не выбираются.
+        assert_eq!(
+            fallback_towards([0, 0, 0], [-10, 0, 0], passable, || 0.5),
+            None
+        );
+        assert_eq!(fallback_towards([0, 0, 0], target, |_| false, || 0.5), None);
     }
 
     #[test]
