@@ -1981,6 +1981,13 @@ pub enum Meta {
 }
 
 /// `set_entity_data` с произвольными полями `(индекс, значение)`.
+/// `ClientboundShowDialogPacket`: `Holder<Dialog>` как ID записи реестра.
+pub fn show_dialog(id: i32, dialog: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id).var_int(dialog);
+    w.buf
+}
+
 pub fn entity_meta(id: i32, entity_id: i32, fields: &[(u8, Meta)]) -> Vec<u8> {
     let mut w = Writer::new();
     w.var_int(id).var_int(entity_id);
@@ -2157,6 +2164,15 @@ mod lp_tests {
         assert_eq!(r.var_int().unwrap(), 3);
         assert_eq!(r.f32().unwrap(), 2.5);
         assert_eq!(r.u8().unwrap(), 0xff);
+    }
+
+    #[test]
+    fn show_dialog_is_registry_id() {
+        let p = show_dialog(90, 7);
+        let mut r = Reader::new(&p);
+        assert_eq!(r.var_int().unwrap(), 90);
+        assert_eq!(r.var_int().unwrap(), 7);
+        assert!(r.remaining().is_empty());
     }
 
     #[test]

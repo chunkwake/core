@@ -135,6 +135,43 @@ pub(super) fn messages_for(side: &Compound, filtered: bool) -> Vec<Tag> {
 
 /// `Style.getClickEvent` каждой строки (`Component.getStyle` самой строки, без
 /// `extra`): сервер исполняет только `run_command`, остальное — клиент.
+/// Серверное действие стиля строки таблички.
+pub(super) enum ClickAction {
+    Command(String),
+    Dialog(String),
+    Custom(String),
+}
+
+pub(super) fn click_actions(side: &Compound, filtered: bool) -> Vec<ClickAction> {
+    messages_for(side, filtered)
+        .iter()
+        .filter_map(|line| {
+            let Tag::Compound(line) = line else {
+                return None;
+            };
+            let Tag::Compound(click) = line.get("click_event")? else {
+                return None;
+            };
+            match click.get("action").and_then(Tag::as_str)? {
+                "run_command" => match click.get("command") {
+                    Some(Tag::String(command)) => Some(ClickAction::Command(command.clone())),
+                    _ => None,
+                },
+                "show_dialog" => match click.get("dialog") {
+                    Some(Tag::String(name)) => Some(ClickAction::Dialog(name.clone())),
+                    _ => None,
+                },
+                "custom" => match click.get("id") {
+                    Some(Tag::String(id)) => Some(ClickAction::Custom(id.clone())),
+                    _ => None,
+                },
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
 pub(super) fn run_commands(side: &Compound, filtered: bool) -> Vec<String> {
     messages_for(side, filtered)
         .iter()
@@ -527,16 +564,26 @@ impl PlayPlan {
                 (Some(p.entry.name.clone()), p.text_filtering)
             })
         };
-        let commands = run_commands(&side(&nbt, front), filtered);
+        let actions = click_actions(&side(&nbt, front), filtered);
         let mut clicked = false;
-        if !commands.is_empty() {
+        if !actions.is_empty() {
             clicked = true;
             if allow_op_features(&nbt) {
                 if let Some(name) = name {
                     let source = crate::play::commands::dispatch::Source::player(uuid, name, 2);
-                    for command in &commands {
-                        let line = command.strip_prefix('/').unwrap_or(command);
-                        let _ = self.run_command(&source, line);
+                    for action in &actions {
+                        match action {
+                            ClickAction::Command(command) => {
+                                let line = command.strip_prefix('/').unwrap_or(command);
+                                let _ = self.run_command(&source, line);
+                            }
+                            ClickAction::Dialog(dialog) => {
+                                self.open_dialog(uuid, dialog);
+                            }
+                            ClickAction::Custom(id) => {
+                                self.custom_click_action(uuid, id);
+                            }
+                        }
                     }
                 }
             } else {
@@ -854,6 +901,42 @@ mod tests {
         )]));
         text.insert("messages".into(), Tag::List(vec![tr]));
         assert!(!has_editable_text(&text));
+    }
+
+    #[test]
+    fn click_actions_include_dialog_and_custom() {
+        let mut text = empty_text();
+        text.insert(
+            "messages".into(),
+            Tag::List(vec![
+                Tag::Compound(Compound::from([(
+                    "click_event".into(),
+                    Tag::Compound(Compound::from([
+                        ("action".into(), Tag::String("show_dialog".into())),
+                        (
+                            "dialog".into(),
+                            Tag::String("minecraft:server_links".into()),
+                        ),
+                    ])),
+                )])),
+                Tag::Compound(Compound::from([(
+                    "click_event".into(),
+                    Tag::Compound(Compound::from([
+                        ("action".into(), Tag::String("custom".into())),
+                        ("id".into(), Tag::String("minecraft:test".into())),
+                    ])),
+                )])),
+            ]),
+        );
+        let actions = click_actions(&text, false);
+        assert!(matches!(
+            &actions[0],
+            ClickAction::Dialog(name) if name == "minecraft:server_links"
+        ));
+        assert!(matches!(
+            &actions[1],
+            ClickAction::Custom(id) if id == "minecraft:test"
+        ));
     }
 
     #[test]

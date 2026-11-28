@@ -20,7 +20,6 @@ const UNHANDLED: &[&str] = &[
     "client_tick_end",
     "configuration_acknowledged",
     "cookie_response",
-    "custom_click_action",
     "debug_subscription_request",
     "jigsaw_generate",
     "pong",

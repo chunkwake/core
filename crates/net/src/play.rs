@@ -148,6 +148,8 @@ struct Ids {
     sb_player_action: i32,
     sb_use_item_on: i32,
     sb_set_command_minecart: i32,
+    sb_custom_click_action: i32,
+    show_dialog: i32,
     sb_set_creative_mode_slot: i32,
     sb_pick_item_from_block: i32,
     sb_pick_item_from_entity: i32,
@@ -3751,6 +3753,7 @@ impl PlayPlan {
                 sb_player_action: sb("player_action")?,
                 sb_use_item_on: sb("use_item_on")?,
                 sb_set_command_minecart: sb("set_command_minecart")?,
+                sb_custom_click_action: sb("custom_click_action")?,
                 sb_set_creative_mode_slot: sb("set_creative_mode_slot")?,
                 sb_pick_item_from_block: sb("pick_item_from_block")?,
                 sb_pick_item_from_entity: sb("pick_item_from_entity")?,
@@ -3802,6 +3805,7 @@ impl PlayPlan {
                 sb_accept_teleportation: sb("accept_teleportation")?,
                 open_screen: cb("open_screen")?,
                 mount_screen_open: cb("mount_screen_open")?,
+                show_dialog: cb("show_dialog")?,
                 open_sign_editor: cb("open_sign_editor")?,
                 open_book: cb("open_book")?,
                 disconnect: cb("disconnect")?,
@@ -5589,6 +5593,27 @@ impl PlayPlan {
     /// Уровень прав игрока (0 — не оператор).
     pub fn op_level(&self, uuid: Uuid) -> i32 {
         self.ops.get().map_or(0, |o| o.level(uuid))
+    }
+
+    /// `ServerPlayer.openDialog`: `Holder<Dialog>` из реестра `dialog`.
+    pub(super) fn open_dialog(&self, uuid: Uuid, dialog: &str) -> bool {
+        let Some(names) = self.survival.registry_keys.get("dialog") else {
+            return false;
+        };
+        let Some(id) = names.iter().position(|name| name == dialog) else {
+            return false;
+        };
+        self.send_to(
+            uuid,
+            chunkwake_protocol::play::show_dialog(self.ids.show_dialog, id as i32),
+        );
+        true
+    }
+
+    /// `MinecraftServer.handleCustomClickAction`: в ванили только debug-лог,
+    /// дальше действуют обработчики плагинов.
+    fn custom_click_action(&self, uuid: Uuid, id: &str) {
+        tracing::debug!(player = %uuid, action = id, "custom click action");
     }
 
     /// Пакет только одному игроку.
@@ -17852,6 +17877,11 @@ impl PlayPlan {
                                 conn.send(&packet).await?;
                             }
                         }
+                        continue;
+                    }
+                    if id == ids.sb_custom_click_action {
+                        let action = r.string(32767)?.to_owned();
+                        self.custom_click_action(uuid, &action);
                         continue;
                     }
                     if id == ids.sb_use_item {
