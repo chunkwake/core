@@ -1294,6 +1294,8 @@ pub struct Mob {
     pub sitting: bool,
     /// `AbstractChestedHorse.hasChest` (`DATA_ID_CHEST`): осёл с сундуком.
     pub chested: bool,
+    /// `AbstractHorse.inventory`: 15 слотов сундука осла (5×3).
+    pub chest_items: [Option<Stack>; 15],
     /// `Entity.isNoGravity` (`NoGravity`): кристаллы/визер/дракон не падают.
     pub no_gravity: bool,
     /// `CopperGolem.getWeatherState` (`weather_state`): стадия окисления.
@@ -1497,6 +1499,7 @@ impl Mob {
             body_armor: None,
             sitting: false,
             chested: false,
+            chest_items: [None; 15],
             drop_chances: [DEFAULT_DROP_CHANCE; 6],
             effect_speed: 1.0,
             effect_weakness: 0.0,

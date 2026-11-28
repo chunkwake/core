@@ -334,6 +334,58 @@ impl PlayPlan {
         Some((e.mob.species.name(), e.mob.is_baby(), equipment))
     }
 
+    /// `AbstractChestedHorse.getInventoryColumns`: 5 у осла с сундуком.
+    pub(super) fn mob_mount_columns(&self, id: i32) -> usize {
+        let mobs = self.sim().mobs.lock().unwrap();
+        mobs.get(&id).filter(|e| e.mob.chested).map_or(0, |_| 5)
+    }
+
+    /// `Entity.getDisplayName` для заголовка `InventoryOpenEvent`.
+    pub(super) fn mob_mount_title(&self, id: i32) -> serde_json::Value {
+        let mobs = self.sim().mobs.lock().unwrap();
+        let Some(e) = mobs.get(&id) else {
+            return serde_json::json!({"translate": "entity.minecraft.donkey"});
+        };
+        e.mob.custom_name.as_ref().map_or_else(
+            || {
+                let key = format!(
+                    "entity.minecraft.{}",
+                    e.mob
+                        .species
+                        .name()
+                        .strip_prefix("minecraft:")
+                        .unwrap_or(e.mob.species.name())
+                );
+                serde_json::json!({"translate": key})
+            },
+            |n| serde_json::json!({"text": n}),
+        )
+    }
+
+    /// `AbstractHorse.inventory`: содержимое сундука (15 слотов).
+    pub(super) fn mob_mount_slots(&self, id: i32) -> Vec<Option<Stack>> {
+        let mobs = self.sim().mobs.lock().unwrap();
+        mobs.get(&id).map_or_else(
+            || vec![None; 15],
+            |e| {
+                if e.mob.chested {
+                    e.mob.chest_items.to_vec()
+                } else {
+                    Vec::new()
+                }
+            },
+        )
+    }
+
+    /// Записать содержимое сундука обратно в `AbstractHorse.inventory`.
+    pub(super) fn set_mob_mount_slots(&self, id: i32, slots: &[Option<Stack>]) {
+        if let Some(e) = self.sim().mobs.lock().unwrap().get_mut(&id) {
+            for (dst, src) in e.mob.chest_items.iter_mut().zip(slots) {
+                *dst = *src;
+            }
+        }
+    }
+
     fn mob_type(&self, s: Species) -> i32 {
         // Собран при старте по `Species::ALL`; без него (тесты) — по имени.
         self.survival
@@ -2410,6 +2462,8 @@ impl PlayPlan {
             && let Some(chest) = self.item_id("minecraft:chest")
         {
             drops.push(Stack::new(chest, 1));
+            // `AbstractHorse.dropEquipment`: всё содержимое инвентаря.
+            drops.extend(m.chest_items.iter().flatten().copied());
         }
         // `EntityDeathEvent`: плагин меняет дроп и опыт.
         if let Some(reply) = self.sync_event(Event::MobDeath, || {
@@ -2538,6 +2592,23 @@ impl PlayPlan {
             && let Some(Tag::Byte(chest)) = nbt.get("ChestedHorse")
         {
             m.chested = *chest != 0;
+        }
+        if m.species == Species::Donkey
+            && m.chested
+            && let Some(Tag::List(list)) = nbt.get("Items")
+        {
+            for t in list {
+                let Some(slot) = t.as_compound() else {
+                    continue;
+                };
+                let index = slot.get("Slot").and_then(Tag::as_i64).unwrap_or(-1);
+                if let Some(dst) = m
+                    .chest_items
+                    .get_mut(usize::try_from(index).unwrap_or(usize::MAX))
+                {
+                    *dst = crate::stack_nbt::from_nbt(slot, |n| self.item_id(n));
+                }
+            }
         }
         if matches!(m.species, Species::Zombie | Species::Drowned)
             && let Some(Tag::Byte(breaks)) = nbt.get("CanBreakDoors")
@@ -4128,6 +4199,14 @@ fn feed_baby(age: i32) -> i32 {
     (age + secs as i32 * 20).min(0)
 }
 
+/// Чем закончилось взаимодействие с мобом.
+pub(super) enum MobUse {
+    /// Изменились слоты инвентаря игрока.
+    Slots(Vec<usize>),
+    /// Открыть окно верхового животного (`openHorseInventory`).
+    Mount,
+}
+
 impl PlayPlan {
     /// Правый клик по мобу (`Mob.interact` → `Animal.mobInteract`): еда, ножницы, ведро.
     /// Возвращает слоты, которые надо переслать; `None` — клик ни на что не повлиял.
@@ -4138,7 +4217,8 @@ impl PlayPlan {
         hand: i32,
         inv: &mut Inventory,
         creative: bool,
-    ) -> Option<Vec<usize>> {
+        sneaking: bool,
+    ) -> Option<MobUse> {
         let slot = Self::hand_index(inv, hand)?;
         let species = self.sim().mobs.lock().unwrap().get(&target)?.mob.species;
         let hand_name = if hand == 1 { "OFF_HAND" } else { "HAND" };
@@ -4150,10 +4230,15 @@ impl PlayPlan {
         {
             return None;
         }
-        // `Wolf.mobInteract`: пустая рука у владельца переключает «сидеть».
         if inv.slots[slot].is_none() {
             let mut mobs = self.sim().mobs.lock().unwrap();
             let m = &mut mobs.get_mut(&target)?.mob;
+            // `AbstractHorse.openCustomInventoryScreen`: приседание на
+            // приручённом взрослом животном открывает его инвентарь.
+            if m.alive() && m.species == Species::Donkey && m.tamed && !m.is_baby() && sneaking {
+                return Some(MobUse::Mount);
+            }
+            // `Wolf.mobInteract`: пустая рука у владельца переключает «сидеть».
             if !m.alive()
                 || m.species != Species::Wolf
                 || !m.tamed
@@ -4162,7 +4247,7 @@ impl PlayPlan {
                 return None;
             }
             m.sitting = !m.sitting;
-            return Some(Vec::new());
+            return Some(MobUse::Slots(Vec::new()));
         }
         let stack = inv.slots[slot]?;
         let name = self.item_name(stack.item).to_owned();
@@ -4195,6 +4280,12 @@ impl PlayPlan {
             let mut mobs = self.sim().mobs.lock().unwrap();
             let m = &mut mobs.get_mut(&target)?.mob;
             if !m.alive() {
+                return None;
+            }
+            // `AbstractChestedHorse.mobInteract`: приседание на приручённом
+            // взрослом осле уходит в `AbstractHorse.mobInteract` — еда и
+            // надевание сундука не срабатывают.
+            if m.species == Species::Donkey && m.tamed && !m.is_baby() && sneaking {
                 return None;
             }
             if m.species == Species::Donkey
@@ -4558,7 +4649,7 @@ impl PlayPlan {
         if let Some(id) = remove {
             self.remove_entity(id);
         }
-        Some(slots)
+        Some(MobUse::Slots(slots))
     }
 
     /// `Sheep.shear`: звук, 1–3 шерсти своего цвета, новые метаданные.
@@ -4627,7 +4718,7 @@ impl PlayPlan {
     }
 
     /// Разослать метаданные моба заново (стрижка, рост).
-    fn refresh_mob(&self, id: i32) {
+    pub(super) fn refresh_mob(&self, id: i32) {
         let data = {
             let mobs = self.sim().mobs.lock().unwrap();
             mobs.get(&id).map(|e| self.mob_packets(id, &e.mob))
@@ -5223,8 +5314,23 @@ pub(super) fn mob_to_nbt(
             c.insert("Variant".into(), Tag::Int(m.tropical_variant));
         }
         Species::Donkey => {
+            c.insert("ChestedHorse".into(), Tag::Byte(i8::from(m.chested)));
             if m.chested {
-                c.insert("ChestedHorse".into(), Tag::Byte(1));
+                // `AbstractChestedHorse.addAdditionalSaveData`: `Items` —
+                // `ItemStackWithSlot` (Slot + обычный стек).
+                let items: Vec<Tag> = m
+                    .chest_items
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, slot)| {
+                        let s = (*slot)?;
+                        let name = item_names.get(s.item as usize)?;
+                        let mut c = crate::stack_nbt::to_nbt(s, name)?;
+                        c.insert("Slot".into(), Tag::Byte(i as i8));
+                        Some(Tag::Compound(c))
+                    })
+                    .collect();
+                c.insert("Items".into(), Tag::List(items));
             }
         }
         Species::Bee => {
@@ -5394,6 +5500,22 @@ pub(super) fn mob_from_nbt(
     }
     if species == Species::Donkey {
         m.chested = byte("ChestedHorse").is_some_and(|b| b != 0);
+        if m.chested
+            && let Some(Tag::List(list)) = c.get("Items")
+        {
+            for t in list {
+                let Some(slot) = t.as_compound() else {
+                    continue;
+                };
+                let index = slot.get("Slot").and_then(Tag::as_i64).unwrap_or(-1);
+                if let Some(dst) = m
+                    .chest_items
+                    .get_mut(usize::try_from(index).unwrap_or(usize::MAX))
+                {
+                    *dst = crate::stack_nbt::from_nbt(slot, |n| items.get(n).copied());
+                }
+            }
+        }
     }
     if species == Species::Creeper {
         m.powered = byte("powered").is_some_and(|b| b != 0);
@@ -6982,6 +7104,34 @@ mod tests {
         assert_eq!((back.yaw, back.health, back.age), (90.0, 5.0, -100));
         assert!(back.sheared);
         assert_eq!(back.color, 14);
+    }
+
+    #[test]
+    fn donkey_chest_items_roundtrip_through_nbt() {
+        let mut names = vec!["minecraft:air".to_owned(); 8];
+        names[7] = "minecraft:stone".to_owned();
+        let mut items = std::collections::HashMap::new();
+        items.insert("minecraft:stone".to_owned(), 7_i32);
+        let mut m = Mob::new(Species::Donkey, [0.5, 64.0, 0.5], 5);
+        m.tamed = true;
+        m.chested = true;
+        m.chest_items[0] = Some(Stack::new(7, 3));
+        m.chest_items[14] = Some(Stack::new(7, 1));
+        let nbt = mob_to_nbt(&m, &std::collections::HashMap::new(), &names);
+        assert_eq!(
+            nbt.get("ChestedHorse"),
+            Some(&Tag::Byte(1)),
+            "без сундука инвентарь не сохраняется"
+        );
+        let back = mob_from_nbt(&nbt, &std::collections::HashMap::new(), &items).unwrap();
+        assert!(back.chested);
+        assert_eq!(back.chest_items[0], Some(Stack::new(7, 3)));
+        assert_eq!(back.chest_items[14], Some(Stack::new(7, 1)));
+        assert_eq!(back.chest_items[1], None);
+        // Без сундука `Items` не пишется вовсе.
+        m.chested = false;
+        let nbt = mob_to_nbt(&m, &std::collections::HashMap::new(), &names);
+        assert_eq!(nbt.get("Items"), None);
     }
 
     #[test]

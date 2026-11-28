@@ -197,6 +197,7 @@ struct Ids {
     sb_player_abilities: i32,
     sb_accept_teleportation: i32,
     open_screen: i32,
+    mount_screen_open: i32,
     open_sign_editor: i32,
     open_book: i32,
     disconnect: i32,
@@ -2586,6 +2587,15 @@ fn boat_of(pos: [i32; 3]) -> Option<i32> {
     (pos[0] == i32::MIN && pos[1] == i32::MIN + 2).then_some(pos[2])
 }
 
+/// Инвентарь верхового животного: `(MIN, MIN+3, entity id)`.
+fn mount_pos(id: i32) -> [i32; 3] {
+    [i32::MIN, i32::MIN + 3, id]
+}
+
+fn mount_of(pos: [i32; 3]) -> Option<i32> {
+    (pos[0] == i32::MIN && pos[1] == i32::MIN + 3).then_some(pos[2])
+}
+
 struct Window {
     id: i32,
     kind: Kind,
@@ -3747,6 +3757,7 @@ impl PlayPlan {
                 sb_player_abilities: sb("player_abilities")?,
                 sb_accept_teleportation: sb("accept_teleportation")?,
                 open_screen: cb("open_screen")?,
+                mount_screen_open: cb("mount_screen_open")?,
                 open_sign_editor: cb("open_sign_editor")?,
                 open_book: cb("open_book")?,
                 disconnect: cb("disconnect")?,
@@ -14668,6 +14679,7 @@ impl PlayPlan {
             Kind::Beacon => "BEACON",
             Kind::Crafter(_) => "CRAFTER",
             Kind::Merchant => "MERCHANT",
+            Kind::Mount(_) => "CHEST",
             Kind::Player => "CRAFTING",
         }
     }
@@ -14774,6 +14786,7 @@ impl PlayPlan {
                     Kind::Beacon => "BEACON",
                     Kind::Crafter(_) => "CRAFTER",
                     Kind::Merchant => "MERCHANT",
+                    Kind::Mount(_) => "CHEST",
                     Kind::Player => "CRAFTING",
                 };
                 (ty, plugin_of(w.pos).unwrap_or(-1), n, cur, w.slots.clone())
@@ -17441,9 +17454,40 @@ impl PlayPlan {
                             let held = Self::hand_index(&state.inv, it.hand)
                                 .and_then(|slot| state.inv.slots[slot])
                                 .map(|s| self.item_name(s.item).to_owned());
-                            if let Some(slots) = self.interact_mob(uuid, it.entity, it.hand, &mut state.inv, creative).await {
-                                self.send_slots(conn, &mut state.inv, &slots).await?;
-                                self.reset_after_use(me.entity_id, uuid, it.hand, state, &mut swing);
+                            if let Some(action) = self.interact_mob(uuid, it.entity, it.hand, &mut state.inv, creative, it.sneaking).await {
+                                match action {
+                                    mobs::MobUse::Mount => {
+                                        if let Some(w) = window.as_ref() {
+                                            conn.send(&chunkwake_protocol::inventory::container_close(ids.container_close, w.id))
+                                                .await?;
+                                        }
+                                        self.close_with_event(&mut state.inv, &mut state.ender, &mut window, uuid).await;
+                                        next_window = next_window % 100 + 1;
+                                        let columns = self.mob_mount_columns(it.entity);
+                                        let pos = mount_pos(it.entity);
+                                        let title = self.mob_mount_title(it.entity);
+                                        let mut w = Window { id: next_window, kind: Kind::Mount(columns), pos, second: None, slots: Vec::new(), data: [0; 4], enchant: [i32::MIN; 10], offer: None, stone_selection: None, loom_selection: None, anvil_name: None, anvil_cost: 0, anvil_materials: 0, anvil_only_renaming: false, crafter: [i32::MIN; 10], merchant: None };
+                                        w.slots = self.window_slots(&w);
+                                        if !self.inventory_open_allowed(uuid, &mut w, &title).await {
+                                            continue;
+                                        }
+                                        self.set_mob_mount_slots(it.entity, &w.slots[2..]);
+                                        conn.send(&chunkwake_protocol::inventory::mount_screen_open(
+                                            ids.mount_screen_open,
+                                            w.id,
+                                            columns as i32,
+                                            it.entity,
+                                        ))
+                                        .await?;
+                                        self.send_window(conn, &mut state.inv, Some(&w), w.id).await?;
+                                        window = Some(w);
+                                        self.reset_after_use(me.entity_id, uuid, it.hand, state, &mut swing);
+                                    }
+                                    mobs::MobUse::Slots(slots) => {
+                                        self.send_slots(conn, &mut state.inv, &slots).await?;
+                                        self.reset_after_use(me.entity_id, uuid, it.hand, state, &mut swing);
+                                    }
+                                }
                                 if let Some((species, baby, equipment)) =
                                     self.mob_interact_info(it.entity)
                                 {
@@ -20720,6 +20764,7 @@ impl PlayPlan {
             Kind::Player => 2,
             Kind::Crafting => 3,
             Kind::Chest(_)
+            | Kind::Mount(_)
             | Kind::EnderChest
             | Kind::Crafter(_)
             | Kind::Furnace
@@ -21185,6 +21230,13 @@ impl PlayPlan {
                 if matches!(kind, Kind::Chest(_) | Kind::Crafter(_)) && w.slots[..] != view[..n] {
                     w.slots.copy_from_slice(&view[..n]);
                     self.save_window(w, me);
+                }
+                if matches!(kind, Kind::Mount(_)) && w.slots[..] != view[..n] {
+                    w.slots.copy_from_slice(&view[..n]);
+                    // `HorseInventoryMenu` слоты 2.. — это `AbstractHorse.inventory`.
+                    if let Some(id) = mount_of(w.pos) {
+                        self.set_mob_mount_slots(id, &w.slots[2..]);
+                    }
                 }
                 if kind == Kind::EnderChest && w.slots[..] != view[..n] {
                     if ender.len() < n {
@@ -21689,6 +21741,11 @@ impl PlayPlan {
                         self.show_container(pos, n, false);
                     }
                 }
+                Kind::Mount(_) => {
+                    if let Some(id) = mount_of(w.pos) {
+                        self.set_mob_mount_slots(id, &w.slots[2..]);
+                    }
+                }
                 Kind::EnderChest | Kind::Player => {}
             }
         }
@@ -21749,6 +21806,15 @@ impl PlayPlan {
                 .flat_map(|&p| self.container_items(p))
                 .collect(),
             Kind::EnderChest => w.slots.clone(),
+            Kind::Mount(columns) => {
+                let mut slots = vec![None; 2];
+                if columns > 0
+                    && let Some(id) = mount_of(w.pos)
+                {
+                    slots.extend(self.mob_mount_slots(id));
+                }
+                slots
+            }
             Kind::Furnace => self
                 .with_furnace(w.pos, |e| e.f.slots.to_vec())
                 .unwrap_or_else(|| vec![None; 3]),
@@ -24331,9 +24397,10 @@ impl PlayPlan {
             // выбрасывается (default `OptionalDispenseItemBehavior`).
             "minecraft:chest" => {
                 let mut found = false;
+                let mut chested = None;
                 {
                     let mut mobs = self.sim().mobs.lock().unwrap();
-                    for e in mobs.values_mut() {
+                    for (id, e) in mobs.iter_mut() {
                         let m = &mut e.mob;
                         if !crate::mobs::accepts_donkey_chest(m) {
                             continue;
@@ -24355,11 +24422,15 @@ impl PlayPlan {
                         {
                             m.chested = true;
                             found = true;
+                            chested = Some(*id);
                             break;
                         }
                     }
                 }
                 if found {
+                    if let Some(id) = chested {
+                        self.refresh_mob(id);
+                    }
                     self.play_sound(
                         None,
                         "minecraft:entity.donkey.chest",

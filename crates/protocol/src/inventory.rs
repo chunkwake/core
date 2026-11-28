@@ -786,6 +786,17 @@ pub fn open_screen(id: i32, window: i32, menu: i32, title: &serde_json::Value) -
     w.buf
 }
 
+/// `ClientboundMountScreenOpenPacket`: окно верхового животного (лошадь, осёл,
+/// лама). Число колонок задаёт высоту сундучного инвентаря (3 ряда).
+pub fn mount_screen_open(id: i32, window: i32, columns: i32, entity_id: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.var_int(id)
+        .var_int(window)
+        .var_int(columns)
+        .var_int(entity_id);
+    w.buf
+}
+
 /// `ClientboundContainerClosePacket`.
 pub fn container_close(id: i32, window: i32) -> Vec<u8> {
     let mut w = Writer::new();
@@ -1394,6 +1405,17 @@ pub const ENTITY_EVENT_USE_ITEM_COMPLETE: u8 = 9;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mount_screen_open_has_columns_and_entity() {
+        let packet = mount_screen_open(90, 7, 5, 1234);
+        let mut r = Reader::new(&packet);
+        assert_eq!(r.var_int().unwrap(), 90);
+        assert_eq!(r.var_int().unwrap(), 7);
+        assert_eq!(r.var_int().unwrap(), 5);
+        assert_eq!(r.var_int().unwrap(), 1234);
+        assert!(r.remaining().is_empty());
+    }
 
     #[test]
     fn sleeping_metadata_has_pose_and_optional_bed_position() {

@@ -52,6 +52,9 @@ pub enum Kind {
     Crafter(u16),
     /// `MerchantMenu`: 0-1 покупка, 2 результат, 3-38 инвентарь.
     Merchant,
+    /// `HorseInventoryMenu`: 0 седло, 1 броня, затем `columns*3` слотов
+    /// сундука (`AbstractChestedHorse.getInventoryColumns()`), потом инвентарь.
+    Mount(usize),
 }
 
 impl Kind {
@@ -60,6 +63,7 @@ impl Kind {
             Kind::Player => 46,
             Kind::Lectern => 1,
             Kind::Chest(n) => n + 36,
+            Kind::Mount(columns) => 2 + columns * 3 + 36,
             Kind::EnderChest => 27 + 36,
             Kind::Crafting | Kind::Crafter(_) => 46,
             Kind::Furnace | Kind::Grindstone | Kind::Anvil | Kind::Cartography | Kind::Merchant => {
@@ -78,6 +82,7 @@ impl Kind {
             Kind::Player => 9,
             Kind::Lectern => 1,
             Kind::Chest(n) => n,
+            Kind::Mount(columns) => 2 + columns * 3,
             Kind::EnderChest => 27,
             Kind::Crafting => 10,
             Kind::Crafter(_) => 9,
@@ -102,6 +107,7 @@ impl Kind {
             Kind::Stonecutter => Some(1),
             Kind::Crafter(_) => Some(45),
             Kind::Chest(_)
+            | Kind::Mount(_)
             | Kind::EnderChest
             | Kind::Enchanting
             | Kind::Lectern
@@ -222,6 +228,11 @@ impl Menu<'_> {
 
     fn may_place(&self, slot: usize, s: &Stack) -> bool {
         if self.kind.output() == Some(slot) {
+            return false;
+        }
+        // `HorseInventoryMenu`: слоты седла и брони ведёт экипировка животного,
+        // а не контейнер; осёл броню не носит, седло пока не поддержано.
+        if matches!(self.kind, Kind::Mount(_)) && slot < 2 {
             return false;
         }
         if self.kind == Kind::Stonecutter && slot == 0 {
@@ -532,6 +543,15 @@ impl Menu<'_> {
                     self.move_to(&mut s, inv..end, true);
                 } else {
                     self.move_to(&mut s, 0..inv, false);
+                }
+            }
+            Kind::Mount(_) => {
+                // `AbstractMountInventoryMenu.quickMoveStack`: экипировка
+                // (0, 1) не участвует, только слоты сундука.
+                if i < inv {
+                    self.move_to(&mut s, inv..end, true);
+                } else {
+                    self.move_to(&mut s, 2..inv, false);
                 }
             }
             Kind::Furnace => {
@@ -1271,6 +1291,36 @@ mod tests {
             &[(0, 0, QUICK_MOVE)],
         );
         assert_eq!(chest[62], st(2, 5));
+    }
+
+    #[test]
+    fn mount_menu_layout_and_equipment_slots() {
+        assert_eq!(
+            (Kind::Mount(0).inventory_start(), Kind::Mount(0).size()),
+            (2, 38)
+        );
+        assert_eq!(
+            (Kind::Mount(5).inventory_start(), Kind::Mount(5).size()),
+            (17, 53)
+        );
+        // Седло и броня животного не принимают предметы из контейнера.
+        let mut slots = vec![None; Kind::Mount(5).size()];
+        let mut carried = st(3, 2);
+        run(Kind::Mount(5), &mut slots, &mut carried, &[(0, 0, PICKUP)]);
+        assert_eq!((slots[0], carried), (None, st(3, 2)));
+        run(Kind::Mount(5), &mut slots, &mut carried, &[(2, 0, PICKUP)]);
+        assert_eq!((slots[2], carried), (st(3, 2), None));
+        // Shift-клик из инвентаря игрока кладёт в сундук, минуя 0 и 1.
+        let mut slots = vec![None; Kind::Mount(5).size()];
+        slots[17] = st(4, 1);
+        run(
+            Kind::Mount(5),
+            &mut slots,
+            &mut carried,
+            &[(17, 0, QUICK_MOVE)],
+        );
+        assert_eq!((slots[17], slots[2]), (None, st(4, 1)));
+        assert_eq!((slots[0], slots[1]), (None, None));
     }
 
     #[test]
