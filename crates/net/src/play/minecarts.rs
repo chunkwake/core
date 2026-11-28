@@ -1196,48 +1196,40 @@ impl PlayPlan {
                         e.cart.vel[axis] = 0.0;
                     }
                 }
-                match step.rail {
-                    Some((
-                        pos,
-                        Rail {
-                            kind: Kind::Detector,
-                            ..
-                        },
-                    )) => pressed.push(pos),
-                    // `activateMinecart` каждый тик на активаторе.
-                    Some((
-                        _,
-                        Rail {
-                            kind: Kind::Activator(on),
-                            ..
-                        },
-                    )) => match e.variant {
-                        // `Minecart`: включённый высаживает.
-                        Variant::Plain if on => {
-                            if let Some((rider, _)) = e.rider.take() {
-                                ejected.push((id, rider));
+                // `NewMinecartBehavior.stepAlongTrack` может пройти несколько
+                // рельсов за тик: детекторы и активаторы срабатывают на каждом.
+                for (rail_pos, rail) in &step.rails {
+                    match rail.kind {
+                        Kind::Detector => pressed.push(*rail_pos),
+                        // `activateMinecart` каждый тик на активаторе.
+                        Kind::Activator(on) => match e.variant {
+                            // `Minecart`: включённый высаживает.
+                            Variant::Plain if on => {
+                                if let Some((rider, _)) = e.rider.take() {
+                                    ejected.push((id, rider));
+                                }
                             }
-                        }
-                        // `MinecartHopper`: включённый выключает воронку.
-                        Variant::Hopper => e.enabled = !on,
-                        // `MinecartTNT.primeFuse`: без `tnt_explodes` не поджигается.
-                        Variant::Tnt if on && e.fuse < 0 && self.vars.flag("tnt_explodes") => {
-                            e.fuse = TNT_FUSE;
-                            primed.push((id, e.cart.pos));
-                        }
-                        // `MinecartCommandBlock.activateMinecart`: повторная
-                        // активация не чаще, чем раз в 4 тика.
-                        Variant::CommandBlock
-                            if on
-                                && command_ready(e.last_activated, now)
-                                && self.vars.flag("command_blocks_work") =>
-                        {
-                            e.last_activated = now;
-                            commands.push((id, e.command.clone(), e.cart.pos));
-                        }
+                            // `MinecartHopper`: включённый выключает воронку.
+                            Variant::Hopper => e.enabled = !on,
+                            // `MinecartTNT.primeFuse`: без `tnt_explodes` не поджигается.
+                            Variant::Tnt if on && e.fuse < 0 && self.vars.flag("tnt_explodes") => {
+                                e.fuse = TNT_FUSE;
+                                primed.push((id, e.cart.pos));
+                            }
+                            // `MinecartCommandBlock.activateMinecart`: повторная
+                            // активация не чаще, чем раз в 4 тика.
+                            Variant::CommandBlock
+                                if on
+                                    && command_ready(e.last_activated, now)
+                                    && self.vars.flag("command_blocks_work") =>
+                            {
+                                e.last_activated = now;
+                                commands.push((id, e.command.clone(), e.cart.pos));
+                            }
+                            _ => {}
+                        },
                         _ => {}
-                    },
-                    _ => {}
+                    }
                 }
                 // `OldMinecartBehavior.pushAndPickupEntities`: в конце своего
                 // тика вагонетка толкает другие, задевающие её коробку с

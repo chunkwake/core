@@ -138,9 +138,11 @@ pub enum Drag {
 }
 
 /// Что случилось за тик: рельс под вагонеткой (для детектора и активатора).
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Step {
     pub rail: Option<([i32; 3], Rail)>,
+    /// Все рельсы, пройденные за тик (`stepAlongTrack`).
+    pub rails: Vec<([i32; 3], Rail)>,
     /// Упёрлась в стену (`horizontalCollision`).
     pub collided: bool,
 }
@@ -311,8 +313,13 @@ impl Cart {
         let pos = self.rail_pos(t);
         let mut step = Step::default();
         if let Some(rail) = t.rail(pos) {
-            self.move_along_track(t, pos, rail, intent);
-            step.rail = Some((pos, rail));
+            if self.improved {
+                step.rails = self.move_along_track_improved(t, pos, rail, intent);
+            } else {
+                self.move_along_track(t, pos, rail, intent);
+                step.rails.push((pos, rail));
+            }
+            step.rail = step.rails.last().copied().or(Some((pos, rail)));
         } else {
             self.come_off_track(t);
         }
@@ -565,6 +572,225 @@ impl Cart {
             }
         }
     }
+
+    /// `NewMinecartBehavior.moveAlongTrack`: скорость считается по первому
+    /// рельсу, затем `stepAlongTrack` проходит несколько рельсов за тик.
+    fn move_along_track_improved(
+        &mut self,
+        t: &impl Track,
+        pos: [i32; 3],
+        rail: Rail,
+        intent: [f64; 2],
+    ) -> Vec<([i32; 3], Rail)> {
+        self.pos[1] = pos[1] as f64;
+        let water = self.in_water(t);
+        // `calculateSlopeSpeed`: 0.0078125 или 2 % скорости, в воде ×0.2.
+        let slope = SLOPE.max(self.vel[0].hypot(self.vel[2]) * 0.02);
+        let slope = if water { slope * 0.2 } else { slope };
+        match rail.shape {
+            Shape::AscendingEast => self.vel[0] -= slope,
+            Shape::AscendingWest => self.vel[0] += slope,
+            Shape::AscendingNorth => self.vel[2] += slope,
+            Shape::AscendingSouth => self.vel[2] -= slope,
+            _ => {}
+        }
+        let (a, b) = rail.shape.exits();
+        let (mut ex, mut ez) = ((b[0] - a[0]) as f64, (b[2] - a[2]) as f64);
+        let len = (ex * ex + ez * ez).sqrt();
+        if len < 1.0e-9 {
+            self.vel = [0.0; 3];
+            return vec![(pos, rail)];
+        }
+        if self.vel[0] * ex + self.vel[2] * ez < 0.0 {
+            ex = -ex;
+            ez = -ez;
+        }
+        // `calculatePlayerInputSpeed`.
+        if intent[0] * intent[0] + intent[1] * intent[1] > 0.0
+            && self.vel[0] * self.vel[0] + self.vel[2] * self.vel[2] < 0.01
+        {
+            self.vel[0] += intent[0] * 0.001;
+            self.vel[2] += intent[1] * 0.001;
+            if self.vel[0] * ex + self.vel[2] * ez < 0.0 {
+                ex = -ex;
+                ez = -ez;
+            }
+        }
+        // `calculateHaltTrackSpeed`: неактивный питаемый рельс тормозит.
+        if matches!(rail.kind, Kind::Powered(false)) {
+            if self.vel[0].hypot(self.vel[2]) < 0.03 {
+                self.vel = [0.0; 3];
+            } else {
+                self.vel[0] *= 0.5;
+                self.vel[2] *= 0.5;
+            }
+        }
+        // `applyNaturalSlowdown` — до движения, как в `calculateTrackSpeed`.
+        self.natural_slowdown(water);
+        let max = self.max_speed(t);
+        let speed = self.vel[0].hypot(self.vel[2]).min(max);
+        self.vel = [speed * ex / len, 0.0, speed * ez / len];
+        // `calculateBoostTrackSpeed`: активный рельс добавляет 0.06.
+        if matches!(rail.kind, Kind::Powered(true)) {
+            if speed > 0.01 {
+                let h = self.vel[0].hypot(self.vel[2]);
+                self.vel[0] += self.vel[0] / h * 0.06;
+                self.vel[2] += self.vel[2] / h * 0.06;
+            } else {
+                let at = |dx: i32, dz: i32| t.conductor([pos[0] + dx, pos[1], pos[2] + dz]);
+                match rail.shape {
+                    Shape::EastWest => {
+                        if at(-1, 0) {
+                            self.vel[0] = 0.02;
+                        } else if at(1, 0) {
+                            self.vel[0] = -0.02;
+                        }
+                    }
+                    Shape::NorthSouth => {
+                        if at(0, -1) {
+                            self.vel[2] = 0.02;
+                        } else if at(0, 1) {
+                            self.vel[2] = -0.02;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let movement = self.vel[0].hypot(self.vel[2]);
+        let rails = self.step_along_track(t, pos, rail, movement);
+        if self.vel[0] * self.vel[0] + self.vel[2] * self.vel[2] < 1.0e-8 {
+            self.vel = [0.0; 3];
+        }
+        rails
+    }
+
+    /// `NewMinecartBehavior.stepAlongTrack`: проходит рельсы, пока не
+    /// израсходован бюджет `movement` (горизонтальные блоки за тик).
+    /// Возвращает последний рельс и ставит позицию с учётом высоты склона.
+    fn step_along_track(
+        &mut self,
+        t: &impl Track,
+        start_cell: [i32; 3],
+        start_rail: Rail,
+        movement: f64,
+    ) -> Vec<([i32; 3], Rail)> {
+        let mut p_y = f64::from(start_cell[1])
+            + if start_rail.shape.is_slope() {
+                1.0
+            } else {
+                0.0
+            };
+        if movement < 1.0e-5 {
+            if let Some(q) = Self::track_point(t, [self.pos[0], p_y, self.pos[2]]) {
+                self.pos[1] = q[1];
+                self.on_ground = true;
+            }
+            return vec![(start_cell, start_rail)];
+        }
+        let old = self.pos;
+        let mut cell = start_cell;
+        let mut rail = start_rail;
+        let mut p = [self.pos[0], 0.0, self.pos[2]];
+        // Высота отсчёта: на склоне вагонетка идёт по верхней грани.
+        let mut left = movement;
+        let mut passed = vec![(cell, rail)];
+        // Направление движения переносится с рельса на рельс (кривые).
+        let mut dir_x = self.vel[0];
+        let mut dir_z = self.vel[2];
+        for _ in 0..8 {
+            if left < 1.0e-5 {
+                break;
+            }
+            let (a, b) = rail.shape.exits();
+            let a_pt = [
+                f64::from(cell[0]) + 0.5 + f64::from(a[0]) * 0.5,
+                f64::from(cell[2]) + 0.5 + f64::from(a[2]) * 0.5,
+            ];
+            let b_pt = [
+                f64::from(cell[0]) + 0.5 + f64::from(b[0]) * 0.5,
+                f64::from(cell[2]) + 0.5 + f64::from(b[2]) * 0.5,
+            ];
+            let mut to = b;
+            let mut to_pt = b_pt;
+            let mut from_pt = a_pt;
+            if dir_x * (b_pt[0] - a_pt[0]) + dir_z * (b_pt[1] - a_pt[1]) < 0.0 {
+                to = a;
+                to_pt = a_pt;
+                from_pt = b_pt;
+            }
+            let dir = [to_pt[0] - from_pt[0], to_pt[1] - from_pt[1]];
+            let len = (dir[0] * dir[0] + dir[1] * dir[1]).sqrt();
+            if len < 1.0e-9 {
+                break;
+            }
+            let speed = self.vel[0].hypot(self.vel[2]);
+            dir_x = dir[0] / len;
+            dir_z = dir[1] / len;
+            // `stepAlongTrack` выравнивает скорость по текущему рельсу.
+            if speed > 0.0 {
+                self.vel = [speed * dir_x, 0.0, speed * dir_z];
+            }
+            let s = (((p[0] - from_pt[0]) * dir[0] + (p[2] - from_pt[1]) * dir[1]) / (len * len))
+                .clamp(0.0, 1.0);
+            let remain = (1.0 - s) * len;
+            if left < remain {
+                let s2 = s + left / len;
+                p[0] = from_pt[0] + dir[0] * s2;
+                p[2] = from_pt[1] + dir[1] * s2;
+                break;
+            }
+            p[0] = to_pt[0];
+            p[2] = to_pt[1];
+            left -= remain;
+            // Верхний выход склона ведёт на рельс выше.
+            let uphill = rail.shape.is_slope() && to[1] == 0;
+            let next = [
+                cell[0] + to[0],
+                cell[1] + i32::from(uphill),
+                cell[2] + to[2],
+            ];
+            let Some(next_rail) = t.rail(next) else {
+                break;
+            };
+            // `restAtVShape`: встречный склон останавливает вагонетку.
+            if self.vel[0] * self.vel[0] + self.vel[2] * self.vel[2] < 0.005
+                && rail.shape.is_slope()
+                && rail.shape.descending(self.vel)
+                && !next_rail.shape.is_slope()
+                && !next_rail.shape.descending(self.vel)
+            {
+                self.vel = [0.0; 3];
+                break;
+            }
+            cell = next;
+            rail = next_rail;
+            passed.push((cell, rail));
+            p_y = f64::from(cell[1]) + if rail.shape.is_slope() { 1.0 } else { 0.0 };
+        }
+        self.pos = old;
+        self.travel(t, [p[0] - old[0], 0.0, p[2] - old[2]]);
+        // Высота рельса под итоговой позицией (или на конце последнего).
+        let y_pos = [self.pos[0], p_y, self.pos[2]];
+        if let Some(q) =
+            Self::track_point(t, y_pos).or_else(|| Self::track_point(t, [p[0], p_y, p[2]]))
+        {
+            self.pos[1] = q[1];
+            self.on_ground = true;
+        }
+        passed
+    }
+
+    /// `NewMinecartBehavior.getCartLerpPosition`: линейная интерполяция
+    /// позиции между двумя серверными тиками (клиентский сглаживатель).
+    pub fn lerp_position(from: [f64; 3], to: [f64; 3], partial: f32) -> [f64; 3] {
+        let t = f64::from(partial.clamp(0.0, 1.0));
+        [
+            from[0] + (to[0] - from[0]) * t,
+            from[1] + (to[1] - from[1]) * t,
+            from[2] + (to[2] - from[2]) * t,
+        ]
+    }
 }
 
 /// `ServerPlayer.getLastClientMoveIntent`: клавиши относительно взгляда
@@ -766,6 +992,110 @@ mod tests {
         old.vel = [0.3, 0.0, 0.0];
         old.tick(&w, [0.0; 2]);
         assert!((old.vel[0] - 0.3 * 0.96).abs() < 0.01, "{old:?}");
+    }
+
+    #[test]
+    fn new_behavior_follows_a_curve_in_one_tick() {
+        let mut w = line(3, Kind::Plain);
+        w.rails.insert(
+            [3, 0, 0],
+            Rail {
+                shape: Shape::SouthWest,
+                kind: Kind::Plain,
+            },
+        );
+        for z in 1..6 {
+            w.rails.insert(
+                [3, 0, z],
+                Rail {
+                    shape: Shape::NorthSouth,
+                    kind: Kind::Plain,
+                },
+            );
+        }
+        let mut c = Cart::new([2.5, 0.0625, 0.5], 0.0);
+        c.improved = true;
+        c.max_speed_limit = 40.0;
+        c.vel = [1.5, 0.0, 0.0];
+        c.tick(&w, [0.0; 2]);
+        // Старое поведение ушло бы по x, новое проходит дугу за тик.
+        assert!(c.pos[0] > 3.2 && c.pos[2] > 0.8, "{c:?}");
+        assert!((c.pos[1] - 0.0625).abs() < 1e-9, "{c:?}");
+    }
+
+    #[test]
+    fn new_behavior_crosses_several_rails_per_tick() {
+        let w = line(20, Kind::Plain);
+        let mut c = Cart::new([0.5, 0.0625, 0.5], 0.0);
+        c.improved = true;
+        c.max_speed_limit = 40.0;
+        c.vel = [1.5, 0.0, 0.0];
+        let step = c.tick(&w, [0.0; 2]);
+        // 1.5 × 0.975 ≈ 1.46 блока; это больше одного рельса.
+        let moved = c.pos[0] - 0.5;
+        assert!(moved > 1.2 && moved < 1.6, "{moved} {c:?}");
+        assert!((c.pos[2] - 0.5).abs() < 1e-9, "{c:?}");
+        assert!(step.rails.len() >= 2, "{step:?}");
+    }
+
+    #[test]
+    fn step_reports_every_rail_it_passes() {
+        let mut w = line(10, Kind::Plain);
+        w.rails.insert(
+            [1, 0, 0],
+            Rail {
+                shape: Shape::EastWest,
+                kind: Kind::Detector,
+            },
+        );
+        let mut c = Cart::new([0.5, 0.0625, 0.5], 0.0);
+        c.improved = true;
+        c.max_speed_limit = 40.0;
+        c.vel = [1.5, 0.0, 0.0];
+        let step = c.tick(&w, [0.0; 2]);
+        assert!(step.rails.iter().any(|(p, _)| *p == [0, 0, 0]));
+        assert!(step.rails.iter().any(|(p, _)| *p == [1, 0, 0]));
+    }
+
+    #[test]
+    fn new_behavior_climbs_a_slope() {
+        let mut w = line(3, Kind::Plain);
+        w.rails.insert(
+            [3, 0, 0],
+            Rail {
+                shape: Shape::AscendingEast,
+                kind: Kind::Plain,
+            },
+        );
+        for x in 4..20 {
+            w.rails.insert(
+                [x, 1, 0],
+                Rail {
+                    shape: Shape::EastWest,
+                    kind: Kind::Plain,
+                },
+            );
+        }
+        let mut c = Cart::new([2.5, 0.0625, 0.5], 0.0);
+        c.improved = true;
+        c.max_speed_limit = 40.0;
+        c.vel = [0.8, 0.0, 0.0];
+        for _ in 0..10 {
+            c.tick(&w, [0.0; 2]);
+        }
+        assert!(c.pos[0] > 4.0, "{c:?}");
+        assert!((c.pos[1] - 1.0625).abs() < 1e-6, "{c:?}");
+    }
+
+    #[test]
+    fn cart_lerp_matches_partial_ticks() {
+        let a = [0.0, 1.0, 2.0];
+        let b = [2.0, 3.0, 4.0];
+        assert_eq!(Cart::lerp_position(a, b, 0.0), a);
+        assert_eq!(Cart::lerp_position(a, b, 1.0), b);
+        assert_eq!(Cart::lerp_position(a, b, 0.5), [1.0, 2.0, 3.0]);
+        assert_eq!(Cart::lerp_position(a, b, -1.0), a);
+        assert_eq!(Cart::lerp_position(a, b, 2.0), b);
     }
 
     #[test]
