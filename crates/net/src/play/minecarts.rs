@@ -1176,6 +1176,8 @@ impl PlayPlan {
                     });
                 let old_pos = e.cart.pos;
                 let y0 = old_pos[1];
+                e.cart.improved = self.vars.flag("minecart_improvements");
+                e.cart.max_speed_limit = self.vars.number("max_minecart_speed") as f64;
                 let step = e.cart.tick(&track, intent);
                 if let Some((rider, _)) = e.rider {
                     let dx = e.cart.pos[0] - old_pos[0];

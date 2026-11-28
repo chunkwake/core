@@ -94,6 +94,7 @@ pub fn defaults() -> BTreeMap<String, RuleValue> {
         ("limited_crafting", false),
         ("locator_bar", true),
         ("log_admin_commands", true),
+        ("minecart_improvements", false),
         ("mob_drops", true),
         ("mob_explosion_drop_decay", true),
         ("mob_griefing", true),
@@ -1140,7 +1141,9 @@ mod tests {
         assert!(!vars.rule("doDaylightCycle").is_some(), "старых имён нет");
         let names = vars.rule_names();
         // Имена и число правил сверены с `reports/commands.json` 26.3.
-        assert_eq!(names.len(), 59, "{names:?}");
+        // 59 ванильных + `minecart_improvements` (26.3: feature flag, у нас
+        // геймрул для включения `NewMinecartBehavior`).
+        assert_eq!(names.len(), 60, "{names:?}");
         assert!(names.windows(2).all(|w| w[0] < w[1]), "по алфавиту");
     }
 

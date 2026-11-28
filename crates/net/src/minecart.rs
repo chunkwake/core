@@ -102,6 +102,10 @@ pub struct Cart {
     pub on_ground: bool,
     /// `isVehicle`: с пассажиром трение меньше и скорость по рельсам ×0.75.
     pub ridden: bool,
+    /// `minecart_improvements`: `NewMinecartBehavior` вместо старого.
+    pub improved: bool,
+    /// `max_minecart_speed` для нового поведения (блоков/с).
+    pub max_speed_limit: f64,
     /// Чем тормозит вид вагонетки (`applyNaturalSlowdown`).
     pub drag: Drag,
     /// Тяга печной вагонетки (`MinecartFurnace.push`), по горизонтали.
@@ -190,6 +194,8 @@ impl Cart {
             flipped: false,
             on_ground: false,
             ridden: false,
+            improved: false,
+            max_speed_limit: 8.0,
             drag: Drag::Plain,
             push: [0.0; 2],
             collided: false,
@@ -203,6 +209,10 @@ impl Cart {
     /// `OldMinecartBehavior.getMaxSpeed`: 8 блоков/с, в воде 4.
     fn max_speed(&self, t: &impl Track) -> f64 {
         let water = self.in_water(t);
+        if self.improved {
+            let base = self.max_speed_limit.max(0.0) / 20.0;
+            return base * if water { 0.5 } else { 1.0 };
+        }
         let base = (if water { 4.0 } else { 8.0 }) / 20.0;
         match self.drag {
             // `MinecartFurnace.getMaxSpeed`.
@@ -214,6 +224,16 @@ impl Cart {
     /// `applyNaturalSlowdown` вида вагонетки; `vel[1]` обнуляется.
     fn natural_slowdown(&mut self, water: bool) {
         let [vx, _, vz] = self.vel;
+        // `NewMinecartBehavior.getSlowdownFactor`: 0.997 с пассажиром,
+        // 0.975 пустая, вместо старых 0.96.
+        if self.improved {
+            let mut f = if self.ridden { 0.997 } else { 0.975 };
+            if water {
+                f *= 0.95;
+            }
+            self.vel = [vx * f, 0.0, vz * f];
+            return;
+        }
         let (mut vx, mut vz) = match self.drag {
             Drag::Container(signal) => {
                 let mut f = 0.98f32 + (15 - signal.min(15) as i32) as f32 * 0.001;
@@ -395,7 +415,12 @@ impl Cart {
             Kind::Powered(on) => (on, !on),
             _ => (false, false),
         };
-        let slope = if self.in_water(t) { SLOPE * 0.2 } else { SLOPE };
+        let slope = if self.improved {
+            SLOPE.max(self.vel[0].hypot(self.vel[2]) * 0.02)
+        } else {
+            SLOPE
+        };
+        let slope = if self.in_water(t) { slope * 0.2 } else { slope };
         match rail.shape {
             Shape::AscendingEast => {
                 self.vel[0] -= slope;
@@ -691,6 +716,23 @@ mod tests {
         }
         // Пустая теряет 4 % за тик.
         assert!((last - 0.3 * 0.96f64.powi(20)).abs() < 0.01, "{last}");
+    }
+
+    #[test]
+    fn new_behavior_uses_improved_slowdown_and_max_speed() {
+        let w = line(40, Kind::Plain);
+        let mut c = Cart::new([2.5, 0.0625, 0.5], 0.0);
+        c.improved = true;
+        c.max_speed_limit = 12.0;
+        c.vel = [0.3, 0.0, 0.0];
+        assert!((c.max_speed(&w) - 0.6).abs() < 1e-12);
+        c.tick(&w, [0.0; 2]);
+        assert!((c.vel[0] - 0.3 * 0.975).abs() < 0.01, "{c:?}");
+        // Старое поведение остаётся 0.96.
+        let mut old = Cart::new([2.5, 0.0625, 0.5], 0.0);
+        old.vel = [0.3, 0.0, 0.0];
+        old.tick(&w, [0.0; 2]);
+        assert!((old.vel[0] - 0.3 * 0.96).abs() < 0.01, "{old:?}");
     }
 
     #[test]
