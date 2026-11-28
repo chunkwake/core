@@ -76,6 +76,8 @@ struct MobMeta {
     donkey_chested: bool,
     /// `Blaze.DATA_FLAGS_ID` (индекс 16, бит 1 — заряд).
     blaze_charged: bool,
+    /// `Guardian.DATA_ID_ATTACK_TARGET` (индекс 17).
+    guardian_target: i32,
 }
 
 impl Default for MobMeta {
@@ -96,6 +98,7 @@ impl Default for MobMeta {
             axolotl_dead: false,
             donkey_chested: false,
             blaze_charged: false,
+            guardian_target: 0,
         }
     }
 }
@@ -117,6 +120,7 @@ impl MobMeta {
             axolotl_dead: m.axolotl_play_dead > 0,
             donkey_chested: m.chested,
             blaze_charged: m.blaze_charged,
+            guardian_target: m.guardian_target_id,
         }
     }
 
@@ -182,6 +186,10 @@ impl MobMeta {
             // `Blaze.DATA_FLAGS_ID`: 16, байт 1 — `isCharged`.
             Species::Blaze if old.is_none_or(|m| m.blaze_charged != self.blaze_charged) => {
                 out.push((16, Meta::Byte(u8::from(self.blaze_charged))));
+            }
+            // `Guardian.DATA_ID_ATTACK_TARGET`: 17.
+            Species::Guardian if old.is_none_or(|m| m.guardian_target != self.guardian_target) => {
+                out.push((17, Meta::Int(self.guardian_target)));
             }
             // `AbstractChestedHorse.DATA_ID_CHEST`: 19 после флагов лошади (18).
             Species::Donkey if old.is_none_or(|m| m.donkey_chested != self.donkey_chested) => {
@@ -4961,6 +4969,10 @@ impl PlayPlan {
                 Out::BlazeFireball { target } => {
                     self.mob_blaze_fireball(id, Uuid::from_u128(target))
                 }
+                Out::GuardianTarget { target } => {
+                    self.mob_guardian_target(id, target.map(Uuid::from_u128))
+                }
+                Out::GuardianBeam { target } => self.mob_guardian_beam(id, Uuid::from_u128(target)),
                 Out::ShootSkull { target } => self.mob_shoot_skull(id, Uuid::from_u128(target)),
                 Out::DragonBreath { target } => self.spawn_dragon_breath(Uuid::from_u128(target)),
                 Out::DragonBreathAt(pos) => self.spawn_dragon_breath_cloud(pos),
@@ -6496,6 +6508,57 @@ impl PlayPlan {
         );
     }
 
+    /// `Guardian.setActiveAttackTarget`: id цели в метаданных 17 и событие
+    /// `21` (звук луча) при включении.
+    fn mob_guardian_target(&self, id: i32, target: Option<Uuid>) {
+        let target_id = target
+            .and_then(|u| {
+                self.hub
+                    .players
+                    .lock()
+                    .unwrap()
+                    .get(&u)
+                    .map(|p| p.entity_id)
+            })
+            .unwrap_or(0);
+        let changed = self
+            .sim()
+            .mobs
+            .lock()
+            .unwrap()
+            .get_mut(&id)
+            .is_some_and(|e| {
+                let changed = e.mob.guardian_target_id != target_id;
+                e.mob.guardian_target_id = target_id;
+                changed
+            });
+        if !changed {
+            return;
+        }
+        self.refresh_mob(id);
+        if target_id != 0 {
+            self.hub
+                .send_about(id, inv::entity_event(self.ids.entity_event, id, 21));
+        }
+    }
+
+    /// `GuardianAttackGoal`: 1 урон (3 на сложной) после 80 тиков луча.
+    fn mob_guardian_beam(&self, id: i32, target: Uuid) {
+        let from = self.sim().mobs.lock().unwrap().get(&id).map(|e| e.mob.pos);
+        let Some(from) = from else {
+            return;
+        };
+        let damage = if self.difficulty().id() == 3 {
+            3.0
+        } else {
+            1.0
+        };
+        let _ = self.push_control(
+            target,
+            Control::Hurt(damage, Cause::Mob("minecraft:guardian"), Some(from), 0.0),
+        );
+    }
+
     /// `Slime.remove` у умершего больше 1: 2–4 детей вдвое меньше
     /// (`convertTo SPLIT_ON_DEATH`: имя и постоянство переходят к ним).
     fn slime_split(&self, m: &Mob, count: i32) {
@@ -7206,6 +7269,21 @@ mod tests {
         assert_eq!(
             MobMeta::of(&m).fields(m.species, Some(MobMeta::default())),
             vec![(16, play::Meta::Byte(1))]
+        );
+    }
+
+    #[test]
+    fn guardian_beam_target_is_synced() {
+        let mut m = crate::mobs::Mob::new(crate::mobs::Species::Guardian, [0.5, 64.0, 0.5], 1);
+        assert!(
+            MobMeta::of(&m)
+                .fields(m.species, Some(MobMeta::default()))
+                .is_empty()
+        );
+        m.guardian_target_id = 42;
+        assert_eq!(
+            MobMeta::of(&m).fields(m.species, Some(MobMeta::default())),
+            vec![(17, play::Meta::Int(42))]
         );
     }
 

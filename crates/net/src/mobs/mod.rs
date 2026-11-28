@@ -1408,6 +1408,11 @@ pub struct Mob {
     pub blaze_time: i32,
     pub blaze_last_seen: i32,
     pub blaze_charged: bool,
+    /// `Guardian.GuardianAttackGoal`: тики луча и синхронизированная цель.
+    pub guardian_attack_time: i32,
+    pub guardian_beam: bool,
+    pub guardian_target_id: i32,
+    pub guardian_last_target: Option<u128>,
     /// `Bee`: оставшиеся тики злости (`AngerTime`).
     pub anger_time: u32,
     /// `Axolotl`: оставшиеся тики притворной смерти (`PLAY_DEAD_TICKS`).
@@ -1548,6 +1553,10 @@ impl Mob {
             blaze_time: 0,
             blaze_last_seen: 0,
             blaze_charged: false,
+            guardian_attack_time: -10,
+            guardian_beam: false,
+            guardian_target_id: 0,
+            guardian_last_target: None,
             anger_time: 0,
             axolotl_play_dead: 0,
             axolotl_air: 6000,
@@ -2683,6 +2692,72 @@ fn blaze_ai_step(m: &mut Mob, s: &Senses) {
     }
 }
 
+/// `Guardian.GuardianAttackGoal`: луч заряжается 80 тиков, затем 1 урон
+/// (3 на сложной) и цель сбрасывается; вне `d² > 9` или без видимости цель
+/// теряется. Ближнего боя у стража нет.
+/// Возвращает `(включить луч, урон луча, выключить луч)`.
+fn guardian_attack_tick(m: &mut Mob, seen: bool, d2: f64, target: u128) -> (bool, bool, bool) {
+    if !seen || d2 <= 9.0 {
+        let stop = m.guardian_beam;
+        m.guardian_beam = false;
+        m.guardian_attack_time = -10;
+        m.guardian_last_target = None;
+        return (false, false, stop);
+    }
+    if m.guardian_last_target != Some(target) {
+        m.guardian_last_target = Some(target);
+        m.guardian_attack_time = -10;
+    }
+    m.guardian_attack_time += 1;
+    let start = m.guardian_attack_time == 0;
+    if start {
+        m.guardian_beam = true;
+    }
+    let hit = m.guardian_attack_time >= 80;
+    if hit {
+        m.guardian_beam = false;
+        m.guardian_attack_time = -10;
+        m.guardian_last_target = None;
+    }
+    (start, hit, false)
+}
+
+fn guardian_ai_step(m: &mut Mob, s: &Senses) {
+    if !m.alive() {
+        return;
+    }
+    let Some(target) = m.target else {
+        if m.guardian_beam {
+            m.guardian_beam = false;
+            m.out.push(goals::Out::GuardianTarget { target: None });
+        }
+        m.guardian_attack_time = -10;
+        m.guardian_last_target = None;
+        return;
+    };
+    let Some(p) = s.prey.iter().find(|p| p.uuid == target).copied() else {
+        return;
+    };
+    let seen = (s.sight)(m.eye(), p.eye());
+    let (start, hit, stop) = guardian_attack_tick(m, seen, dist2(m.pos, p.pos), target);
+    if start {
+        m.out.push(goals::Out::GuardianTarget {
+            target: Some(target),
+        });
+    }
+    if hit {
+        m.out.push(goals::Out::GuardianBeam { target });
+        m.out.push(goals::Out::GuardianTarget { target: None });
+        m.target = None;
+    }
+    if stop {
+        m.out.push(goals::Out::GuardianTarget { target: None });
+    }
+    if !seen {
+        m.target = None;
+    }
+}
+
 fn dolphin_ai_step(m: &mut Mob) {
     m.no_gravity = true;
     let Some(p) = m.item_target else {
@@ -2938,6 +3013,9 @@ fn server_ai_step(m: &mut Mob, w: &World, s: &mut Senses) {
     m.targets = targets;
     if m.species == Species::Blaze {
         blaze_ai_step(m, s);
+    }
+    if m.species == Species::Guardian {
+        guardian_ai_step(m, s);
     }
     let water = in_water(m, w);
     let walk = walker(m, w, s.difficulty, water);
@@ -5329,6 +5407,33 @@ mod tests {
     }
 
     #[test]
+    fn guardian_beam_charges_and_fires() {
+        let mut m = Mob::new(Species::Guardian, [0.5, 64.0, 0.5], 1);
+        let target = 7;
+        let mut started = false;
+        for _ in 0..10 {
+            let (start, _, _) = guardian_attack_tick(&mut m, true, 100.0, target);
+            started |= start;
+        }
+        assert!(started);
+        assert!(m.guardian_beam);
+        assert_eq!(m.guardian_attack_time, 0);
+        let mut hits = 0;
+        for _ in 0..80 {
+            let (_, hit, stop) = guardian_attack_tick(&mut m, true, 100.0, target);
+            assert!(!stop);
+            hits += i32::from(hit);
+        }
+        assert_eq!(hits, 1);
+        assert!(!m.guardian_beam);
+        assert_eq!(m.guardian_attack_time, -10);
+        m.guardian_beam = true;
+        let (_, _, stop) = guardian_attack_tick(&mut m, true, 9.0, target);
+        assert!(stop, "ближе 3 блоков луч выключается");
+        assert!(!m.guardian_beam);
+    }
+
+    #[test]
     fn structure_mobs_data_matches_vanilla() {
         let cases = [
             (
@@ -5416,9 +5521,14 @@ mod tests {
             g,
             goals::Goal::CubeAttack { .. }
         )));
-        assert!(has(Species::Guardian, |g| matches!(
+        // У стража нет ближнего боя: только луч и плавание.
+        assert!(!has(Species::Guardian, |g| matches!(
             g,
             goals::Goal::Melee(_)
+        )));
+        assert!(has(Species::Guardian, |g| matches!(
+            g,
+            goals::Goal::Stroll { swim: true, .. }
         )));
         // Зомбифицированный пиглин нейтрален: целится только после удара.
         let (_, targets) = goals::for_species(Species::ZombifiedPiglin);

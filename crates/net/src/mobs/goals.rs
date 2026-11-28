@@ -54,6 +54,10 @@ pub enum Out {
     Shoot { target: u128, power: f32 },
     /// `BlazeAttackGoal`: малый огненный шар в цель.
     BlazeFireball { target: u128 },
+    /// `Guardian.setActiveAttackTarget`: включить/выключить луч (`DATA_ID_ATTACK_TARGET`).
+    GuardianTarget { target: Option<u128> },
+    /// `GuardianAttackGoal`: урон луча после `ATTACK_TIME`.
+    GuardianBeam { target: u128 },
     /// WitherBoss.performRangedAttack: черёп визера в цель.
     ShootSkull { target: u128 },
     /// EnderDragon breath: облако dragon_breath у цели.
@@ -1818,11 +1822,8 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
         // Летучая мышь и пчела: движение отдельной строкой.
         // `Guardian`: `RandomSwimGoal` и преследование цели; луча пока нет.
         Species::Guardian => {
-            let mut attack = Melee::new(1.0, false);
-            attack.follow = true;
             return (
                 Selector::new(vec![
-                    (2, Goal::Melee(Box::new(attack))),
                     (
                         4,
                         Goal::Stroll {
