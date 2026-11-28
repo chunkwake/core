@@ -23,6 +23,8 @@ const IN_RIGHT: u8 = 0x08;
 /// `MinecartFurnace`: топливо от одного угля и предел.
 const FUEL_PER_ITEM: i32 = 3600;
 const FUEL_MAX: i32 = 32000;
+/// `MinecartCommandBlock.ACTIVATION_DELAY`.
+const COMMAND_ACTIVATION_DELAY: i64 = 4;
 /// `MinecartTNT.primeFuse`.
 const TNT_FUSE: i32 = 80;
 /// `MinecartTNT.handleEntityEvent`: клиент поджигает фитиль.
@@ -31,6 +33,10 @@ const EVENT_PRIME: u8 = 70;
 const TNT_POWER: f32 = 4.0;
 const TNT_SPEED_FACTOR: f32 = 1.0;
 
+fn command_ready(last_activated: i64, now: i64) -> bool {
+    now.wrapping_sub(last_activated) >= COMMAND_ACTIVATION_DELAY
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Variant {
     Plain,
@@ -38,15 +44,17 @@ pub(crate) enum Variant {
     Hopper,
     Furnace,
     Tnt,
+    CommandBlock,
 }
 
 impl Variant {
-    const ALL: [Variant; 5] = [
+    const ALL: [Variant; 6] = [
         Variant::Plain,
         Variant::Chest,
         Variant::Hopper,
         Variant::Furnace,
         Variant::Tnt,
+        Variant::CommandBlock,
     ];
 
     /// Тип сущности; предмет называется так же.
@@ -57,6 +65,15 @@ impl Variant {
             Variant::Hopper => "minecraft:hopper_minecart",
             Variant::Furnace => "minecraft:furnace_minecart",
             Variant::Tnt => "minecraft:tnt_minecart",
+            Variant::CommandBlock => "minecraft:command_block_minecart",
+        }
+    }
+
+    /// `getDropItem`: командный блок выпадает обычной вагонеткой.
+    fn drop_name(self) -> &'static str {
+        match self {
+            Variant::CommandBlock => "minecraft:minecart",
+            other => other.name(),
         }
     }
 
@@ -108,6 +125,12 @@ pub(crate) struct MinecartEntry {
     fuse: i32,
     /// Пройденное падением (`fallDistance`) — для взрыва ТНТ при ударе о землю.
     fall: f64,
+    /// `MinecartCommandBlock`: команда, вывод и задержка активации.
+    command: String,
+    track_output: bool,
+    last_output: Option<String>,
+    success_count: i32,
+    last_activated: i64,
 }
 
 impl MinecartEntry {
@@ -144,6 +167,11 @@ impl MinecartEntry {
             lit: false,
             fuse: -1,
             fall: 0.0,
+            command: String::new(),
+            track_output: true,
+            last_output: None,
+            success_count: 0,
+            last_activated: i64::MIN / 2,
         }
     }
 
@@ -446,7 +474,7 @@ impl PlayPlan {
                 CartUse::Open(e.slots.len(), title)
             }
             Variant::Furnace => CartUse::Fuel,
-            Variant::Tnt => CartUse::Pass,
+            Variant::Tnt | Variant::CommandBlock => CartUse::Pass,
         }
     }
 
@@ -736,7 +764,7 @@ impl PlayPlan {
             self.drop_item(e.cart.pos, vel, stack, items::BLOCK_DELAY);
         };
         if self.vars.flag("entity_drops")
-            && let Some(item) = self.item_id(e.variant.name())
+            && let Some(item) = self.item_id(e.variant.drop_name())
         {
             pop(Stack::new(item, 1));
         }
@@ -826,6 +854,7 @@ impl PlayPlan {
         let mut ejected = Vec::new();
         let mut hoppers = Vec::new();
         let mut primed = Vec::new();
+        let mut commands: Vec<(i32, String, [f64; 3])> = Vec::new();
         let now = self.game_time.load(Ordering::Relaxed);
         let border = self.border_at(now);
         // Взорвавшиеся ТНТ: позиция, квадрат скорости, был ли фитиль.
@@ -927,6 +956,16 @@ impl PlayPlan {
                         Variant::Tnt if on && e.fuse < 0 && self.vars.flag("tnt_explodes") => {
                             e.fuse = TNT_FUSE;
                             primed.push((id, e.cart.pos));
+                        }
+                        // `MinecartCommandBlock.activateMinecart`: повторная
+                        // активация не чаще, чем раз в 4 тика.
+                        Variant::CommandBlock
+                            if on
+                                && command_ready(e.last_activated, now)
+                                && self.vars.flag("command_blocks_work") =>
+                        {
+                            e.last_activated = now;
+                            commands.push((id, e.command.clone(), e.cart.pos));
                         }
                         _ => {}
                     },
@@ -1036,6 +1075,32 @@ impl PlayPlan {
             for &(id, rider) in &ejected {
                 if rider.is_nil() {
                     carts.remove(&id);
+                }
+            }
+        }
+        for (id, line, pos) in commands {
+            let line = line.trim().trim_start_matches('/');
+            if line.is_empty() {
+                continue;
+            }
+            let source = crate::play::commands::dispatch::Source {
+                uuid: None,
+                name: "CommandBlock".into(),
+                level: 2,
+            };
+            let outcome = self.run_command_at(&source, line, pos, 0.0, 0.0);
+            let (text, success) = match outcome {
+                Some(crate::play::commands::dispatch::Outcome::Feedback(value))
+                | Some(crate::play::commands::dispatch::Outcome::Broadcast(value)) => {
+                    (Some(self.command_text(&value)), 1)
+                }
+                Some(crate::play::commands::dispatch::Outcome::Silent) => (None, 1),
+                None => (Some(format!("Unknown command: {line}")), 0),
+            };
+            if let Some(e) = self.sim().minecarts.lock().unwrap().get_mut(&id) {
+                e.success_count = success;
+                if e.track_output {
+                    e.last_output = text;
                 }
             }
         }
@@ -1239,6 +1304,19 @@ impl PlayPlan {
                 e.cart.push = [float("PushX").unwrap_or(0.0), float("PushZ").unwrap_or(0.0)];
             }
             Variant::Tnt => e.fuse = int("fuse").unwrap_or(-1) as i32,
+            Variant::CommandBlock => {
+                e.command = c
+                    .get("Command")
+                    .and_then(Tag::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                e.track_output = c
+                    .get("TrackOutput")
+                    .and_then(Tag::as_i64)
+                    .is_none_or(|v| v != 0);
+                e.success_count = int("SuccessCount").unwrap_or(0) as i32;
+                e.last_output = c.get("LastOutput").and_then(Tag::as_str).map(str::to_owned);
+            }
             _ => {}
         }
         e
@@ -1320,6 +1398,14 @@ impl PlayPlan {
                     Variant::Tnt => {
                         c.insert("fuse".into(), Tag::Int(e.fuse));
                     }
+                    Variant::CommandBlock => {
+                        c.insert("Command".into(), Tag::String(e.command.clone()));
+                        c.insert("TrackOutput".into(), Tag::Byte(i8::from(e.track_output)));
+                        c.insert("SuccessCount".into(), Tag::Int(e.success_count));
+                        if let Some(out) = &e.last_output {
+                            c.insert("LastOutput".into(), Tag::String(out.clone()));
+                        }
+                    }
                     _ => {}
                 }
                 (
@@ -1339,5 +1425,34 @@ impl PlayPlan {
                 (chunk, c)
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_block_minecart_variant_and_drop() {
+        assert_eq!(
+            Variant::of("minecraft:command_block_minecart"),
+            Some(Variant::CommandBlock)
+        );
+        assert_eq!(
+            Variant::CommandBlock.name(),
+            "minecraft:command_block_minecart"
+        );
+        assert_eq!(Variant::CommandBlock.drop_name(), "minecraft:minecart");
+        assert_eq!(Variant::CommandBlock.size(), 0);
+        assert_eq!(Variant::ALL.len(), 6);
+    }
+
+    #[test]
+    fn command_block_activation_respects_delay() {
+        assert!(!command_ready(100, 103));
+        assert!(command_ready(100, 104));
+        assert!(command_ready(100, 105));
+        // Стартовое значение не мешает первому срабатыванию.
+        assert!(command_ready(i64::MIN / 2, 0));
     }
 }
