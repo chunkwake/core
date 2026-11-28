@@ -3279,6 +3279,31 @@ pub struct SpawnEntry {
     pub max: u32,
 }
 
+/// `StructureSpawnOverride`: список мобов структуры и рамка, по которой он
+/// действует (`piece` — по куску, `full` — по всему старту).
+#[derive(Clone, Debug)]
+pub struct StructureSpawn {
+    pub full_box: bool,
+    pub entries: Vec<SpawnEntry>,
+}
+
+/// Первая структура в точке, у которой есть `spawn_overrides` этой категории
+/// (`ChunkGenerator.getMobsAt` перебирает структуры старта).
+pub fn structure_spawn_for<'a>(
+    names: &std::collections::HashSet<String>,
+    spawns: &'a std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, StructureSpawn>,
+    >,
+    cat: Category,
+) -> Option<&'a StructureSpawn> {
+    names.iter().find_map(|name| {
+        spawns
+            .get(name)
+            .and_then(|by_category| by_category.get(cat.key()))
+    })
+}
+
 /// Взвешенный выбор (`WeightedList.getRandom`). Неизвестный вид остаётся в
 /// весах: его доля просто не спавнится, а доля зомби остаётся ванильной.
 pub fn pick_entry(entries: &[SpawnEntry], r: f64) -> Option<SpawnEntry> {
@@ -5587,6 +5612,36 @@ mod tests {
         );
         assert_eq!(pick_entry(&e, 96.0 / 195.0).unwrap().species, None);
         assert_eq!(pick_entry(&e, 0.99999).unwrap().species, None);
+    }
+
+    #[test]
+    fn structure_spawn_lookup_takes_matching_category() {
+        let mut spawns = std::collections::HashMap::new();
+        let witch = StructureSpawn {
+            full_box: false,
+            entries: vec![SpawnEntry {
+                species: Some(Species::Witch),
+                weight: 1,
+                min: 1,
+                max: 1,
+            }],
+        };
+        spawns.insert(
+            "minecraft:swamp_hut".to_owned(),
+            std::collections::HashMap::from([("monster".to_owned(), witch)]),
+        );
+        let names = std::collections::HashSet::from(["minecraft:swamp_hut".to_owned()]);
+        let found = structure_spawn_for(&names, &spawns, Category::Monster).unwrap();
+        assert_eq!(found.entries[0].species, Some(Species::Witch));
+        assert!(structure_spawn_for(&names, &spawns, Category::Creature).is_none());
+        assert!(
+            structure_spawn_for(
+                &std::collections::HashSet::from(["minecraft:plains".to_owned()]),
+                &spawns,
+                Category::Monster
+            )
+            .is_none()
+        );
     }
 
     #[test]

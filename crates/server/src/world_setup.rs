@@ -1341,6 +1341,7 @@ fn survival_data(
         underground_water_spawns: biome_spawns(data_dir, registries, "underground_water_creature"),
         water_creature_spawns: biome_spawns(data_dir, registries, "water_creature"),
         water_ambient_spawns: biome_spawns(data_dir, registries, "water_ambient"),
+        structure_spawns: structure_spawns(data_dir),
         physics: chunkwake_data::world::load_physics(data_dir)
             .ok()
             .map(std::sync::Arc::new),
@@ -1451,6 +1452,92 @@ fn biome_spawns(
             }
         })
         .collect()
+}
+
+/// `Structure.spawnOverrides` из `data/<ns>/worldgen/structure/*.json`:
+/// структура -> категория -> список мобов и тип рамки (`piece`/`full`).
+fn structure_spawns(
+    data_dir: &Path,
+) -> HashMap<String, HashMap<String, chunkwake_net::mobs::StructureSpawn>> {
+    let mut out = HashMap::new();
+    let root = data_dir.join("data");
+    let Ok(namespaces) = std::fs::read_dir(&root) else {
+        return out;
+    };
+    for ns in namespaces.flatten() {
+        if !ns.path().is_dir() {
+            continue;
+        }
+        let namespace = ns.file_name().to_string_lossy().into_owned();
+        let dir = ns.path().join("worldgen/structure");
+        let Ok(files) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let path = file.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                continue;
+            };
+            let overrides = parse_structure_spawns(&value);
+            if !overrides.is_empty() {
+                out.insert(format!("{namespace}:{stem}"), overrides);
+            }
+        }
+    }
+    out
+}
+
+fn parse_structure_spawns(
+    value: &serde_json::Value,
+) -> HashMap<String, chunkwake_net::mobs::StructureSpawn> {
+    let mut out = HashMap::new();
+    let Some(overrides) = value.get("spawn_overrides").and_then(|v| v.as_object()) else {
+        return out;
+    };
+    for (category, override_value) in overrides {
+        let full_box = override_value
+            .get("bounding_box")
+            .and_then(|v| v.as_str())
+            .is_some_and(|b| b == "full");
+        let entries = override_value
+            .get("spawns")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|e| {
+                let kind = e.get("type").and_then(|v| v.as_str())?;
+                let weight = e.get("weight").and_then(|v| v.as_u64())? as u32;
+                let count = &e["count"];
+                let (lo, hi) = match count.as_u64() {
+                    Some(n) => (n as u32, n as u32),
+                    None => (
+                        count.get("min_inclusive").and_then(|v| v.as_u64())? as u32,
+                        count.get("max_inclusive").and_then(|v| v.as_u64())? as u32,
+                    ),
+                };
+                Some(chunkwake_net::mobs::SpawnEntry {
+                    species: chunkwake_net::mobs::Species::from_name(kind),
+                    weight,
+                    min: lo,
+                    max: hi,
+                })
+            })
+            .collect();
+        out.insert(
+            category.clone(),
+            chunkwake_net::mobs::StructureSpawn { full_box, entries },
+        );
+    }
+    out
 }
 
 /// Предмет, который ставит блок с другим именем (`ItemNameBlockItem`).
@@ -1978,6 +2065,44 @@ mod tests {
             vec![("minecraft:ghast".to_owned(), 0.15, 0.7)]
         );
         assert!(super::biome_spawn_costs(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn structure_spawn_overrides_are_parsed() {
+        let value = serde_json::json!({
+            "spawn_overrides": {
+                "monster": {
+                    "bounding_box": "piece",
+                    "spawns": [
+                        {"type": "minecraft:witch", "count": 1, "weight": 3},
+                        {"type": "minecraft:blaze", "weight": 1,
+                         "count": {"min_inclusive": 2, "max_inclusive": 3}}
+                    ]
+                },
+                "creature": {
+                    "bounding_box": "full",
+                    "spawns": [{"type": "minecraft:cat", "count": 1, "weight": 1}]
+                }
+            }
+        });
+        let parsed = super::parse_structure_spawns(&value);
+        let monster = &parsed["monster"];
+        assert!(!monster.full_box);
+        assert_eq!(monster.entries.len(), 2);
+        assert_eq!(
+            monster.entries[0].species,
+            Some(chunkwake_net::mobs::Species::Witch)
+        );
+        assert_eq!((monster.entries[0].min, monster.entries[0].max), (1, 1));
+        assert_eq!(monster.entries[1].species, None, "blaze пока не заведён");
+        assert_eq!((monster.entries[1].min, monster.entries[1].max), (2, 3));
+        let creature = &parsed["creature"];
+        assert!(creature.full_box);
+        assert_eq!(
+            creature.entries[0].species,
+            Some(chunkwake_net::mobs::Species::Cat)
+        );
+        assert!(super::parse_structure_spawns(&serde_json::json!({})).is_empty());
     }
 
     #[test]

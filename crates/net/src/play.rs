@@ -3494,6 +3494,8 @@ pub struct SurvivalData {
     pub underground_water_spawns: Vec<CreatureSpawns>,
     pub water_creature_spawns: Vec<CreatureSpawns>,
     pub water_ambient_spawns: Vec<CreatureSpawns>,
+    /// `Structure.spawnOverrides`: структура -> категория -> список мобов.
+    pub structure_spawns: HashMap<String, HashMap<String, crate::mobs::StructureSpawn>>,
     /// Коллизия и трение блоков; `None` — старый кэш без `shapes.csv`.
     pub physics: Option<Arc<chunkwake_data::world::BlockPhysics>>,
     /// Клетки поиска пути по id состояния (`path_types.csv`); `None` — по форме.

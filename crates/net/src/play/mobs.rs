@@ -6665,6 +6665,18 @@ impl PlayPlan {
         }
     }
 
+    /// `Structure.spawnOverrides`: список мобов структуры в точке, если он есть.
+    fn structure_spawn_entries(
+        &self,
+        pos: [i32; 3],
+        cat: mb::Category,
+    ) -> Option<Vec<mb::SpawnEntry>> {
+        let at = self.structures_at_fn()?;
+        let names = at(pos);
+        mb::structure_spawn_for(&names, &self.survival.structure_spawns, cat)
+            .map(|spawn| spawn.entries.clone())
+    }
+
     /// Одна попытка категории в чанке (`spawnCategoryForChunk`): случайная
     /// точка от дна мира до поверхности + 1, список вида по биому этой точки.
     fn spawn_in_chunk(
@@ -6702,19 +6714,25 @@ impl PlayPlan {
             mb::Category::WaterAmbient => &self.survival.water_ambient_spawns,
         };
         let spawns = self.biome_in(w, start).and_then(|b| table.get(b as usize));
-        let entries: Vec<mb::SpawnEntry> = spawns
-            .map(|b| {
-                b.entries
-                    .iter()
-                    .map(|(name, weight, min, max)| mb::SpawnEntry {
-                        species: Species::from_name(name),
-                        weight: *weight,
-                        min: *min,
-                        max: *max,
+        let entries: Vec<mb::SpawnEntry> =
+            if let Some(overridden) = self.structure_spawn_entries(start, cat) {
+                // `ChunkGenerator.getMobsAt`: список структуры заменяет биомный.
+                overridden
+            } else {
+                spawns
+                    .map(|b| {
+                        b.entries
+                            .iter()
+                            .map(|(name, weight, min, max)| mb::SpawnEntry {
+                                species: Species::from_name(name),
+                                weight: *weight,
+                                min: *min,
+                                max: *max,
+                            })
+                            .collect()
                     })
-                    .collect()
-            })
-            .unwrap_or_default();
+                    .unwrap_or_default()
+            };
         let costs = spawns.map_or(&[][..], |b| b.costs.as_slice());
         if entries.iter().all(|e| e.species.is_none()) {
             return Vec::new();
