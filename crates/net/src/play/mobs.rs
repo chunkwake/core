@@ -566,6 +566,19 @@ impl PlayPlan {
         })
     }
 
+    /// `BaseSpawner`: NBT сущности, затем `finalizeSpawn`.
+    pub(crate) fn spawn_mob_spawner(
+        &self,
+        species: Species,
+        pos: [f64; 3],
+        yaw: f32,
+        nbt: &Compound,
+    ) -> Option<i32> {
+        self.spawn_mob_final(species, pos, yaw, false, Some("SPAWNER"), true, |m| {
+            self.apply_mob_nbt(m, nbt);
+        })
+    }
+
     /// Общий путь спавна: `finalize` включает `finalizeSpawn` (случайное
     /// снаряжение и размер слизня), `setup` правит моба из NBT.
     #[allow(clippy::too_many_arguments)]
@@ -6913,6 +6926,54 @@ impl PlayPlan {
     /// `WaterAnimal.checkSurfaceWaterAnimalSpawnRules` + `IN_WATER`: y в
     /// `[sea-13, sea]`, вода в клетке и снизу, над клеткой — вода, рамка свободна.
     /// Светящийся спрут — отдельное правило: ниже `sea−33`, абсолютная тьма.
+    /// Проверка места для `BaseSpawner`: без дистанции до игрока и без света,
+    /// только `SpawnPlacements`-геометрия (вода или твёрдая опора и свободная
+    /// рамка). Точка уже выбрана в окне спавнера.
+    pub(super) fn spawner_fits(&self, species: Species, pos: [i32; 3]) -> bool {
+        let water = |p: [i32; 3]| {
+            self.block(p)
+                .and_then(|s| crate::fluids::state_fluid(&self.survival.placement, s))
+                .is_some_and(|f| f.kind == crate::fluids::Kind::Water)
+        };
+        if species.category().is_water() || species == Species::Guardian {
+            if !water(pos) || !water([pos[0], pos[1] - 1, pos[2]]) {
+                return false;
+            }
+            let above = [pos[0], pos[1] + 1, pos[2]];
+            return self
+                .block(above)
+                .is_none_or(|s| !mb::full_block(self.shape_at(Some(s), above)));
+        }
+        let below = [pos[0], pos[1] - 1, pos[2]];
+        let Some(floor) = self.block(below) else {
+            return false;
+        };
+        if !mb::sturdy_top(self.shape_at(Some(floor), below))
+            || mb::spawn_floor_forbidden(self.state_name(floor))
+        {
+            return false;
+        }
+        for cell in [pos, [pos[0], pos[1] + 1, pos[2]]] {
+            let Some(s) = self.block(cell) else {
+                return false;
+            };
+            if mb::full_block(self.shape_at(Some(s), cell))
+                || crate::fluids::state_fluid(&self.survival.placement, s).is_some()
+                || mb::spawn_cell_forbidden(self.state_name(s))
+            {
+                return false;
+            }
+        }
+        let (width, height) = species.size();
+        let feet = [
+            f64::from(pos[0]) + 0.5,
+            f64::from(pos[1]),
+            f64::from(pos[2]) + 0.5,
+        ];
+        let shape = |c: [i32; 3]| self.shape_at(self.block(c), c);
+        mb::box_free(feet, width, height, &shape)
+    }
+
     fn water_spawn_fits(
         &self,
         w: &WorldView<'_>,

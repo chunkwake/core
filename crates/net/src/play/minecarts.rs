@@ -33,6 +33,17 @@ const EVENT_PRIME: u8 = 70;
 const TNT_POWER: f32 = 4.0;
 const TNT_SPEED_FACTOR: f32 = 1.0;
 
+/// `SpawnData`: 26.3 хранит сущность под `entity`, старый формат — прямо в
+/// `SpawnData`/`data`; оба дают NBT с `id`.
+fn spawner_entity(data: &Compound) -> Option<(crate::mobs::Species, &Compound)> {
+    let entity = data
+        .get("entity")
+        .and_then(Tag::as_compound)
+        .unwrap_or(data);
+    let id = entity.get("id").and_then(Tag::as_str)?;
+    Some((crate::mobs::Species::from_name(id)?, entity))
+}
+
 fn command_ready(last_activated: i64, now: i64) -> bool {
     now.wrapping_sub(last_activated) >= COMMAND_ACTIVATION_DELAY
 }
@@ -45,16 +56,18 @@ pub(crate) enum Variant {
     Furnace,
     Tnt,
     CommandBlock,
+    Spawner,
 }
 
 impl Variant {
-    const ALL: [Variant; 6] = [
+    const ALL: [Variant; 7] = [
         Variant::Plain,
         Variant::Chest,
         Variant::Hopper,
         Variant::Furnace,
         Variant::Tnt,
         Variant::CommandBlock,
+        Variant::Spawner,
     ];
 
     /// Тип сущности; предмет называется так же.
@@ -66,13 +79,14 @@ impl Variant {
             Variant::Furnace => "minecraft:furnace_minecart",
             Variant::Tnt => "minecraft:tnt_minecart",
             Variant::CommandBlock => "minecraft:command_block_minecart",
+            Variant::Spawner => "minecraft:spawner_minecart",
         }
     }
 
-    /// `getDropItem`: командный блок выпадает обычной вагонеткой.
+    /// `getDropItem`: командный блок и спаунер выпадают обычной вагонеткой.
     fn drop_name(self) -> &'static str {
         match self {
-            Variant::CommandBlock => "minecraft:minecart",
+            Variant::CommandBlock | Variant::Spawner => "minecraft:minecart",
             other => other.name(),
         }
     }
@@ -100,6 +114,129 @@ pub(super) enum CartUse {
     /// `MinecartFurnace.interact`: подбросить топливо.
     Fuel,
     Pass,
+}
+
+/// `BaseSpawner`: поля, которые пишутся в NBT и тикают вместе с вагонеткой.
+#[derive(Clone, Debug)]
+struct SpawnerState {
+    delay: i32,
+    min_delay: i32,
+    max_delay: i32,
+    spawn_count: i32,
+    max_nearby: i32,
+    required_player_range: i32,
+    spawn_range: i32,
+    spawn_data: Option<Compound>,
+    /// `SpawnPotentials`: вес и `data`.
+    potentials: Vec<(i32, Compound)>,
+}
+
+impl Default for SpawnerState {
+    fn default() -> Self {
+        Self {
+            delay: 20,
+            min_delay: 200,
+            max_delay: 800,
+            spawn_count: 4,
+            max_nearby: 6,
+            required_player_range: 16,
+            spawn_range: 4,
+            spawn_data: None,
+            potentials: Vec::new(),
+        }
+    }
+}
+
+impl SpawnerState {
+    fn load(c: &Compound) -> Self {
+        let mut s = Self::default();
+        let int = |k: &str| match c.get(k) {
+            Some(Tag::Short(v)) => Some(i32::from(*v)),
+            Some(Tag::Int(v)) => Some(*v),
+            Some(Tag::Byte(v)) => Some(i32::from(*v)),
+            _ => None,
+        };
+        s.delay = int("Delay").unwrap_or(s.delay);
+        s.min_delay = int("MinSpawnDelay").unwrap_or(s.min_delay);
+        s.max_delay = int("MaxSpawnDelay").unwrap_or(s.max_delay);
+        s.spawn_count = int("SpawnCount").unwrap_or(s.spawn_count);
+        s.max_nearby = int("MaxNearbyEntities").unwrap_or(s.max_nearby);
+        s.required_player_range = int("RequiredPlayerRange").unwrap_or(s.required_player_range);
+        s.spawn_range = int("SpawnRange").unwrap_or(s.spawn_range);
+        if let Some(Tag::Compound(data)) = c.get("SpawnData") {
+            s.spawn_data = Some(data.clone());
+        }
+        for t in c
+            .get("SpawnPotentials")
+            .and_then(Tag::as_list)
+            .unwrap_or(&[])
+        {
+            let Some(entry) = t.as_compound() else {
+                continue;
+            };
+            let weight = entry
+                .get("weight")
+                .and_then(Tag::as_i64)
+                .unwrap_or(1)
+                .max(1) as i32;
+            let data = entry
+                .get("data")
+                .and_then(Tag::as_compound)
+                .cloned()
+                .or_else(|| entry.get("entity").and_then(Tag::as_compound).cloned());
+            if let Some(data) = data {
+                s.potentials.push((weight, data));
+            }
+        }
+        s
+    }
+
+    fn save(&self, c: &mut Compound) {
+        c.insert("Delay".into(), Tag::Short(self.delay as i16));
+        c.insert("MinSpawnDelay".into(), Tag::Short(self.min_delay as i16));
+        c.insert("MaxSpawnDelay".into(), Tag::Short(self.max_delay as i16));
+        c.insert("SpawnCount".into(), Tag::Short(self.spawn_count as i16));
+        c.insert(
+            "MaxNearbyEntities".into(),
+            Tag::Short(self.max_nearby as i16),
+        );
+        c.insert(
+            "RequiredPlayerRange".into(),
+            Tag::Short(self.required_player_range as i16),
+        );
+        c.insert("SpawnRange".into(), Tag::Short(self.spawn_range as i16));
+        if let Some(data) = &self.spawn_data {
+            c.insert("SpawnData".into(), Tag::Compound(data.clone()));
+        }
+        if !self.potentials.is_empty() {
+            let list = self
+                .potentials
+                .iter()
+                .map(|(weight, data)| {
+                    Tag::Compound(Compound::from([
+                        ("weight".into(), Tag::Int(*weight)),
+                        ("data".into(), Tag::Compound(data.clone())),
+                    ]))
+                })
+                .collect();
+            c.insert("SpawnPotentials".into(), Tag::List(list));
+        }
+    }
+
+    /// `getOrCreateNextSpawnData`: взвешенный `SpawnPotentials` или `SpawnData`.
+    fn next_data(&self, r: f64) -> Option<Compound> {
+        let total: i32 = self.potentials.iter().map(|(w, _)| *w).sum();
+        if total > 0 {
+            let mut pick = ((r * f64::from(total)).floor() as i32).min(total - 1);
+            for (weight, data) in &self.potentials {
+                if pick < *weight {
+                    return Some(data.clone());
+                }
+                pick -= *weight;
+            }
+        }
+        self.spawn_data.clone()
+    }
 }
 
 pub(crate) struct MinecartEntry {
@@ -131,6 +268,8 @@ pub(crate) struct MinecartEntry {
     last_output: Option<String>,
     success_count: i32,
     last_activated: i64,
+    /// `MinecartSpawner` → `BaseSpawner`.
+    spawner: SpawnerState,
 }
 
 impl MinecartEntry {
@@ -172,6 +311,7 @@ impl MinecartEntry {
             last_output: None,
             success_count: 0,
             last_activated: i64::MIN / 2,
+            spawner: SpawnerState::default(),
         }
     }
 
@@ -474,7 +614,7 @@ impl PlayPlan {
                 CartUse::Open(e.slots.len(), title)
             }
             Variant::Furnace => CartUse::Fuel,
-            Variant::Tnt | Variant::CommandBlock => CartUse::Pass,
+            Variant::Tnt | Variant::CommandBlock | Variant::Spawner => CartUse::Pass,
         }
     }
 
@@ -829,6 +969,82 @@ impl PlayPlan {
     /// Тик вагонеток в симулируемых чанках: физика, толчки игроков,
     /// детекторные и активаторные рельсы, топливо печи, фитиль ТНТ,
     /// воронка, рассылка движения, позиция водителя.
+    fn spawner_nearby(&self, pos: [f64; 3], range: i32, species: crate::mobs::Species) -> usize {
+        let r = f64::from(range.max(0));
+        self.sim()
+            .mobs
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|e| {
+                e.mob.species == species && (0..3).all(|i| (e.mob.pos[i] - pos[i]).abs() <= r)
+            })
+            .count()
+    }
+
+    /// `MinecartSpawner.tick` → `BaseSpawner.serverTick`: задержка, игрок в
+    /// `RequiredPlayerRange`, до `SpawnCount` попыток в окне `SpawnRange`,
+    /// лимит `MaxNearbyEntities`, затем новая случайная задержка.
+    fn tick_spawner(&self, e: &mut MinecartEntry, players: &[(Uuid, [f64; 3], f32)]) {
+        let pos = e.cart.pos;
+        let s = &mut e.spawner;
+        if s.spawn_count <= 0 || s.max_nearby <= 0 {
+            return;
+        }
+        if s.delay > 0 {
+            s.delay -= 1;
+            return;
+        }
+        let range = f64::from(s.required_player_range.max(0));
+        if !players
+            .iter()
+            .any(|(_, p, _)| crate::mobs::dist2(*p, pos) <= range * range)
+        {
+            return;
+        }
+        let Some(data) = s.next_data(rand::random()) else {
+            return;
+        };
+        let Some((species, entity)) = spawner_entity(&data) else {
+            return;
+        };
+        let spawn_range = f64::from(s.spawn_range.max(0));
+        let mut spawned = false;
+        for _ in 0..s.spawn_count.max(0) {
+            let x = pos[0] + (rand::random::<f64>() - rand::random::<f64>()) * spawn_range + 0.5;
+            let y = pos[1] + f64::from((rand::random::<u32>() % 3) as i32 - 1);
+            let z = pos[2] + (rand::random::<f64>() - rand::random::<f64>()) * spawn_range + 0.5;
+            let cell = [x.floor() as i32, y.floor() as i32, z.floor() as i32];
+            if !self.spawner_fits(species, cell) {
+                continue;
+            }
+            if self.spawner_nearby(pos, s.spawn_range, species) >= s.max_nearby as usize {
+                break;
+            }
+            let yaw = rand::random::<f32>() * 360.0;
+            if self
+                .spawn_mob_spawner(species, [x, y, z], yaw, entity)
+                .is_some()
+            {
+                spawned = true;
+            }
+        }
+        if spawned {
+            let at = [
+                pos[0].floor() as i32,
+                pos[1].floor() as i32,
+                pos[2].floor() as i32,
+            ];
+            self.hub.send(
+                None,
+                play::level_event(self.ids.level_event, 2004, at, 0, false),
+            );
+        }
+        let span = s.max_delay.saturating_sub(s.min_delay).max(0) + 1;
+        let delay = s.min_delay + (rand::random::<f64>() * f64::from(span)) as i32;
+        s.delay = delay.max(1);
+    }
+
     pub(super) fn tick_minecarts(&self) {
         if self.sim().minecarts.lock().unwrap().is_empty() {
             return;
@@ -1042,6 +1258,7 @@ impl PlayPlan {
                         }
                     }
                     Variant::Hopper if e.enabled => hoppers.push((id, e.cart.pos)),
+                    Variant::Spawner => self.tick_spawner(e, &players),
                     _ => {}
                 }
                 // Под мир — исчезнуть (`checkBelowWorld`).
@@ -1304,6 +1521,7 @@ impl PlayPlan {
                 e.cart.push = [float("PushX").unwrap_or(0.0), float("PushZ").unwrap_or(0.0)];
             }
             Variant::Tnt => e.fuse = int("fuse").unwrap_or(-1) as i32,
+            Variant::Spawner => e.spawner = SpawnerState::load(c),
             Variant::CommandBlock => {
                 e.command = c
                     .get("Command")
@@ -1398,6 +1616,7 @@ impl PlayPlan {
                     Variant::Tnt => {
                         c.insert("fuse".into(), Tag::Int(e.fuse));
                     }
+                    Variant::Spawner => e.spawner.save(&mut c),
                     Variant::CommandBlock => {
                         c.insert("Command".into(), Tag::String(e.command.clone()));
                         c.insert("TrackOutput".into(), Tag::Byte(i8::from(e.track_output)));
@@ -1444,7 +1663,70 @@ mod tests {
         );
         assert_eq!(Variant::CommandBlock.drop_name(), "minecraft:minecart");
         assert_eq!(Variant::CommandBlock.size(), 0);
-        assert_eq!(Variant::ALL.len(), 6);
+        assert_eq!(Variant::ALL.len(), 7);
+        assert_eq!(
+            Variant::of("minecraft:spawner_minecart"),
+            Some(Variant::Spawner)
+        );
+        assert_eq!(Variant::Spawner.drop_name(), "minecraft:minecart");
+    }
+
+    #[test]
+    fn spawner_state_reads_nbt_and_picks_weighted_data() {
+        let zombie = Compound::from([("id".into(), Tag::String("minecraft:zombie".into()))]);
+        let skeleton = Compound::from([(
+            "entity".into(),
+            Tag::Compound(Compound::from([(
+                "id".into(),
+                Tag::String("minecraft:skeleton".into()),
+            )])),
+        )]);
+        let c = Compound::from([
+            ("Delay".into(), Tag::Short(7)),
+            ("MinSpawnDelay".into(), Tag::Short(20)),
+            ("MaxSpawnDelay".into(), Tag::Short(40)),
+            ("SpawnCount".into(), Tag::Short(2)),
+            ("MaxNearbyEntities".into(), Tag::Short(3)),
+            ("RequiredPlayerRange".into(), Tag::Short(9)),
+            ("SpawnRange".into(), Tag::Short(2)),
+            ("SpawnData".into(), Tag::Compound(zombie)),
+            (
+                "SpawnPotentials".into(),
+                Tag::List(vec![
+                    Tag::Compound(Compound::from([
+                        ("weight".into(), Tag::Int(1)),
+                        ("data".into(), Tag::Compound(skeleton.clone())),
+                    ])),
+                    Tag::Compound(Compound::from([
+                        ("weight".into(), Tag::Int(3)),
+                        ("data".into(), Tag::Compound(skeleton)),
+                    ])),
+                ]),
+            ),
+        ]);
+        let s = SpawnerState::load(&c);
+        assert_eq!(
+            (
+                s.delay,
+                s.min_delay,
+                s.max_delay,
+                s.spawn_count,
+                s.max_nearby,
+                s.required_player_range,
+                s.spawn_range
+            ),
+            (7, 20, 40, 2, 3, 9, 2)
+        );
+        let picked = s.next_data(0.0).unwrap();
+        let (species, _) = spawner_entity(&picked).unwrap();
+        assert_eq!(species, crate::mobs::Species::Skeleton);
+        assert_eq!(
+            spawner_entity(&s.spawn_data.clone().unwrap()).unwrap().0,
+            crate::mobs::Species::Zombie
+        );
+        let mut back = Compound::new();
+        s.save(&mut back);
+        assert_eq!(SpawnerState::load(&back).spawn_count, 2);
     }
 
     #[test]
