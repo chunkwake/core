@@ -88,6 +88,11 @@ final class MobImpl {
         "bee", "squid", "dolphin", "tropical_fish", "pufferfish",
         "axolotl",
         "donkey",
+        "blaze",
+        "wither_skeleton",
+        "magma_cube",
+        "guardian",
+        "zombified_piglin",
     };
 
     /** Вид для {@link EntityType}; {@code null} — такого моба сервер не умеет. */

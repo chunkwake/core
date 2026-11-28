@@ -2094,7 +2094,10 @@ mod tests {
             Some(chunkwake_net::mobs::Species::Witch)
         );
         assert_eq!((monster.entries[0].min, monster.entries[0].max), (1, 1));
-        assert_eq!(monster.entries[1].species, None, "blaze пока не заведён");
+        assert_eq!(
+            monster.entries[1].species,
+            Some(chunkwake_net::mobs::Species::Blaze)
+        );
         assert_eq!((monster.entries[1].min, monster.entries[1].max), (2, 3));
         let creature = &parsed["creature"];
         assert!(creature.full_box);

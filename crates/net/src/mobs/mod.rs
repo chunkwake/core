@@ -107,6 +107,7 @@ pub fn random_equipment(
             }
         }
         Species::Skeleton => out.push((0, "minecraft:bow")),
+        Species::WitherSkeleton => out.push((0, "minecraft:stone_sword")),
         _ => {}
     }
     out
@@ -308,6 +309,11 @@ pub enum Species {
     Pufferfish,
     Axolotl,
     Donkey,
+    Blaze,
+    WitherSkeleton,
+    MagmaCube,
+    Guardian,
+    ZombifiedPiglin,
 }
 
 /// Всё о виде в одном месте. Встроенные значения — запасные: при старте
@@ -380,7 +386,7 @@ const fn base(name: &'static str, sound: &'static str, loot: &'static str) -> Sp
 
 /// Встроенная таблица в порядке [`Species::ALL`]: числа из `createAttributes`
 /// и `EntityType` 26.3.
-const BUILTIN: [SpeciesInfo; 39] = [
+const BUILTIN: [SpeciesInfo; 44] = [
     SpeciesInfo {
         size: (0.9, 1.4),
         eye_height: 1.3,
@@ -913,6 +919,84 @@ const BUILTIN: [SpeciesInfo; 39] = [
             "minecraft:entities/donkey",
         )
     },
+    SpeciesInfo {
+        category: Category::Monster,
+        size: (0.6, 1.8),
+        eye_height: 1.53,
+        max_health: 20.0,
+        speed: 0.23,
+        follow_range: 48.0,
+        attack_damage: 6.0,
+        fire_immune: true,
+        ambient: true,
+        volume: 1.0,
+        ..base(
+            "minecraft:blaze",
+            "minecraft:entity.blaze",
+            "minecraft:entities/blaze",
+        )
+    },
+    SpeciesInfo {
+        category: Category::Monster,
+        size: (0.7, 2.4),
+        eye_height: 2.1,
+        max_health: 20.0,
+        speed: 0.25,
+        follow_range: 16.0,
+        attack_damage: 2.0,
+        fire_immune: true,
+        ..base(
+            "minecraft:wither_skeleton",
+            "minecraft:entity.wither_skeleton",
+            "minecraft:entities/wither_skeleton",
+        )
+    },
+    SpeciesInfo {
+        category: Category::Monster,
+        size: (0.52, 0.52),
+        eye_height: 0.325,
+        max_health: 1.0,
+        speed: 0.2,
+        attack_damage: 1.0,
+        volume: 0.4,
+        fire_immune: true,
+        ambient: false,
+        ..base(
+            "minecraft:magma_cube",
+            "minecraft:entity.magma_cube",
+            "minecraft:entities/magma_cube",
+        )
+    },
+    SpeciesInfo {
+        category: Category::Monster,
+        size: (0.85, 0.85),
+        eye_height: 0.425,
+        max_health: 30.0,
+        speed: 0.5,
+        follow_range: 16.0,
+        attack_damage: 6.0,
+        ..base(
+            "minecraft:guardian",
+            "minecraft:entity.guardian",
+            "minecraft:entities/guardian",
+        )
+    },
+    SpeciesInfo {
+        category: Category::Monster,
+        size: (0.6, 1.95),
+        eye_height: 1.79,
+        max_health: 20.0,
+        speed: 0.23,
+        follow_range: 35.0,
+        attack_damage: 5.0,
+        armor: 2.0,
+        fire_immune: true,
+        ..base(
+            "minecraft:zombified_piglin",
+            "minecraft:entity.zombified_piglin",
+            "minecraft:entities/zombified_piglin",
+        )
+    },
 ];
 
 static INSTALLED: std::sync::OnceLock<Vec<SpeciesInfo>> = std::sync::OnceLock::new();
@@ -952,7 +1036,7 @@ fn merge(b: &SpeciesInfo, types: &[chunkwake_data::world::EntityTypeInfo]) -> Sp
 }
 
 impl Species {
-    pub const ALL: [Species; 39] = [
+    pub const ALL: [Species; 44] = [
         Species::Cow,
         Species::Pig,
         Species::Sheep,
@@ -992,6 +1076,11 @@ impl Species {
         Species::Pufferfish,
         Species::Axolotl,
         Species::Donkey,
+        Species::Blaze,
+        Species::WitherSkeleton,
+        Species::MagmaCube,
+        Species::Guardian,
+        Species::ZombifiedPiglin,
     ];
 
     /// Данные вида: выгрузка, если она установлена, иначе встроенные.
@@ -1023,6 +1112,11 @@ impl Species {
 
     pub fn is_monster(self) -> bool {
         self.category() == Category::Monster
+    }
+
+    /// `AbstractCubeMob`: слизь и магмовый куб.
+    pub fn is_cube(self) -> bool {
+        matches!(self, Species::Slime | Species::MagmaCube)
     }
 
     /// Животное: растёт, любит, плодится (`Animal`). Детёныш зомби не растёт.
@@ -1518,7 +1612,7 @@ impl Mob {
 
     /// Скорость с поправкой детёныша зомби (`Zombie.SPEED_MODIFIER_BABY`: +50 % базы).
     pub fn speed(&self) -> f64 {
-        let base = if self.species == Species::Slime {
+        let base = if self.species.is_cube() {
             cube::speed(self.cube_size)
         } else if matches!(self.species, Species::Zombie | Species::Drowned) && self.is_baby() {
             self.species.speed() * 1.5
@@ -1531,7 +1625,7 @@ impl Mob {
     /// Высота глаз над ногами с учётом детёныша.
     pub fn eye_height(&self) -> f64 {
         let eye = self.species.eye_height();
-        if self.species == Species::Slime {
+        if self.species.is_cube() {
             return eye * f64::from(self.cube_size);
         }
         if self.is_baby() { eye * 0.5 } else { eye }
@@ -1576,7 +1670,7 @@ impl Mob {
     /// Ширина и высота с учётом детёныша (`getScale` 0.5).
     pub fn size(&self) -> (f64, f64) {
         let (w, h) = self.species.size();
-        if self.species == Species::Slime {
+        if self.species.is_cube() {
             let k = f64::from(self.cube_size);
             return (w * k, h * k);
         }
@@ -1589,7 +1683,7 @@ impl Mob {
 
     /// Атрибут `max_health`: у слизня — квадрат размера (`setSize`).
     pub fn max_health(&self) -> f32 {
-        if self.species == Species::Slime {
+        if self.species.is_cube() {
             (self.cube_size * self.cube_size) as f32
         } else {
             self.species.max_health()
@@ -1598,7 +1692,7 @@ impl Mob {
 
     /// Атрибут `attack_damage`: у слизня - размер.
     pub fn attack_damage(&self) -> f32 {
-        let base = if self.species == Species::Slime {
+        let base = if self.species.is_cube() {
             self.cube_size as f32
         } else {
             self.species.attack_damage()
@@ -1696,7 +1790,7 @@ impl Mob {
 
     /// Опыт за убийство игроком: у слизня `xpReward` = размер.
     pub fn xp(&self, r: f64) -> i32 {
-        if self.species == Species::Slime {
+        if self.species.is_cube() {
             self.cube_size
         } else {
             self.species.xp(self.is_baby(), r)
@@ -1705,7 +1799,7 @@ impl Mob {
 
     /// `getSoundVolume`: у слизня 0.4 × размер.
     pub fn volume(&self) -> f32 {
-        if self.species == Species::Slime {
+        if self.species.is_cube() {
             0.4 * self.cube_size as f32
         } else {
             self.species.volume()
@@ -1723,7 +1817,7 @@ impl Mob {
             };
             return format!("{base}.{kind}");
         }
-        if self.species == Species::Slime && self.cube_size <= 1 {
+        if self.species.is_cube() && self.cube_size <= 1 {
             format!("{}.{kind}_small", self.species.sound())
         } else {
             format!("{}.{kind}", self.species.sound())
@@ -2170,7 +2264,8 @@ fn navigation_for(species: Species) -> Navigation {
         | Species::GlowSquid
         | Species::Squid
         | Species::TropicalFish
-        | Species::Pufferfish => Navigation::water(false),
+        | Species::Pufferfish
+        | Species::Guardian => Navigation::water(false),
         Species::Dolphin => Navigation::water(true),
         Species::Bat | Species::Phantom => Navigation::flying(),
         Species::Bee => Navigation::flying(),
@@ -2193,6 +2288,7 @@ pub fn walker(m: &Mob, w: &World, difficulty: u8, in_water: bool) -> path::Walke
             | Species::Dolphin
             | Species::TropicalFish
             | Species::Pufferfish
+            | Species::Guardian
     );
     path::Walker {
         pos: m.pos,
@@ -2786,7 +2882,7 @@ fn server_ai_step(m: &mut Mob, w: &World, s: &mut Senses) {
     if let Some((to, speed)) = m.nav.tick(w, &walk, m.species.follow_range()) {
         m.move_ctl.set_wanted(to, speed);
     }
-    if m.species == Species::Slime {
+    if m.species.is_cube() {
         // `CubeMobMoveControl` сам ставит голову и тело; `LookControl` не трогает.
         cube::move_control(m, s.rand);
     } else {
@@ -2960,7 +3056,7 @@ pub fn tick(m: &mut Mob, w: &World, s: &mut Senses) -> bool {
     if m.species == Species::Spider {
         m.climbing = blocked;
     }
-    if m.species == Species::Slime {
+    if m.species.is_cube() {
         cube::after_tick(m);
         // `Player.aiStep` → `Slime.playerTouch`: игрок, чья рамка (раздутая
         // на 1, 0.5, 1) задевает слизня, получает удар, если тот в досягаемости
@@ -5145,6 +5241,104 @@ mod tests {
     }
 
     /// Спрут: данные вида, лут и водная навигация.
+    #[test]
+    fn structure_mobs_data_matches_vanilla() {
+        let cases = [
+            (
+                Species::Blaze,
+                "minecraft:blaze",
+                (0.6, 1.8),
+                20.0,
+                true,
+                "minecraft:entities/blaze",
+            ),
+            (
+                Species::WitherSkeleton,
+                "minecraft:wither_skeleton",
+                (0.7, 2.4),
+                20.0,
+                true,
+                "minecraft:entities/wither_skeleton",
+            ),
+            (
+                Species::MagmaCube,
+                "minecraft:magma_cube",
+                (0.52, 0.52),
+                1.0,
+                true,
+                "minecraft:entities/magma_cube",
+            ),
+            (
+                Species::Guardian,
+                "minecraft:guardian",
+                (0.85, 0.85),
+                30.0,
+                false,
+                "minecraft:entities/guardian",
+            ),
+            (
+                Species::ZombifiedPiglin,
+                "minecraft:zombified_piglin",
+                (0.6, 1.95),
+                20.0,
+                true,
+                "minecraft:entities/zombified_piglin",
+            ),
+        ];
+        for (species, name, size, health, fire_immune, loot) in cases {
+            let info = species.info();
+            assert_eq!(Species::from_name(name), Some(species));
+            assert_eq!(info.name, name);
+            assert_eq!(info.size, size);
+            assert_eq!(info.max_health, health);
+            assert_eq!(info.fire_immune, fire_immune);
+            assert_eq!(info.category, Category::Monster);
+            assert_eq!(info.loot, loot);
+        }
+        assert_eq!(Species::Blaze.attack_damage(), 6.0);
+        assert_eq!(Species::Guardian.follow_range(), 16.0);
+        assert_eq!(Species::WitherSkeleton.eye_height(), 2.1);
+    }
+
+    #[test]
+    fn magma_cube_uses_cube_stats_and_sounds() {
+        let mut m = Mob::new(Species::MagmaCube, [0.5, 64.0, 0.5], 1);
+        m.set_size(2, true);
+        assert_eq!(m.max_health(), 4.0);
+        assert_eq!(m.attack_damage(), 2.0);
+        assert_eq!(m.size(), (1.04, 1.04));
+        assert_eq!(m.volume(), 0.8);
+        assert_eq!(m.sound("hurt"), "minecraft:entity.magma_cube.hurt");
+        m.set_size(1, true);
+        assert_eq!(m.sound("hurt"), "minecraft:entity.magma_cube.hurt_small");
+        assert!(m.species.is_cube());
+        assert!(!Species::Guardian.is_cube());
+    }
+
+    #[test]
+    fn structure_mob_goals_are_hostile() {
+        let has = |s: Species, f: fn(&goals::Goal) -> bool| {
+            goals::for_species(s).0.goals.iter().any(|g| f(&g.goal))
+        };
+        assert!(has(Species::Blaze, |g| matches!(g, goals::Goal::Melee(_))));
+        assert!(has(Species::WitherSkeleton, |g| matches!(
+            g,
+            goals::Goal::Melee(_)
+        )));
+        assert!(has(Species::MagmaCube, |g| matches!(
+            g,
+            goals::Goal::CubeAttack { .. }
+        )));
+        assert!(has(Species::Guardian, |g| matches!(
+            g,
+            goals::Goal::Melee(_)
+        )));
+        // Зомбифицированный пиглин нейтрален: целится только после удара.
+        let (_, targets) = goals::for_species(Species::ZombifiedPiglin);
+        assert_eq!(targets.goals.len(), 1);
+        assert!(matches!(targets.goals[0].goal, goals::Goal::HurtBy { .. }));
+    }
+
     #[test]
     fn squid_species_data_and_water_navigation() {
         assert_eq!(Species::Squid.max_health(), 10.0);

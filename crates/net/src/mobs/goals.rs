@@ -1686,7 +1686,7 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
         }
         // `AbstractCubeMob.registerGoals` + `Slime`: атака (2) после
         // направления и прыжков; цель — игрок, железный голем (3) пропущен.
-        Species::Slime => {
+        Species::Slime | Species::MagmaCube => {
             return (
                 Selector::new(vec![
                     (1, Goal::CubeFloat),
@@ -1701,6 +1701,47 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
                     (2, Goal::CubeAttack { tired: 0 }),
                 ]),
                 Selector::new(vec![nearest(1, false)]),
+            );
+        }
+        // `Blaze`: `BlazeAttackGoal` и полёт; пока ближний бой и обычное
+        // блуждание, как у прочих монстров.
+        Species::Blaze => {
+            return (
+                Selector::new(vec![
+                    (1, Goal::Float),
+                    (3, Goal::Melee(Box::new(Melee::new(1.0, false)))),
+                    stroll_at(5, 1.0),
+                    look(6, 8.0),
+                    around(6),
+                ]),
+                Selector::new(vec![hurt_by(1, true), nearest(2, false)]),
+            );
+        }
+        // `WitherSkeleton`: ближний бой, цель — игрок.
+        Species::WitherSkeleton => {
+            return (
+                Selector::new(vec![
+                    (1, Goal::Float),
+                    (3, Goal::Melee(Box::new(Melee::new(1.0, true)))),
+                    stroll_at(5, 1.0),
+                    look(6, 8.0),
+                    around(6),
+                ]),
+                Selector::new(vec![hurt_by(1, true), nearest(2, false)]),
+            );
+        }
+        // `ZombifiedPiglin`: нейтрален, пока его не ударят; без
+        // `NearestAttackableTargetGoal` по умолчанию.
+        Species::ZombifiedPiglin => {
+            return (
+                Selector::new(vec![
+                    (1, Goal::Float),
+                    (3, Goal::Melee(Box::new(Melee::new(1.0, true)))),
+                    stroll_at(5, 1.0),
+                    look(6, 8.0),
+                    around(6),
+                ]),
+                Selector::new(vec![hurt_by(1, true)]),
             );
         }
         // Аксолотль: вода/суша (`AmphibiousPathNavigation`), охота на
@@ -1773,6 +1814,29 @@ pub fn for_species(species: Species) -> (Selector, Selector) {
             );
         }
         // Летучая мышь и пчела: движение отдельной строкой.
+        // `Guardian`: `RandomSwimGoal` и преследование цели; луча пока нет.
+        Species::Guardian => {
+            let mut attack = Melee::new(1.0, false);
+            attack.follow = true;
+            return (
+                Selector::new(vec![
+                    (2, Goal::Melee(Box::new(attack))),
+                    (
+                        4,
+                        Goal::Stroll {
+                            speed: 1.0,
+                            interval: 80,
+                            avoid_water: false,
+                            swim: true,
+                            to: [0.0; 3],
+                        },
+                    ),
+                    look(6, 8.0),
+                    around(7),
+                ]),
+                Selector::new(vec![hurt_by(1, true), nearest(2, false)]),
+            );
+        }
         Species::Bat | Species::Bee => {
             return (Selector::default(), Selector::default());
         }

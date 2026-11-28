@@ -139,7 +139,9 @@ impl MobMeta {
                 out.push((16, Meta::Byte(u8::from(self.climbing))));
             }
             // `AbstractCubeMob.ID_SIZE` (после полей `AgeableMob` на 16 и 17).
-            Species::Slime if old.is_none_or(|o| o.cube_size != self.cube_size) => {
+            Species::Slime | Species::MagmaCube
+                if old.is_none_or(|o| o.cube_size != self.cube_size) =>
+            {
                 out.push((18, Meta::Int(self.cube_size)));
             }
             // `LivingEntity.DATA_LIVING_ENTITY_FLAGS`: 1 — тянет предмет основной рукой.
@@ -587,7 +589,7 @@ impl PlayPlan {
             m.color = sheep_color(rand::random());
         }
         // `Slime.finalizeSpawn`: случайный размер 1, 2 или 4.
-        if finalize && species == Species::Slime {
+        if finalize && species.is_cube() {
             let special = mb::cube::special_multiplier(
                 self.difficulty().id(),
                 self.day_time.load(Ordering::Relaxed),
@@ -1835,7 +1837,7 @@ impl PlayPlan {
                 gone.iter()
                     .filter(|id| {
                         mobs.get(id)
-                            .is_some_and(|e| e.mob.species == Species::Slime && e.mob.cube_size > 1)
+                            .is_some_and(|e| e.mob.species.is_cube() && e.mob.cube_size > 1)
                     })
                     .map(|&id| (id, 2 + rand::random::<u32>().rem_euclid(3) as i32))
                     .collect()
@@ -5346,7 +5348,7 @@ pub(super) fn mob_to_nbt(
             );
         }
         // `AbstractCubeMob.addAdditionalSaveData`.
-        Species::Slime => {
+        Species::Slime | Species::MagmaCube => {
             c.insert("Size".into(), Tag::Int(m.cube_size - 1));
             c.insert("wasOnGround".into(), Tag::Byte(i8::from(m.was_on_ground)));
         }
@@ -5444,7 +5446,7 @@ pub(super) fn mob_from_nbt(
         Some(Tag::Byte(v)) => Some(*v),
         _ => None,
     };
-    if species == Species::Slime {
+    if species.is_cube() {
         // `readAdditionalSaveData`: `setSize(Size + 1, false)`.
         m.set_size(int("Size").unwrap_or(0) + 1, false);
         m.was_on_ground = byte("wasOnGround").is_some_and(|b| b != 0);
@@ -6185,7 +6187,7 @@ impl PlayPlan {
                         Some("sheared") => m.sheared = f.get(3) == Some(&"1"),
                         Some("color") => m.color = num(3).unwrap_or(0.0) as u8 & 15,
                         // `CraftSlime.setSize`: `setSize(size, true)`.
-                        Some("size") if m.species == Species::Slime => {
+                        Some("size") if m.species.is_cube() => {
                             m.set_size(num(3).unwrap_or(1.0) as i32, true);
                         }
                         Some("name") => {
@@ -6429,8 +6431,8 @@ impl PlayPlan {
         for [dx, dz] in mb::cube::split_offsets(count, f64::from(width)) {
             let pos = [m.pos[0] + dx, m.pos[1] + 0.5, m.pos[2] + dz];
             let yaw = rand::random::<f32>() * 360.0;
-            let (name, persistent) = (m.custom_name.clone(), m.persistent);
-            self.spawn_mob_with(Species::Slime, pos, yaw, false, Some("SLIME_SPLIT"), |c| {
+            let (name, persistent, species) = (m.custom_name.clone(), m.persistent, m.species);
+            self.spawn_mob_with(species, pos, yaw, false, Some("SLIME_SPLIT"), |c| {
                 c.set_size(size, true);
                 c.custom_name = name;
                 c.persistent = persistent;
@@ -6486,17 +6488,32 @@ impl PlayPlan {
         ) {
             return;
         }
-        // `AbstractCubeMob.dealDamage`: звук удара после прошедшего урона.
-        if species == Species::Slime {
-            let pitch = (rand::random::<f32>() - rand::random::<f32>()) * 0.2 + 1.0;
-            self.play_sound(
-                None,
-                "minecraft:entity.slime.attack",
-                crate::sounds::HOSTILE,
-                from,
-                1.0,
-                pitch,
+        // `WitherSkeleton.doHurtTarget`: иссушение на 10 секунд.
+        if species == Species::WitherSkeleton
+            && let Some(id) = self.survival.effects.get("minecraft:wither").copied()
+        {
+            let _ = self.push_control(
+                target,
+                Control::Effect {
+                    effect: crate::survival::Effect::plain(id, 0, 200),
+                    force: false,
+                    command: false,
+                },
             );
+        }
+        // `MagmaCube.doHurtTarget`: поджигает цель на 5 секунд.
+        if species == Species::MagmaCube {
+            let _ = self.push_control(target, Control::Ignite(5));
+        }
+        // `AbstractCubeMob.dealDamage`: звук удара после прошедшего урона.
+        if species.is_cube() {
+            let pitch = (rand::random::<f32>() - rand::random::<f32>()) * 0.2 + 1.0;
+            let sound = if species == Species::Slime {
+                "minecraft:entity.slime.attack"
+            } else {
+                "minecraft:entity.magma_cube.squish"
+            };
+            self.play_sound(None, sound, crate::sounds::HOSTILE, from, 1.0, pitch);
         }
         let d = [from[0] - pos[0], from[2] - pos[2]];
         let len = (d[0] * d[0] + d[1] * d[1]).sqrt();
@@ -6792,7 +6809,7 @@ impl PlayPlan {
             return false;
         }
         // `SpawnPlacementTypes.IN_WATER`: другая ветка правил, без опоры.
-        if species.category().is_water() {
+        if species.category().is_water() || species == Species::Guardian {
             return self.water_spawn_fits(w, species, pos, light);
         }
         let below = [pos[0], pos[1] - 1, pos[2]];
@@ -6868,6 +6885,11 @@ impl PlayPlan {
                 && mb::cube::slime_chunk(pos[0] >> 4, pos[2] >> 4, self.seed)
                 && pos[1] < 40;
         }
+        // `MagmaCube.checkMagmaCubeSpawnRules` — только сложность; тьма не
+        // проверяется, поэтому в крепости Ада они спавнятся при любом свете.
+        if species == Species::MagmaCube {
+            return true;
+        }
         match species.category() {
             mb::Category::Monster => {
                 let mut roll = || rng.r#gen::<f64>();
@@ -6904,6 +6926,17 @@ impl PlayPlan {
                 .and_then(|s| crate::fluids::state_fluid(&self.survival.placement, s))
                 .is_some_and(|f| f.kind == crate::fluids::Kind::Water)
         };
+        if species == Species::Guardian {
+            // `SpawnPlacements.Type.IN_WATER` без высотного окна WaterAnimal;
+            // `Guardian.checkSpawnRules` — только сложность (уже проверена).
+            if !water(pos) {
+                return false;
+            }
+            let above = [pos[0], pos[1] + 1, pos[2]];
+            return self
+                .block(above)
+                .is_none_or(|s| !mb::full_block(self.shape_at(Some(s), above)));
+        }
         if species.category() == mb::Category::Axolotls {
             // `Axolotl.checkAxolotlSpawnRules`: только тег
             // `#minecraft:axolotls_spawnable_on` под водой; остальное — IN_WATER.
