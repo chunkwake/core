@@ -24,6 +24,20 @@ const MAX_CELEBRATION_TICKS: i32 = 600;
 /// `Raid.HERO_OF_THE_VILLAGE_DURATION`.
 const HERO_OF_THE_VILLAGE_DURATION: i32 = 48_000;
 
+/// `VillageSiege`: 20 зомби, `nextSpawnTime` 2 тика, проверка ночи.
+fn siege_night(day_time: i64) -> bool {
+    (13_000..23_000).contains(&day_time.rem_euclid(24_000))
+}
+
+#[derive(Default)]
+pub(super) struct SiegeState {
+    center: Option<[i32; 3]>,
+    remaining: i32,
+    next: i32,
+    /// Ночь, для которой бросок 1/10 уже сделан.
+    rolled: i64,
+}
+
 /// Виды разбойников (`Raid.RaiderType`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum RaiderKind {
@@ -452,6 +466,95 @@ impl PlayPlan {
     }
 
     /// Тик рейдов: старт по Bad Omen у кроватей, волны, босс-бар, победа.
+    /// `VillageSiege.tick`: ночью раз в ночь бросок 1/10, затем 20 зомби
+    /// вокруг деревни по одному раз в 2 тика.
+    pub(super) fn siege_tick(&self) {
+        if self.difficulty() == survival::Difficulty::Peaceful {
+            *self.siege.lock().unwrap() = SiegeState::default();
+            return;
+        }
+        let night = siege_night(self.day_time.load(Ordering::Relaxed));
+        let mut siege = self.siege.lock().unwrap();
+        if !night {
+            *siege = SiegeState::default();
+            return;
+        }
+        if siege.center.is_none() {
+            let night_index = self.day_time.load(Ordering::Relaxed).div_euclid(24_000);
+            if siege.rolled == night_index {
+                return;
+            }
+            siege.rolled = night_index;
+            if !rand::random::<u8>().is_multiple_of(10) {
+                return;
+            }
+            let players: Vec<[f64; 3]> = self
+                .live
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|l| l.dimension == Dimension::Overworld)
+                .map(|l| l.pos)
+                .collect();
+            'players: for pos in players {
+                let feet = [
+                    pos[0].floor() as i32,
+                    pos[1].floor() as i32,
+                    pos[2].floor() as i32,
+                ];
+                if !self.raid_bed_near(feet, 32) {
+                    continue;
+                }
+                for _ in 0..10 {
+                    let angle = rand::random::<f32>() * std::f32::consts::TAU;
+                    let center = [
+                        feet[0] + (angle.cos() * 32.0) as i32,
+                        feet[1],
+                        feet[2] + (angle.sin() * 32.0) as i32,
+                    ];
+                    if self
+                        .with_world(|w| self.surface_y(w, center[0], center[2]))
+                        .is_some()
+                    {
+                        siege.center = Some(center);
+                        siege.remaining = 20;
+                        siege.next = 0;
+                        break 'players;
+                    }
+                }
+            }
+            return;
+        }
+        let Some(center) = siege.center else {
+            return;
+        };
+        if siege.next > 0 {
+            siege.next -= 1;
+            return;
+        }
+        siege.next = 2;
+        if siege.remaining <= 0 {
+            *siege = SiegeState::default();
+            return;
+        }
+        let x = center[0] + rand::random::<i32>().rem_euclid(17) - 8;
+        let z = center[2] + rand::random::<i32>().rem_euclid(17) - 8;
+        let Some(y) = self.with_world(|w| self.surface_y(w, x, z)) else {
+            return;
+        };
+        let at = [x, y, z];
+        if self.raid_bed_near(at, 32) && self.spawner_fits(crate::mobs::Species::Zombie, at) {
+            let _ = self.spawn_mob(
+                crate::mobs::Species::Zombie,
+                [f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5],
+                rand::random::<f32>() * 360.0,
+                false,
+                Some("VILLAGE_INVASION"),
+            );
+            siege.remaining -= 1;
+        }
+    }
+
     pub(super) fn raid_tick(&self) {
         if self.difficulty() == survival::Difficulty::Peaceful {
             // Мирная сложность снимает рейды вместе с их барами.
@@ -864,5 +967,16 @@ mod tests {
         assert_eq!(PlayPlan::raid_bar_progress(&r, 0.0), 0.0);
         r.wave_health = 0.0;
         assert_eq!(PlayPlan::raid_bar_progress(&r, 10.0), 0.0);
+    }
+
+    #[test]
+    fn siege_only_rolls_at_night() {
+        assert!(!siege_night(0));
+        assert!(!siege_night(12_999));
+        assert!(siege_night(13_000));
+        assert!(siege_night(22_999));
+        assert!(!siege_night(23_000));
+        assert!(!siege_night(24_000 + 100));
+        assert!(siege_night(24_000 + 13_000));
     }
 }

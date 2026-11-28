@@ -448,6 +448,8 @@ pub struct PlayPlan {
     pub(super) map_claims: Mutex<HashSet<(Dimension, [i32; 3])>>,
     /// Активные рейды (`Raid`): волны разбойников и `raid_win`.
     raids: Mutex<Vec<raids::Raid>>,
+    /// `VillageSiege`: ночная осада деревни.
+    siege: Mutex<raids::SiegeState>,
     /// Режим игры по умолчанию (`/defaultgamemode`).
     pub(crate) default_game_mode: std::sync::atomic::AtomicU8,
     /// Просьба сохранить мир (`/save-all`).
@@ -3886,6 +3888,7 @@ impl PlayPlan {
             command_storage: Mutex::new(HashMap::new()),
             map_claims: Mutex::new(HashSet::new()),
             raids: Mutex::new(Vec::new()),
+            siege: Mutex::new(raids::SiegeState::default()),
             trees,
             dynamic_factory,
             poi_tags,
@@ -20045,6 +20048,7 @@ impl PlayPlan {
 
     /// `ServerPlayer.tick` → `CriteriaTriggers.LOCATION`: раз в тик по позиции.
     fn tick_player_triggers(&self) {
+        self.siege_tick();
         self.raid_tick();
         let players: Vec<(Uuid, [f64; 3], Dimension, bool)> = self
             .hub

@@ -7192,7 +7192,7 @@ impl PlayPlan {
     }
 
     /// Верхний не воздушный блок столбца (карта высот `WORLD_SURFACE`).
-    fn surface_y(&self, w: &WorldView<'_>, x: i32, z: i32) -> Option<i32> {
+    pub(super) fn surface_y(&self, w: &WorldView<'_>, x: i32, z: i32) -> Option<i32> {
         let min_y = self.min_y();
         let top = min_y + self.template().height() as i32 - 1;
         (min_y..=top).rev().find(|&y| {
