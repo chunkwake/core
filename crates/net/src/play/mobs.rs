@@ -846,6 +846,14 @@ impl PlayPlan {
                 .map(|v| (v.uuid.as_u128(), v.pos))
                 .collect()
         };
+        // Вагонетки как транспорт для мобов (`Entity.startRiding`).
+        let cart_vehicles: FastMap<i32, ([f64; 3], f32, f64)> = {
+            let carts = self.sim().minecarts.lock().unwrap();
+            carts
+                .iter()
+                .map(|(&id, e)| (id, (e.cart.pos, e.cart.yaw, 0.13)))
+                .collect()
+        };
         {
             let mut mobs = self.sim().mobs.lock().unwrap();
             // Животные до тика: пары (`BreedGoal`) и родители (`FollowParentGoal`).
@@ -860,9 +868,12 @@ impl PlayPlan {
             // Карта строится, только если кто-то едет: обычно не едет никто.
             let vehicle_pos: FastMap<i32, ([f64; 3], f32, f64)> =
                 if mobs.values().any(|e| e.vehicle.is_some()) {
-                    mobs.iter()
+                    let mut map: FastMap<_, _> = mobs
+                        .iter()
                         .map(|(&id, e)| (id, (e.mob.pos, e.mob.yaw, e.mob.size().1)))
-                        .collect()
+                        .collect();
+                    map.extend(cart_vehicles);
+                    map
                 } else {
                     FastMap::default()
                 };

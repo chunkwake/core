@@ -50,6 +50,41 @@ fn command_ready(last_activated: i64, now: i64) -> bool {
     now.wrapping_sub(last_activated) >= COMMAND_ACTIVATION_DELAY
 }
 
+/// `EntitySelector.pushableBy` для вагонетки: игроки, железные големы,
+/// другие вагонетки и боссы не подбираются.
+fn mob_pickable(species: crate::mobs::Species) -> bool {
+    !matches!(
+        species,
+        crate::mobs::Species::IronGolem
+            | crate::mobs::Species::EnderDragon
+            | crate::mobs::Species::Wither
+            | crate::mobs::Species::EndCrystal
+    )
+}
+
+/// `pushAndPickupEntities`: только непустая и достаточно быстрая вагонетка.
+fn cart_picks_up(has_rider: bool, speed_sq: f64) -> bool {
+    !has_rider && speed_sq >= 0.01
+}
+
+/// Пересечение коробки моба с коробкой вагонетки, расширенной на 0.2
+/// по горизонтали (`AABB.inflate(0.2, 0, 0.2)`).
+fn mob_in_cart_pickup_box(cart: [f64; 3], mob: [f64; 3], width: f64, height: f64) -> bool {
+    let half = crate::minecart::WIDTH / 2.0 + 0.2;
+    let lo = [cart[0] - half, cart[1], cart[2] - half];
+    let hi = [
+        cart[0] + half,
+        cart[1] + crate::minecart::HEIGHT,
+        cart[2] + half,
+    ];
+    mob[0] + width * 0.5 > lo[0]
+        && mob[0] - width * 0.5 < hi[0]
+        && mob[1] + height > lo[1]
+        && mob[1] < hi[1]
+        && mob[2] + width * 0.5 > lo[2]
+        && mob[2] - width * 0.5 < hi[2]
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Variant {
     Plain,
@@ -248,6 +283,8 @@ pub(crate) struct MinecartEntry {
     variant: Variant,
     uuid: Uuid,
     rider: Option<(Uuid, i32)>,
+    /// Моб-пассажир (`Entity.startRiding` из `pushAndPickupEntities`).
+    mob_rider: Option<i32>,
     /// Последние клавиши водителя.
     input: u8,
     damage: f32,
@@ -299,6 +336,7 @@ impl MinecartEntry {
             variant,
             uuid: Uuid::from_u128(rand::random()),
             rider: None,
+            mob_rider: None,
             input: 0,
             damage: 0.0,
             hit_at: 0,
@@ -442,6 +480,8 @@ impl PlayPlan {
         }
         if let Some((_, rider)) = e.rider {
             out.push(play::set_passengers(self.ids.set_passengers, id, &[rider]));
+        } else if let Some(mob) = e.mob_rider {
+            out.push(play::set_passengers(self.ids.set_passengers, id, &[mob]));
         }
         out
     }
@@ -769,7 +809,7 @@ impl PlayPlan {
             let Some(e) = carts.get_mut(&cart) else {
                 return false;
             };
-            if e.rider.is_some() || e.variant != Variant::Plain {
+            if e.rider.is_some() || e.mob_rider.is_some() || e.variant != Variant::Plain {
                 return false;
             }
             e.rider = Some((uuid, entity_id));
@@ -948,6 +988,14 @@ impl PlayPlan {
         if let Some((rider, _)) = e.rider {
             self.unlink_rider(rider);
         }
+        if let Some(mob) = e.mob_rider {
+            let mut mobs = self.sim().mobs.lock().unwrap();
+            if let Some(entry) = mobs.get_mut(&mob)
+                && entry.vehicle == Some(id)
+            {
+                entry.vehicle = None;
+            }
+        }
         self.hub.remove_tracked(&[id]);
         if !drops {
             return;
@@ -1113,11 +1161,30 @@ impl PlayPlan {
             .values()
             .map(|p| (p.entry.uuid, p.pos, p.yaw))
             .collect();
+        // `EntitySelector.pushableBy`: кого может подобрать движущаяся
+        // вагонетка. Игроки, железные големы и другие вагонетки — нельзя.
+        let mob_candidates: Vec<(i32, [f64; 3], f64, f64)> = {
+            let mobs = self.sim().mobs.lock().unwrap();
+            mobs.iter()
+                .filter(|(_, e)| {
+                    e.mob.alive() && e.vehicle.is_none() && mob_pickable(e.mob.species)
+                })
+                .map(|(&id, e)| {
+                    let (w, h) = e.mob.size();
+                    (id, e.mob.pos, w, h)
+                })
+                .collect()
+        };
+        let mut picked: Vec<(i32, i32)> = Vec::new();
+        let mut stale_riders = Vec::new();
+        let live_mobs: std::collections::HashSet<i32> =
+            self.sim().mobs.lock().unwrap().keys().copied().collect();
         let track = PlanTrack(self);
         let mut packets = Vec::new();
         let mut riders = Vec::new();
         let mut pressed = Vec::new();
         let mut ejected = Vec::new();
+        let mut mob_ejected: Vec<(i32, i32, [f64; 3])> = Vec::new();
         let mut hoppers = Vec::new();
         let mut primed = Vec::new();
         let mut commands: Vec<(i32, String, [f64; 3])> = Vec::new();
@@ -1161,7 +1228,13 @@ impl PlayPlan {
                         e.cart.vel[2] -= dz * k;
                     }
                 }
-                e.cart.ridden = e.rider.is_some();
+                if let Some(mob) = e.mob_rider
+                    && !live_mobs.contains(&mob)
+                {
+                    e.mob_rider = None;
+                    stale_riders.push(id);
+                }
+                e.cart.ridden = e.rider.is_some() || e.mob_rider.is_some();
                 let intent = e
                     .rider
                     .and_then(|(r, _)| players.iter().find(|p| p.0 == r))
@@ -1207,6 +1280,9 @@ impl PlayPlan {
                             Variant::Plain if on => {
                                 if let Some((rider, _)) = e.rider.take() {
                                     ejected.push((id, rider));
+                                }
+                                if let Some(mob) = e.mob_rider.take() {
+                                    mob_ejected.push((id, mob, e.cart.pos));
                                 }
                             }
                             // `MinecartHopper`: включённый выключает воронку.
@@ -1305,6 +1381,25 @@ impl PlayPlan {
                     Variant::Spawner => self.tick_spawner(id, e, &players),
                     _ => {}
                 }
+                // `pushAndPickupEntities`: движущаяся пустая вагонетка
+                // подбирает моба в коробке с запасом 0.2.
+                if e.variant == Variant::Plain
+                    && cart_picks_up(e.rider.is_some() || e.mob_rider.is_some(), e.speed_sq())
+                {
+                    let pick = mob_candidates
+                        .iter()
+                        .filter(|(mob, _, _, _)| !picked.iter().any(|(_, m)| m == mob))
+                        .filter(|(_, pos, w, h)| mob_in_cart_pickup_box(e.cart.pos, *pos, *w, *h))
+                        .min_by(|a, b| {
+                            crate::mobs::dist2(a.1, e.cart.pos)
+                                .total_cmp(&crate::mobs::dist2(b.1, e.cart.pos))
+                        })
+                        .map(|(mob, _, _, _)| *mob);
+                    if let Some(mob) = pick {
+                        e.mob_rider = Some(mob);
+                        picked.push((id, mob));
+                    }
+                }
                 // Под мир — исчезнуть (`checkBelowWorld`).
                 if e.cart.pos[1] < self.min_y() as f64 - 64.0 {
                     ejected.push((id, Uuid::nil()));
@@ -1337,6 +1432,42 @@ impl PlayPlan {
                 if rider.is_nil() {
                     carts.remove(&id);
                 }
+            }
+        }
+        for id in stale_riders {
+            packets.push((id, play::set_passengers(self.ids.set_passengers, id, &[])));
+        }
+        if !picked.is_empty() {
+            let alive: Vec<i32> = self
+                .sim()
+                .minecarts
+                .lock()
+                .unwrap()
+                .keys()
+                .copied()
+                .collect();
+            let attached: Vec<(i32, i32)> = {
+                let mut mobs = self.sim().mobs.lock().unwrap();
+                picked
+                    .into_iter()
+                    .filter(|(cart, _)| alive.contains(cart))
+                    .filter(|(cart, mob)| {
+                        mobs.get_mut(mob).is_some_and(|e| {
+                            if e.vehicle.is_none() {
+                                e.vehicle = Some(*cart);
+                                true
+                            } else {
+                                false
+                            }
+                        })
+                    })
+                    .collect()
+            };
+            for (cart, mob) in attached {
+                packets.push((
+                    cart,
+                    play::set_passengers(self.ids.set_passengers, cart, &[mob]),
+                ));
             }
         }
         for (id, line, pos) in commands {
@@ -1375,6 +1506,21 @@ impl PlayPlan {
             } else {
                 self.unlink_rider(rider);
                 packets.push((id, play::set_passengers(self.ids.set_passengers, id, &[])));
+            }
+        }
+        if !mob_ejected.is_empty() {
+            let mut mobs = self.sim().mobs.lock().unwrap();
+            for (cart, mob, pos) in mob_ejected {
+                if let Some(e) = mobs.get_mut(&mob)
+                    && e.vehicle == Some(cart)
+                {
+                    e.vehicle = None;
+                    e.mob.pos = pos;
+                }
+                packets.push((
+                    cart,
+                    play::set_passengers(self.ids.set_passengers, cart, &[]),
+                ));
             }
         }
         if !packets.is_empty() {
@@ -1782,5 +1928,20 @@ mod tests {
         assert!(command_ready(100, 105));
         // Стартовое значение не мешает первому срабатыванию.
         assert!(command_ready(i64::MIN / 2, 0));
+    }
+
+    #[test]
+    fn mob_pickup_uses_inflated_box_and_speed() {
+        let cart = [0.0, 0.0, 0.0];
+        assert!(mob_in_cart_pickup_box(cart, [0.0, 0.0, 0.0], 0.6, 1.95));
+        assert!(mob_in_cart_pickup_box(cart, [0.8, 0.0, 0.0], 0.6, 1.95));
+        assert!(!mob_in_cart_pickup_box(cart, [1.2, 0.0, 0.0], 0.6, 1.95));
+        assert!(!mob_in_cart_pickup_box(cart, [0.0, 2.5, 0.0], 0.6, 1.95));
+        assert!(cart_picks_up(false, 0.01));
+        assert!(!cart_picks_up(true, 1.0));
+        assert!(!cart_picks_up(false, 0.009));
+        assert!(mob_pickable(crate::mobs::Species::Zombie));
+        assert!(mob_pickable(crate::mobs::Species::Cow));
+        assert!(!mob_pickable(crate::mobs::Species::IronGolem));
     }
 }
